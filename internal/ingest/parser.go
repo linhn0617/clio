@@ -37,6 +37,23 @@ func NewParser(startSeq int) *Parser {
 	return &Parser{seq: startSeq, clioToolUseIDs: map[string]bool{}}
 }
 
+// Seed preloads clio tool_use ids discovered in earlier ingest batches, so a
+// tool_result arriving later is still excluded.
+func (p *Parser) Seed(ids []string) {
+	for _, id := range ids {
+		p.clioToolUseIDs[id] = true
+	}
+}
+
+// ClioToolUseIDs returns every clio tool_use id seen (seeded + discovered).
+func (p *Parser) ClioToolUseIDs() []string {
+	out := make([]string, 0, len(p.clioToolUseIDs))
+	for id := range p.clioToolUseIDs {
+		out = append(out, id)
+	}
+	return out
+}
+
 // ParseLine parses one .jsonl line into zero or more messages plus event info.
 // A malformed line returns an error; callers decide whether to skip+warn.
 func (p *Parser) ParseLine(line []byte) ([]model.Message, EventInfo, error) {
@@ -51,7 +68,10 @@ func (p *Parser) ParseLine(line []byte) ([]model.Message, EventInfo, error) {
 		return nil, info, nil // non-conversational event: skip, but keep cwd/ts
 	}
 
-	raw := string(line)
+	// Redact the whole event line too: raw_json is surfaced by `clio show
+	// --format raw/json`, so storing it unredacted would leak secrets that the
+	// content redaction removed.
+	raw := Redact(string(line))
 	var msgs []model.Message
 
 	add := func(role, content string, tcs []model.ToolCall) {

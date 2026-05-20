@@ -130,6 +130,12 @@ func mutate(configPath string, fn func(map[string]any) error) error {
 	if err := os.Rename(tmpName, configPath); err != nil {
 		return err
 	}
+	// fsync the parent dir so the rename survives a crash on filesystems that
+	// don't order metadata with data.
+	if dirF, derr := os.Open(dir); derr == nil {
+		_ = dirF.Sync()
+		dirF.Close()
+	}
 
 	// Success: backup no longer needed.
 	os.Remove(backup)

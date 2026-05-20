@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -10,6 +9,7 @@ import (
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/search"
 	"github.com/linhn0617/clio/internal/sessions"
+	"github.com/linhn0617/clio/internal/timeutil"
 )
 
 const (
@@ -19,30 +19,11 @@ const (
 	maxReadLimit       = 200
 )
 
-// parseSince accepts "7d"/"12h"/"30m", an absolute date, or "" (=> 0).
+// parseSince is the MCP-side wrapper: same parsing as the CLI, but a bad value
+// degrades to 0 (no bound) rather than erroring out a tool call.
 func parseSince(s string) int64 {
-	if s == "" {
-		return 0
-	}
-	if n := len(s); n >= 2 {
-		var num int
-		if _, err := fmt.Sscanf(s, "%d", &num); err == nil {
-			switch s[n-1] {
-			case 'd':
-				return time.Now().Add(-time.Duration(num) * 24 * time.Hour).Unix()
-			case 'h':
-				return time.Now().Add(-time.Duration(num) * time.Hour).Unix()
-			case 'm':
-				return time.Now().Add(-time.Duration(num) * time.Minute).Unix()
-			}
-		}
-	}
-	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02"} {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t.Unix()
-		}
-	}
-	return 0
+	ts, _ := timeutil.ParseSince(s)
+	return ts
 }
 
 func clamp(v, def, max int) int {

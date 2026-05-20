@@ -124,6 +124,9 @@ func (ing *Ingester) IngestFile(path string, force bool) (int, bool, error) {
 	}
 
 	parser := NewParser(startSeq)
+	if excluded, err := ing.loadExcludedToolUses(); err == nil {
+		parser.Seed(excluded)
+	}
 	msgs, sess := ing.parseBuffer(parser, complete, path)
 
 	newFP, err := fingerprintAt(f, newOffset)
@@ -131,7 +134,7 @@ func (ing *Ingester) IngestFile(path string, force bool) (int, bool, error) {
 		return 0, false, err
 	}
 
-	n, err := ing.commit(kind, sess, msgs, FileState{
+	n, err := ing.commit(kind, sess, msgs, parser.ClioToolUseIDs(), FileState{
 		SourceFile:      path,
 		LastSize:        size,
 		LastMTime:       mtime,
@@ -186,12 +189,18 @@ func (ing *Ingester) parseBuffer(p *Parser, complete []byte, path string) ([]mod
 	return msgs, sess
 }
 
-func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Message, fs FileState) (int, error) {
+func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Message, excludedToolUses []string, fs FileState) (int, error) {
 	tx, err := ing.db.Begin()
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
+
+	for _, id := range excludedToolUses {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO excluded_tool_uses(tool_use_id) VALUES (?)`, id); err != nil {
+			return 0, err
+		}
+	}
 
 	if kind == changeFull {
 		if _, err := tx.Exec(`DELETE FROM tool_calls WHERE message_id IN (SELECT id FROM messages WHERE session_uuid = ?)`, sess.UUID); err != nil {
@@ -283,6 +292,23 @@ func (ing *Ingester) loadState(path string) (*FileState, error) {
 		return nil, err
 	}
 	return &fs, nil
+}
+
+func (ing *Ingester) loadExcludedToolUses() ([]string, error) {
+	rows, err := ing.db.Query(`SELECT tool_use_id FROM excluded_tool_uses`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (ing *Ingester) maxSeq(sessionUUID string) (int, error) {

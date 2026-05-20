@@ -102,6 +102,22 @@ func TestNoBackupLeftBehindOnSuccess(t *testing.T) {
 	}
 }
 
+func TestAddServerRefusesMalformedExisting(t *testing.T) {
+	p := filepath.Join(t.TempDir(), ".claude.json")
+	bad := `{"mcpServers": {"other": {"command":"x"}` // truncated, invalid JSON
+	if err := os.WriteFile(p, []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddServer(p, "clio", ServerEntry{Command: "clio"}); err == nil {
+		t.Fatal("expected error on malformed existing config")
+	}
+	// The malformed file must be left exactly as-is (not clobbered).
+	after, _ := os.ReadFile(p)
+	if string(after) != bad {
+		t.Fatalf("malformed config was modified; before=%q after=%q", bad, string(after))
+	}
+}
+
 func TestHasServer(t *testing.T) {
 	p := filepath.Join(t.TempDir(), ".claude.json")
 	if has, _ := HasServer(p, "clio"); has {

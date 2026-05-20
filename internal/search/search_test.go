@@ -114,6 +114,26 @@ func TestSearchExcludesToolOutputByDefault(t *testing.T) {
 	}
 }
 
+func TestSearchLikeFallbackWithFilters(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p/alpha")
+	addSession(t, d, "s2", "/p/beta")
+	now := time.Now().Unix()
+	// 2-char CJK term forces the LIKE path; combine with project + role filters
+	// to guard the likeQuery arg-ordering (query terms, then filter args, then limit).
+	addMsg(t, d, "s1", 0, "user", "資料驗證很重要", now)
+	addMsg(t, d, "s2", 0, "user", "資料驗證很重要", now)
+	addMsg(t, d, "s1", 1, "assistant", "資料驗證回覆", now)
+
+	res, err := Search(d, Options{Query: "驗證", ProjectPrefix: "/p/alpha", Role: "user", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || res[0].SessionUUID != "s1" || res[0].Role != "user" {
+		t.Fatalf("LIKE fallback + filters failed: %+v", res)
+	}
+}
+
 func TestSearchProjectFilter(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p/alpha")

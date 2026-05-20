@@ -10,6 +10,7 @@ import (
 	"github.com/linhn0617/clio/internal/config"
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
+	"github.com/linhn0617/clio/internal/lock"
 )
 
 const mcpServerName = "clio"
@@ -32,19 +33,26 @@ func newInstallMCPCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			database, err := db.Open(dbPath)
-			if err != nil {
-				return err
-			}
-			ing := ingest.New(database, stderrLogger())
-			fmt.Fprintln(os.Stdout, "Indexing your Claude Code history…")
-			st, err := ing.IngestAll(projects, false)
-			if err != nil {
+			// If an MCP server is already running it owns the index; skip the
+			// ingest (it's current) and go straight to the config write.
+			lockPath, _ := config.LockPath()
+			if lockPath != "" && lock.IsHeld(lockPath) {
+				fmt.Fprintln(os.Stdout, "clio mcp is already running and indexing; skipping initial index.")
+			} else {
+				database, err := db.Open(dbPath)
+				if err != nil {
+					return err
+				}
+				ing := ingest.New(database, stderrLogger())
+				fmt.Fprintln(os.Stdout, "Indexing your Claude Code history…")
+				st, err := ing.IngestAll(projects, false)
+				if err != nil {
+					database.Close()
+					return fmt.Errorf("indexing failed, leaving ~/.claude.json untouched: %w", err)
+				}
 				database.Close()
-				return fmt.Errorf("indexing failed, leaving ~/.claude.json untouched: %w", err)
+				fmt.Fprintf(os.Stdout, "Indexed %d files, %d messages.\n", st.FilesScanned, st.MessagesAdded)
 			}
-			database.Close()
-			fmt.Fprintf(os.Stdout, "Indexed %d files, %d messages.\n", st.FilesScanned, st.MessagesAdded)
 
 			// Phase 2: register in ~/.claude.json.
 			cfgPath, err := config.ClaudeConfigFile()

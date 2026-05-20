@@ -40,6 +40,9 @@ func Open(path string) (*DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
+	// Serialize writes within this process (watcher + catch-up ingest share the
+	// pool); WAL still allows the read-only pool to read concurrently.
+	sqlDB.SetMaxOpenConns(1)
 
 	// Tighten permissions on the freshly created file.
 	if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {

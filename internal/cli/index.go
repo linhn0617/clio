@@ -10,6 +10,7 @@ import (
 	"github.com/linhn0617/clio/internal/config"
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
+	"github.com/linhn0617/clio/internal/lock"
 )
 
 func newIndexCmd() *cobra.Command {
@@ -18,6 +19,12 @@ func newIndexCmd() *cobra.Command {
 		Use:   "index",
 		Short: "Scan and index Claude Code session history",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// A running MCP server is the sole writer and keeps the index
+			// current; don't open a second writer against the same DB.
+			if lockPath, err := config.LockPath(); err == nil && lock.IsHeld(lockPath) {
+				fmt.Fprintln(os.Stdout, "clio mcp is running and keeping the index current — nothing to do.")
+				return nil
+			}
 			projects, err := config.ClaudeProjectsDir()
 			if err != nil {
 				return err

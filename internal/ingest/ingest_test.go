@@ -3,6 +3,7 @@ package ingest
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -200,6 +201,94 @@ func TestConcurrentReadDuringWrite(t *testing.T) {
 	}()
 	if err := <-done; err != nil {
 		t.Fatalf("concurrent read failed: %v", err)
+	}
+}
+
+func TestIngestRawJSONRedacted(t *testing.T) {
+	projects := t.TempDir()
+	leak := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"sess-1","message":{"role":"user","content":"my key AKIAIOSFODNN7EXAMPLE"}}`
+	writeSession(t, projects, "-p", "sess-1", leak)
+	d := openTestDB(t)
+	if _, err := New(d, nil).IngestAll(projects, false); err != nil {
+		t.Fatal(err)
+	}
+	var raw, content string
+	d.QueryRow(`SELECT raw_json, content FROM messages WHERE session_uuid='sess-1' LIMIT 1`).Scan(&raw, &content)
+	if strings.Contains(raw, "AKIAIOSFODNN7EXAMPLE") {
+		t.Fatalf("raw_json leaked secret: %s", raw)
+	}
+	if strings.Contains(content, "AKIAIOSFODNN7EXAMPLE") {
+		t.Fatalf("content leaked secret: %s", content)
+	}
+}
+
+func TestIngestSameSizeRewriteForcesFull(t *testing.T) {
+	projects := t.TempDir()
+	dir := filepath.Join(projects, "-p")
+	os.MkdirAll(dir, 0o755)
+	path := filepath.Join(dir, "sess-1.jsonl")
+	a := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"sess-1","message":{"role":"user","content":"AAAAAAAAAA"}}`
+	os.WriteFile(path, []byte(a+"\n"), 0o600)
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(projects, false); err != nil {
+		t.Fatal(err)
+	}
+	var before string
+	d.QueryRow(`SELECT content FROM messages WHERE session_uuid='sess-1' LIMIT 1`).Scan(&before)
+
+	// Rewrite to a DIFFERENT same-length content (pre-offset bytes change),
+	// keeping byte size identical. Fingerprint mismatch must force a full re-ingest.
+	b := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"sess-1","message":{"role":"user","content":"BBBBBBBBBB"}}`
+	if len(b) != len(a) {
+		t.Fatalf("test bug: rewrite must be same length (%d vs %d)", len(a), len(b))
+	}
+	os.WriteFile(path, []byte(b+"\n"), 0o600)
+	bumpMtime(t, path)
+	if _, err := ing.IngestAll(projects, false); err != nil {
+		t.Fatal(err)
+	}
+	var after string
+	var count int
+	d.QueryRow(`SELECT content FROM messages WHERE session_uuid='sess-1' LIMIT 1`).Scan(&after)
+	d.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='sess-1'`).Scan(&count)
+	if count != 1 {
+		t.Fatalf("expected 1 message after full re-ingest, got %d (stale/duplicate)", count)
+	}
+	if !strings.Contains(after, "BBBBBBBBBB") {
+		t.Fatalf("rewrite not picked up; content still %q", after)
+	}
+}
+
+func TestIngestSelfPollutionAcrossIncrements(t *testing.T) {
+	projects := t.TempDir()
+	dir := filepath.Join(projects, "-p")
+	os.MkdirAll(dir, 0o755)
+	path := filepath.Join(dir, "sess-1.jsonl")
+	// Batch 1: clio's own MCP tool_use only.
+	use := `{"type":"assistant","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"sess-1","message":{"role":"assistant","content":[{"type":"tool_use","id":"clio-1","name":"mcp__clio__search","input":{"query":"x"}}]}}`
+	os.WriteFile(path, []byte(use+"\n"), 0o600)
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(projects, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Batch 2 (later incremental): the matching tool_result. A fresh parser
+	// would forget clio-1 and index this; the persisted excluded set prevents it.
+	res := `{"type":"user","timestamp":"2026-04-26T11:01:00Z","cwd":"/p","sessionId":"sess-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"clio-1","content":"secret clio results"}]}}`
+	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	f.WriteString(res + "\n")
+	f.Close()
+	bumpMtime(t, path)
+	if _, err := ing.IngestAll(projects, false); err != nil {
+		t.Fatal(err)
+	}
+
+	var n int
+	d.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='sess-1' AND content LIKE '%clio results%'`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("clio tool_result leaked across incremental boundary (%d rows)", n)
 	}
 }
 

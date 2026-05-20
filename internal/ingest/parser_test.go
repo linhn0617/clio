@@ -3,6 +3,7 @@ package ingest
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/linhn0617/clio/internal/model"
 )
@@ -140,11 +141,15 @@ func TestTruncateForFTS(t *testing.T) {
 	if !strings.Contains(got, "truncated") {
 		t.Fatal("expected truncation marker")
 	}
-	// Multibyte safety: should not panic and stay valid UTF-8.
+	// Multibyte safety: truncating in the middle of a 3-byte rune must still
+	// yield valid UTF-8 (head/tail trimmed to rune boundaries).
 	cjk := strings.Repeat("驗", maxFTSContentBytes)
 	out := truncateForFTS(cjk)
 	if !strings.Contains(out, "truncated") {
 		t.Fatal("expected truncation marker for cjk")
+	}
+	if !utf8.ValidString(out) {
+		t.Fatal("truncated CJK output is not valid UTF-8")
 	}
 }
 

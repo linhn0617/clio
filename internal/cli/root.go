@@ -2,6 +2,11 @@
 package cli
 
 import (
+	"context"
+	"os"
+	"os/signal"
+	"syscall"
+
 	"github.com/spf13/cobra"
 )
 
@@ -31,7 +36,10 @@ func newRootCmd() *cobra.Command {
 	return root
 }
 
-// Execute runs the clio CLI.
+// Execute runs the clio CLI with a context cancelled on SIGINT/SIGTERM, so
+// long-running commands (notably `clio mcp`) can shut down their goroutines.
 func Execute() error {
-	return newRootCmd().Execute()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return newRootCmd().ExecuteContext(ctx)
 }

@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -42,7 +44,10 @@ func newMCPCmd() *cobra.Command {
 			}
 			lk, err := lock.Acquire(lockPath)
 			if err != nil {
-				log.Warn("could not acquire writer lock", "err", err)
+				if errors.Is(err, lock.ErrHeld) {
+					return fmt.Errorf("another clio mcp server is already running; not starting a second writer")
+				}
+				return fmt.Errorf("acquire writer lock: %w", err)
 			}
 			defer lk.Release()
 

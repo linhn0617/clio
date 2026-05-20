@@ -3,21 +3,42 @@
 package lock
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"syscall"
 )
 
+// ErrHeld means another live process already holds the lock.
+var ErrHeld = errors.New("lock is held by another running process")
+
 // Lock represents an acquired lock file.
 type Lock struct {
 	path string
 }
 
-// Acquire writes the current pid to path. It overwrites any stale lock (a lock
-// whose recorded process is no longer alive).
+// Acquire takes an exclusive lock at path by atomically creating the file
+// (O_CREATE|O_EXCL). If the file already exists, it is taken over only when its
+// recorded pid is no longer alive (stale lock); otherwise ErrHeld is returned.
 func Acquire(path string) (*Lock, error) {
-	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		if IsHeld(path) {
+			return nil, ErrHeld
+		}
+		// Stale lock from a dead process: remove and retry once.
+		if rmErr := os.Remove(path); rmErr != nil {
+			return nil, fmt.Errorf("remove stale lock: %w", rmErr)
+		}
+		f, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(strconv.Itoa(os.Getpid())); err != nil {
 		return nil, err
 	}
 	return &Lock{path: path}, nil

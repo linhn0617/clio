@@ -24,6 +24,10 @@ var redactRules = []redactRule{
 	{regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`), "[REDACTED:slack-token]"},
 	// OpenAI / Anthropic style keys.
 	{regexp.MustCompile(`\bsk-[A-Za-z0-9_\-]{20,}\b`), "[REDACTED:api-key]"},
+	// Stripe keys (underscore form: sk_live_, pk_live_, rk_live_, _test_).
+	{regexp.MustCompile(`\b[rsp]k_(?:live|test)_[A-Za-z0-9]{10,}\b`), "[REDACTED:stripe-key]"},
+	// JWTs (header.payload.signature, base64url).
+	{regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`), "[REDACTED:jwt]"},
 	// Bearer tokens in headers.
 	{regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._\-]{12,}`), "Bearer [REDACTED:token]"},
 	// KEY=value / KEY: value where KEY names a secret. Value redacted, key kept.
