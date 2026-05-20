@@ -2,6 +2,8 @@
 
 Search and browse your Claude Code conversation history from the terminal — and let Claude search it too.
 
+English | [繁體中文](./README_zh-TW.md)
+
 clio indexes Claude Code's session files (`~/.claude/projects/*.jsonl`) into a local SQLite + FTS5 database and exposes them through two interfaces:
 
 - **CLI** — `clio search`, `clio list`, `clio show` for searching and reading past conversations across all projects
@@ -9,37 +11,55 @@ clio indexes Claude Code's session files (`~/.claude/projects/*.jsonl`) into a l
 
 It is local-first, read-only against your `.claude` data, and never writes to your original session files.
 
-## Install
+## Getting started
+
+**1. Install the binary**
 
 ```
 go install github.com/linhn0617/clio/cmd/clio@latest
 ```
 
-Or download a prebuilt binary from the [Releases](https://github.com/linhn0617/clio/releases) page (macOS/Linux/Windows, amd64/arm64).
+This drops `clio` into `$(go env GOPATH)/bin` — make sure that's on your `PATH`.
+(Or download a prebuilt binary from the [Releases](https://github.com/linhn0617/clio/releases) page: macOS/Linux/Windows, amd64/arm64.)
 
-## Quick start
-
-```
-clio install-mcp                # index your history + register clio in ~/.claude.json
-```
-
-Restart Claude Code, then ask it things like "what did we work on last week?" or
-"how did we fix that auth bug?". Claude will query clio over MCP.
-
-## CLI usage
+**2. Index your history and register the MCP server**
 
 ```
-clio index                      # build / update the index
+clio install-mcp
+```
+
+This does two things, in order:
+1. Builds the full index from `~/.claude/projects/` (shows progress).
+2. Only if indexing succeeds, registers clio in `~/.claude.json` — atomically, with a `.bak` backup, preserving your other MCP servers.
+
+**3. Restart Claude Code**
+
+Then ask it about your past work:
+
+> "What did we work on last week?"
+> "How did we fix that auth bug a while back?"
+> "Find where we discussed the database migration."
+
+Claude calls clio over MCP to answer. While Claude Code runs, clio's MCP server watches `~/.claude/projects/` and keeps the index current automatically.
+
+**4. (Optional) Use the CLI directly**
+
+```
 clio search "驗證 流程"          # full-text search (CJK + code)
 clio search "bug" --since 7d --project myapp --json
 clio list --since 7d            # browse recent sessions
 clio show <session-id>          # print a full conversation (markdown|json|raw)
 clio doctor                     # health check
-clio uninstall-mcp              # remove clio from ~/.claude.json
 ```
 
-Short queries (1-2 characters, e.g. most CJK words) automatically fall back to a
-substring scan, since the trigram index needs 3+ characters.
+To remove the integration later: `clio uninstall-mcp`.
+
+## How indexing stays current
+
+- **MCP server running** (Claude Code open): a file watcher live-ingests new activity; you never run anything manually.
+- **MCP server not running**: each CLI command does a quick incremental catch-up before querying. Run `clio index` anytime to force one; `clio index --full` rebuilds from scratch.
+
+Short queries (1-2 characters, e.g. most CJK words) automatically fall back to a substring scan, since the trigram index needs 3+ characters.
 
 ## MCP tools
 
@@ -54,10 +74,10 @@ When registered via `clio install-mcp`, Claude Code can call:
 
 ## Privacy
 
-- Read-only access to `~/.claude/projects/`; original files are never modified
-- Secret patterns (API keys, tokens, private keys, `.env` lines) are redacted at ingest time
-- All data stays on your machine; no telemetry, no cloud sync
+- Read-only access to `~/.claude/projects/`; original files are never modified.
+- Secret patterns (API keys, tokens, private keys, `.env` lines) are redacted at ingest time, in both the searchable text and the stored raw event.
+- All data stays on your machine; no telemetry, no cloud sync. The database lives at `~/Library/Application Support/clio/db.sqlite` (macOS) or `~/.local/share/clio/db.sqlite` (Linux), with `0600` permissions.
 
 ## License
 
-TBD
+[MIT](./LICENSE)
