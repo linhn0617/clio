@@ -9,6 +9,7 @@ import (
 	"github.com/linhn0617/clio/internal/config"
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
+	"github.com/linhn0617/clio/internal/lock"
 )
 
 func stderrLogger() *slog.Logger {
@@ -30,6 +31,13 @@ func openForQuery() (*db.DB, error) {
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, fmt.Errorf("no index found at %s — run `clio index` first", dbPath)
 	}
+
+	// Defer to a running MCP server: it is the sole writer, so query read-only
+	// and skip our own catch-up to avoid write contention.
+	if lockPath, err := config.LockPath(); err == nil && lock.IsHeld(lockPath) {
+		return db.OpenReadOnly(dbPath)
+	}
+
 	database, err := db.Open(dbPath)
 	if err != nil {
 		return nil, err
