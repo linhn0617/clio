@@ -44,6 +44,10 @@ Claude Code 的對話歷史以 newline-delimited JSON 的形式儲存在 `~/.cla
 - `unicode61 tokenchars=...` 手刻參數 → 對中文仍是 substring 失敗
 - 引入第三方 jieba/cjk tokenizer → 需要 cgo、編譯麻煩、增加依賴
 
+**[實作期發現] trigram 對 < 3 字查詢無效**：trigram tokenizer 只索引 3 字序列，2 字查詢（中文詞大宗，如「驗證」）組不出 trigram → FTS MATCH 回 0。已驗證：`MATCH '驗證'` → 0、`MATCH '資料驗'` → 1、`LIKE '%驗證%'` → 2。
+
+**對策（hybrid）**：search 解析 query 的 term，若任一 term 的字數 < 3 → 該次查詢 fallback 到 `messages.content LIKE '%term%'`（多 term 用 AND）。代價：LIKE 是全表掃、不走 FTS index，但只在短查詢時觸發（較少見），對單人工具的 DB 大小可接受。3+ 字查詢與程式碼識別字仍走 FTS trigram（快、有 ranking）。`messages.content` 同時服務 FTS 與 LIKE，schema 不變。
+
 ### 純 Go SQLite（modernc.org/sqlite），不用 mattn/go-sqlite3
 
 **理由**：`modernc.org/sqlite` 是 SQLite 的純 Go 翻譯版（透過 SQLite 的 C-to-Go 工具），效能略遜但完全免 cgo。對發布單一 binary 至關重要：
