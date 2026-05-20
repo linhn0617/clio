@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -10,6 +11,7 @@ import (
 	"github.com/linhn0617/clio/internal/ingest"
 	"github.com/linhn0617/clio/internal/lock"
 	"github.com/linhn0617/clio/internal/mcp"
+	"github.com/linhn0617/clio/internal/watcher"
 )
 
 func newMCPCmd() *cobra.Command {
@@ -50,6 +52,14 @@ func newMCPCmd() *cobra.Command {
 					if _, ierr := ing.IngestAll(projects, false); ierr != nil {
 						log.Warn("initial catch-up failed", "err", ierr)
 					}
+					// Live-ingest new activity while we serve.
+					ctx, cancel := context.WithCancel(cmd.Context())
+					defer cancel()
+					go func() {
+						if werr := watcher.New(ing, projects, log).Run(ctx); werr != nil {
+							log.Warn("watcher stopped", "err", werr)
+						}
+					}()
 				}
 			}
 
