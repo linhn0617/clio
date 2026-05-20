@@ -1,25 +1,74 @@
 package cli
 
 import (
-	"errors"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/linhn0617/clio/internal/search"
 )
 
 func newSearchCmd() *cobra.Command {
+	var (
+		since     string
+		project   string
+		role      string
+		limit     int
+		asJSON    bool
+		inclTools bool
+	)
 	cmd := &cobra.Command{
 		Use:   "search <query>",
 		Short: "Full-text search across all conversations",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return errors.New("search: not implemented yet (Phase 2)")
+			sinceTS, err := parseSince(since)
+			if err != nil {
+				return err
+			}
+			database, err := openForQuery()
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+
+			results, err := search.Search(database, search.Options{
+				Query:             strings.Join(args, " "),
+				Since:             sinceTS,
+				ProjectPrefix:     project,
+				Role:              role,
+				Limit:             limit,
+				IncludeToolOutput: inclTools,
+			})
+			if err != nil {
+				return err
+			}
+
+			if asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(results)
+			}
+			if len(results) == 0 {
+				fmt.Fprintln(os.Stdout, "no results")
+				return nil
+			}
+			for _, r := range results {
+				fmt.Fprintf(os.Stdout, "%s  %s  %s  [%s]\n    %s\n",
+					shortID(r.SessionUUID), formatTS(r.TS), trimProject(r.ProjectPath), r.Role,
+					strings.ReplaceAll(strings.TrimSpace(r.Snippet), "\n", " "))
+			}
+			return nil
 		},
 	}
-	cmd.Flags().String("since", "", "Only results since this time (e.g. 7d, 2026-05-01)")
-	cmd.Flags().String("project", "", "Filter by project path prefix")
-	cmd.Flags().String("role", "", "Filter by role (user|assistant)")
-	cmd.Flags().Int("limit", 20, "Maximum number of results")
-	cmd.Flags().Bool("json", false, "Output JSON")
-	cmd.Flags().Bool("include-tool-output", false, "Include tool output in results")
+	cmd.Flags().StringVar(&since, "since", "", "Only results since this time (e.g. 7d, 2026-05-01)")
+	cmd.Flags().StringVar(&project, "project", "", "Filter by project path prefix")
+	cmd.Flags().StringVar(&role, "role", "", "Filter by role (user|assistant)")
+	cmd.Flags().IntVar(&limit, "limit", 20, "Maximum number of results")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Output JSON")
+	cmd.Flags().BoolVar(&inclTools, "include-tool-output", false, "Include tool output in results")
 	return cmd
 }
