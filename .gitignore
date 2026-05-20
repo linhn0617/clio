@@ -1,0 +1,12 @@
+# Binaries
+/clio
+/dist/
+*.exe
+
+# SQLite (clio's own DB should never be committed)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# OS
+.DS_Store
