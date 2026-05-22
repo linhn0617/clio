@@ -320,6 +320,29 @@ func TestIngestForceTwiceNoDuplicates(t *testing.T) {
 	}
 }
 
+func TestTurnCountStableAcrossReingest(t *testing.T) {
+	projects := t.TempDir()
+	// evUser1 + evUser2 are the two user turns; evAsst1 is the assistant reply.
+	path := writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evAsst1, evUser2)
+	database := openTestDB(t)
+	ing := New(database, nil)
+
+	if _, _, err := ing.IngestFile(path, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ing.IngestFile(path, true); err != nil {
+		t.Fatal(err)
+	}
+
+	var turns int
+	if err := database.QueryRow(`SELECT turn_count FROM sessions WHERE uuid = 'sess-1'`).Scan(&turns); err != nil {
+		t.Fatal(err)
+	}
+	if turns != 2 {
+		t.Fatalf("turn_count = %d, want 2", turns)
+	}
+}
+
 // bumpMtime advances the file's mtime so classifyChange sees a change even on
 // filesystems with coarse timestamp resolution.
 func bumpMtime(t *testing.T, path string) {

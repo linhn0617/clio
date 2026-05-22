@@ -211,7 +211,6 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 		}
 	}
 
-	userTurns := 0
 	inserted := 0
 	for _, m := range msgs {
 		res, err := tx.Exec(`INSERT OR IGNORE INTO messages(session_uuid, seq, ts, role, content, raw_json) VALUES (?,?,?,?,?,?)`,
@@ -230,9 +229,6 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 			continue
 		}
 		inserted++
-		if m.Role == model.RoleUser {
-			userTurns++
-		}
 		if len(m.ToolCalls) > 0 {
 			id, err := res.LastInsertId()
 			if err != nil {
@@ -246,7 +242,12 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 		}
 	}
 
-	if err := ing.upsertSession(tx, sess, userTurns, kind); err != nil {
+	var totalUserTurns int
+	if err := tx.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid = ? AND role = ?`,
+		sess.UUID, model.RoleUser).Scan(&totalUserTurns); err != nil {
+		return 0, fmt.Errorf("count user turns: %w", err)
+	}
+	if err := ing.upsertSession(tx, sess, totalUserTurns, kind); err != nil {
 		return 0, err
 	}
 
@@ -273,10 +274,11 @@ func (ing *Ingester) upsertSession(tx *sql.Tx, s model.Session, userTurns int, k
 			s.UUID, nullEmpty(s.ProjectPath), s.SourceFile, nullZero(s.StartedAt), nullZero(s.EndedAt), userTurns, nullEmpty(s.Title), nullEmpty(s.ParentSession))
 		return err
 	}
-	// Incremental: bump ended_at and turn_count, fill project_path/title if missing.
+	// Incremental: bump ended_at, set turn_count to the authoritative total,
+	// fill project_path/title if missing.
 	_, err := tx.Exec(`UPDATE sessions SET
 		ended_at = MAX(COALESCE(ended_at,0), ?),
-		turn_count = turn_count + ?,
+		turn_count = ?,
 		project_path = COALESCE(NULLIF(project_path,''), ?),
 		title = COALESCE(NULLIF(title,''), ?)
 		WHERE uuid = ?`,
