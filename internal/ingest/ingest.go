@@ -14,6 +14,15 @@ import (
 	"github.com/linhn0617/clio/internal/model"
 )
 
+// preCommitHook, if non-nil, runs inside commit() just after BEGIN and before
+// any writes. Tests use it to mutate the on-disk file and exercise the
+// re-validation guard. Always nil in production.
+var preCommitHook func()
+
+// errStaleSnapshot means the source file changed between read and commit; the
+// caller treats it as a no-op and lets a later pass re-ingest the fresh bytes.
+var errStaleSnapshot = errors.New("source file changed during ingest")
+
 // Ingester writes parsed sessions into the database.
 type Ingester struct {
 	db  *db.DB
@@ -143,6 +152,9 @@ func (ing *Ingester) IngestFile(path string, force bool) (int, bool, error) {
 		LastIngestedAt:  time.Now().Unix(),
 	})
 	if err != nil {
+		if errors.Is(err, errStaleSnapshot) {
+			return 0, false, nil // changed under us; next pass will re-ingest
+		}
 		return 0, false, err
 	}
 	return n, true, nil
@@ -195,6 +207,22 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 		return 0, err
 	}
 	defer tx.Rollback()
+
+	if preCommitHook != nil {
+		preCommitHook()
+	}
+
+	// changeFull deletes the session's rows before reinserting. If the file
+	// changed since we read it (a concurrent writer committed newer bytes),
+	// committing our stale snapshot would revert the DB below disk. Re-stat
+	// inside the write lock and abort if it moved.
+	if kind == changeFull {
+		if fi, statErr := os.Stat(fs.SourceFile); statErr == nil {
+			if fi.Size() != fs.LastSize || fi.ModTime().Unix() != fs.LastMTime {
+				return 0, errStaleSnapshot
+			}
+		}
+	}
 
 	for _, id := range excludedToolUses {
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO excluded_tool_uses(tool_use_id) VALUES (?)`, id); err != nil {

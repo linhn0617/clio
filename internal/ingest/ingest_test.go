@@ -376,6 +376,46 @@ func TestIncrementalWatermarkIsMonotonic(t *testing.T) {
 	}
 }
 
+func TestChangeFullAbortsWhenFileChangedUnderUs(t *testing.T) {
+	projects := t.TempDir()
+	// V1 = two user events only (2 messages).
+	path := writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evUser2)
+	database := openTestDB(t)
+	ing := New(database, nil)
+
+	// Seed V1.
+	if _, _, err := ing.IngestFile(path, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// While the next full ingest is mid-transaction (after BEGIN, before writes),
+	// replace the file with V2 (four events, different size) to simulate a
+	// concurrent writer's commit.
+	preCommitHook = func() {
+		writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evAsst1, evResult1, evUser2)
+		preCommitHook = nil
+	}
+	t.Cleanup(func() { preCommitHook = nil })
+
+	// Force a full ingest using the stale (V1) in-memory snapshot. It must abort
+	// cleanly (no error surfaced) rather than revert the DB to V1 over V2.
+	if _, _, err := ing.IngestFile(path, true); err != nil {
+		t.Fatalf("ingest should abort cleanly, got error: %v", err)
+	}
+
+	// A subsequent ingest reconciles the DB to V2 (more messages than V1's 2).
+	if _, _, err := ing.IngestFile(path, true); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := database.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='sess-1'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n <= 2 {
+		t.Fatalf("messages = %d; expected reconcile to V2 (>2)", n)
+	}
+}
+
 // bumpMtime advances the file's mtime so classifyChange sees a change even on
 // filesystems with coarse timestamp resolution.
 func bumpMtime(t *testing.T, path string) {
