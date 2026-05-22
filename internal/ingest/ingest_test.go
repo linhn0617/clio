@@ -292,6 +292,34 @@ func TestIngestSelfPollutionAcrossIncrements(t *testing.T) {
 	}
 }
 
+func TestIngestForceTwiceNoDuplicates(t *testing.T) {
+	projects := t.TempDir()
+	path := writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evAsst1)
+	database := openTestDB(t)
+	ing := New(database, nil)
+
+	if _, _, err := ing.IngestFile(path, true); err != nil {
+		t.Fatalf("first ingest: %v", err)
+	}
+	if _, _, err := ing.IngestFile(path, true); err != nil { // force full re-ingest again
+		t.Fatalf("second ingest: %v", err)
+	}
+
+	var msgCount, ftsCount int
+	if err := database.QueryRow(`SELECT count(*) FROM messages`).Scan(&msgCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT count(*) FROM messages_fts`).Scan(&ftsCount); err != nil {
+		t.Fatal(err)
+	}
+	if msgCount == 0 {
+		t.Fatal("no messages ingested")
+	}
+	if ftsCount != msgCount {
+		t.Fatalf("fts rows = %d, messages = %d (must match)", ftsCount, msgCount)
+	}
+}
+
 // bumpMtime advances the file's mtime so classifyChange sees a change even on
 // filesystems with coarse timestamp resolution.
 func bumpMtime(t *testing.T, path string) {

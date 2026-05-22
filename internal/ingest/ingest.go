@@ -212,11 +212,26 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 	}
 
 	userTurns := 0
+	inserted := 0
 	for _, m := range msgs {
-		res, err := tx.Exec(`INSERT INTO messages(session_uuid, seq, ts, role, content, raw_json) VALUES (?,?,?,?,?,?)`,
+		res, err := tx.Exec(`INSERT OR IGNORE INTO messages(session_uuid, seq, ts, role, content, raw_json) VALUES (?,?,?,?,?,?)`,
 			m.SessionUUID, m.Seq, nullZero(m.TS), m.Role, m.Content, m.RawJSON)
 		if err != nil {
 			return 0, fmt.Errorf("insert message: %w", err)
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		if affected == 0 {
+			// Duplicate (session_uuid, seq) already present (concurrent writer or
+			// re-ingest). Its tool_calls already exist; do not use the stale
+			// LastInsertId.
+			continue
+		}
+		inserted++
+		if m.Role == model.RoleUser {
+			userTurns++
 		}
 		if len(m.ToolCalls) > 0 {
 			id, err := res.LastInsertId()
@@ -228,9 +243,6 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 					return 0, err
 				}
 			}
-		}
-		if m.Role == model.RoleUser {
-			userTurns++
 		}
 	}
 
@@ -249,7 +261,7 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	return len(msgs), nil
+	return inserted, nil
 }
 
 func (ing *Ingester) upsertSession(tx *sql.Tx, s model.Session, userTurns int, kind changeKind) error {
