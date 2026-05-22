@@ -94,23 +94,54 @@ func (d *DB) migrate() error {
 	sort.Strings(names)
 
 	for _, name := range names {
-		var exists int
-		if err := d.QueryRow(`SELECT count(*) FROM schema_migrations WHERE name = ?`, name).Scan(&exists); err != nil {
-			return fmt.Errorf("check migration %s: %w", name, err)
+		applied, err := d.migrationApplied(name)
+		if err != nil {
+			return err
 		}
-		if exists > 0 {
+		if applied {
 			continue
 		}
 		stmts, err := migrationsFS.ReadFile("migrations/" + name)
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", name, err)
 		}
-		if _, err := d.Exec(string(stmts)); err != nil {
-			return fmt.Errorf("apply migration %s: %w", name, err)
-		}
-		if _, err := d.Exec(`INSERT INTO schema_migrations(name, applied_at) VALUES (?, strftime('%s','now'))`, name); err != nil {
-			return fmt.Errorf("record migration %s: %w", name, err)
+		if err := d.applyMigration(name, string(stmts)); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (d *DB) migrationApplied(name string) (bool, error) {
+	var n int
+	if err := d.QueryRow(`SELECT count(*) FROM schema_migrations WHERE name = ?`, name).Scan(&n); err != nil {
+		return false, fmt.Errorf("check migration %s: %w", name, err)
+	}
+	return n > 0, nil
+}
+
+// applyMigration runs one migration inside an IMMEDIATE transaction. It
+// re-checks the marker inside the transaction so a concurrent process that
+// already applied it is a clean no-op rather than a primary-key failure.
+func (d *DB) applyMigration(name, stmts string) error {
+	tx, err := d.Begin() // IMMEDIATE via _txlock=immediate
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", name, err)
+	}
+	defer tx.Rollback()
+
+	var n int
+	if err := tx.QueryRow(`SELECT count(*) FROM schema_migrations WHERE name = ?`, name).Scan(&n); err != nil {
+		return fmt.Errorf("recheck migration %s: %w", name, err)
+	}
+	if n > 0 {
+		return tx.Commit() // applied by someone else while we waited for the lock
+	}
+	if _, err := tx.Exec(stmts); err != nil {
+		return fmt.Errorf("apply migration %s: %w", name, err)
+	}
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations(name, applied_at) VALUES (?, strftime('%s','now'))`, name); err != nil {
+		return fmt.Errorf("record migration %s: %w", name, err)
+	}
+	return tx.Commit()
 }
