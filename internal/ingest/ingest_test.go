@@ -343,6 +343,39 @@ func TestTurnCountStableAcrossReingest(t *testing.T) {
 	}
 }
 
+func TestIncrementalWatermarkIsMonotonic(t *testing.T) {
+	projects := t.TempDir()
+	path := writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evUser2)
+	database := openTestDB(t)
+	ing := New(database, nil)
+	if _, _, err := ing.IngestFile(path, false); err != nil {
+		t.Fatal(err)
+	}
+
+	var before int64
+	if err := database.QueryRow(`SELECT last_byte_offset FROM ingest_state WHERE source_file = ?`, path).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a stale incremental writer trying to push the offset backward.
+	_, err := database.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at)
+		VALUES (?,?,?,?,?,?)
+		ON CONFLICT(source_file) DO UPDATE SET last_byte_offset=excluded.last_byte_offset
+		WHERE excluded.last_byte_offset >= ingest_state.last_byte_offset`,
+		path, 1, 1, before-10, "x", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var after int64
+	if err := database.QueryRow(`SELECT last_byte_offset FROM ingest_state WHERE source_file = ?`, path).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("watermark moved backward: before=%d after=%d", before, after)
+	}
+}
+
 // bumpMtime advances the file's mtime so classifyChange sees a change even on
 // filesystems with coarse timestamp resolution.
 func bumpMtime(t *testing.T, path string) {

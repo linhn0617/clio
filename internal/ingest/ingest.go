@@ -251,12 +251,23 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 		return 0, err
 	}
 
-	if _, err := tx.Exec(`INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, last_ingested_at)
-		VALUES (?,?,?,?,?,?)
-		ON CONFLICT(source_file) DO UPDATE SET last_size=excluded.last_size, last_mtime=excluded.last_mtime,
-		last_byte_offset=excluded.last_byte_offset, tail_fingerprint=excluded.tail_fingerprint, last_ingested_at=excluded.last_ingested_at`,
-		fs.SourceFile, fs.LastSize, fs.LastMTime, fs.LastByteOffset, fs.TailFingerprint, fs.LastIngestedAt); err != nil {
-		return 0, err
+	if kind == changeFull {
+		if _, err := tx.Exec(`INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, last_ingested_at)
+			VALUES (?,?,?,?,?,?)
+			ON CONFLICT(source_file) DO UPDATE SET last_size=excluded.last_size, last_mtime=excluded.last_mtime,
+			last_byte_offset=excluded.last_byte_offset, tail_fingerprint=excluded.tail_fingerprint, last_ingested_at=excluded.last_ingested_at`,
+			fs.SourceFile, fs.LastSize, fs.LastMTime, fs.LastByteOffset, fs.TailFingerprint, fs.LastIngestedAt); err != nil {
+			return 0, err
+		}
+	} else {
+		if _, err := tx.Exec(`INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, last_ingested_at)
+			VALUES (?,?,?,?,?,?)
+			ON CONFLICT(source_file) DO UPDATE SET last_size=excluded.last_size, last_mtime=excluded.last_mtime,
+			last_byte_offset=excluded.last_byte_offset, tail_fingerprint=excluded.tail_fingerprint, last_ingested_at=excluded.last_ingested_at
+			WHERE excluded.last_byte_offset >= ingest_state.last_byte_offset`,
+			fs.SourceFile, fs.LastSize, fs.LastMTime, fs.LastByteOffset, fs.TailFingerprint, fs.LastIngestedAt); err != nil {
+			return 0, err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
