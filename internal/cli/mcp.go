@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -17,6 +18,11 @@ import (
 	"github.com/linhn0617/clio/internal/lock"
 	"github.com/linhn0617/clio/internal/mcp"
 	"github.com/linhn0617/clio/internal/watcher"
+)
+
+const (
+	followerPollInterval = 5 * time.Second
+	leaderRenewInterval  = 3 * time.Second
 )
 
 func newMCPCmd() *cobra.Command {
@@ -59,27 +65,49 @@ func newMCPCmd() *cobra.Command {
 			projects, _ := config.ClaudeProjectsDir()
 			ing := ingest.New(rw, log)
 
-			// Best-effort, throttled read catch-up for followers (and harmless for
-			// leaders, who are kept fresh by the watcher). Never fails a read.
+			var isLeaderNow atomic.Bool
+			isLeaderNow.Store(isLeader)
+
+			// Leader: do an initial synchronous ingest so the DB is ready before the
+			// first MCP read arrives. The watcher (launched inside runLeaseRole) then
+			// keeps it fresh; beforeRead is a no-op for the leader.
+			if isLeader && projects != "" {
+				if _, err := ing.IngestAll(ctx, projects, false); err != nil {
+					log.Warn("startup catch-up failed", "err", err)
+				}
+			}
+
+			// Best-effort, throttled read catch-up for followers. Skipped entirely
+			// when this process is the leader (the watcher keeps the DB fresh).
+			// An in-flight guard ensures at most one IngestAll walk runs at a time;
+			// concurrent callers return immediately and serve possibly-stale data.
 			var catchupMu sync.Mutex
 			var lastCatchup time.Time
+			var catchupRunning bool
 			beforeRead := func() {
-				if projects == "" {
-					return
+				if projects == "" || isLeaderNow.Load() {
+					return // leader is kept fresh by the watcher; nothing to do
 				}
 				catchupMu.Lock()
-				if time.Since(lastCatchup) < time.Second {
+				if catchupRunning || time.Since(lastCatchup) < time.Second {
 					catchupMu.Unlock()
 					return
 				}
+				catchupRunning = true
+				catchupMu.Unlock()
+
+				_, err := ing.IngestAll(ctx, projects, false)
+
+				catchupMu.Lock()
+				catchupRunning = false
 				lastCatchup = time.Now()
 				catchupMu.Unlock()
-				if _, err := ing.IngestAll(ctx, projects, false); err != nil {
+				if err != nil {
 					log.Warn("read catch-up failed (serving possibly-stale)", "err", err)
 				}
 			}
 
-			go runLeaseRole(ctx, lease, isLeader, ing, projects, log)
+			go runLeaseRole(ctx, lease, isLeader, &isLeaderNow, ing, projects, log)
 
 			log.Warn("clio mcp server starting", "leader", isLeader)
 			srv := mcp.NewServer(ro, version, beforeRead)
@@ -89,13 +117,16 @@ func newMCPCmd() *cobra.Command {
 }
 
 // runLeaseRole drives leader/follower transitions until ctx is cancelled.
-func runLeaseRole(ctx context.Context, lease *lock.Lease, isLeader bool, ing *ingest.Ingester, projects string, log *slog.Logger) {
+// leaderFlag is kept current so beforeRead can skip catch-up when not needed.
+func runLeaseRole(ctx context.Context, lease *lock.Lease, isLeader bool, leaderFlag *atomic.Bool, ing *ingest.Ingester, projects string, log *slog.Logger) {
 	for {
 		if !isLeader {
+			leaderFlag.Store(false)
 			if !pollUntilLeader(ctx, lease, log) {
 				return // ctx done
 			}
 		}
+		leaderFlag.Store(true)
 		// Now leader. leaderLoop returns true if superseded (demote), false if ctx done.
 		if !leaderLoop(ctx, lease, ing, projects, log) {
 			return
@@ -107,7 +138,7 @@ func runLeaseRole(ctx context.Context, lease *lock.Lease, isLeader bool, ing *in
 // pollUntilLeader polls TryPromote every 5s. Returns true once promoted, false
 // if ctx is cancelled.
 func pollUntilLeader(ctx context.Context, lease *lock.Lease, log *slog.Logger) bool {
-	t := time.NewTicker(5 * time.Second)
+	t := time.NewTicker(followerPollInterval)
 	defer t.Stop()
 	for {
 		select {
@@ -145,7 +176,7 @@ func leaderLoop(ctx context.Context, lease *lock.Lease, ing *ingest.Ingester, pr
 		}
 	}
 
-	renew := time.NewTicker(3 * time.Second)
+	renew := time.NewTicker(leaderRenewInterval)
 	defer renew.Stop()
 	for {
 		select {

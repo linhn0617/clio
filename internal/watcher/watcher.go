@@ -66,6 +66,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 		case <-debounce:
 			debounce = nil
 			for path := range dirty {
+				if ctx.Err() != nil {
+					return nil
+				}
 				if _, _, err := w.ing.IngestFile(ctx, path, false); err != nil {
 					w.log.Warn("watch ingest failed", "file", path, "err", err)
 				}
