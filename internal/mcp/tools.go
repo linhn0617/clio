@@ -36,8 +36,11 @@ func clamp(v, def, max int) int {
 	return v
 }
 
-func handleSearch(database *db.DB) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func handleSearch(database *db.DB, beforeRead func()) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if beforeRead != nil {
+			beforeRead()
+		}
 		query, err := req.RequireString("query")
 		if err != nil {
 			return mcp.NewToolResultError("query is required"), nil
@@ -68,8 +71,11 @@ func handleSearch(database *db.DB) func(context.Context, mcp.CallToolRequest) (*
 	}
 }
 
-func handleListSessions(database *db.DB) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func handleListSessions(database *db.DB, beforeRead func()) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if beforeRead != nil {
+			beforeRead()
+		}
 		rows, err := sessions.ListSessions(database, sessions.ListFilter{
 			Since:         parseSince(req.GetString("since", "")),
 			ProjectPrefix: req.GetString("project", ""),
@@ -95,8 +101,11 @@ func handleListSessions(database *db.DB) func(context.Context, mcp.CallToolReque
 	}
 }
 
-func handleActivitySummary(database *db.DB) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if beforeRead != nil {
+			beforeRead()
+		}
 		since := parseSince(req.GetString("since", "7d"))
 		if since == 0 {
 			since = time.Now().Add(-7 * 24 * time.Hour).Unix()
@@ -112,8 +121,11 @@ func handleActivitySummary(database *db.DB) func(context.Context, mcp.CallToolRe
 	}
 }
 
-func handleReadSession(database *db.DB) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func handleReadSession(database *db.DB, beforeRead func()) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if beforeRead != nil {
+			beforeRead()
+		}
 		uuid, err := req.RequireString("uuid")
 		if err != nil {
 			return mcp.NewToolResultError("uuid is required"), nil

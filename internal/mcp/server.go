@@ -8,8 +8,10 @@ import (
 	"github.com/linhn0617/clio/internal/db"
 )
 
-// NewServer builds an MCP server with clio's four tools registered.
-func NewServer(database *db.DB, version string) *server.MCPServer {
+// NewServer builds an MCP server with clio's four tools registered. beforeRead,
+// if non-nil, runs before each read tool serves (used by followers for a
+// best-effort catch-up). It must never block indefinitely or panic.
+func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPServer {
 	s := server.NewMCPServer(
 		"clio", version,
 		server.WithToolCapabilities(false),
@@ -25,7 +27,7 @@ func NewServer(database *db.DB, version string) *server.MCPServer {
 		mcp.WithString("role", mcp.Description("Filter by role"), mcp.Enum("user", "assistant")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 10, max 50)"), mcp.DefaultNumber(defaultSearchLimit), mcp.Min(1), mcp.Max(maxSearchLimit)),
 		mcp.WithBoolean("include_tool_output", mcp.Description("Include tool output in results"), mcp.DefaultBool(false)),
-	), handleSearch(database))
+	), handleSearch(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("list_sessions",
 		mcp.WithDescription("List past sessions, most recent first, with optional filters."),
@@ -33,13 +35,13 @@ func NewServer(database *db.DB, version string) *server.MCPServer {
 		mcp.WithString("project", mcp.Description("Filter by project path prefix")),
 		mcp.WithNumber("min_turns", mcp.Description("Only sessions with at least this many user turns"), mcp.DefaultNumber(0)),
 		mcp.WithNumber("limit", mcp.Description("Max sessions (default 20, max 50)"), mcp.DefaultNumber(20), mcp.Min(1), mcp.Max(maxSearchLimit)),
-	), handleListSessions(database))
+	), handleListSessions(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("activity_summary",
 		mcp.WithDescription("Summarize activity over a period: session and message counts grouped by day or project. Good for 'what did I work on last week?'."),
 		mcp.WithString("since", mcp.Description("Period start: 7d, 12h, 30m, or YYYY-MM-DD (default 7d)")),
 		mcp.WithString("group_by", mcp.Description("Grouping"), mcp.Enum("day", "project"), mcp.DefaultString("day")),
-	), handleActivitySummary(database))
+	), handleActivitySummary(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("read_session",
 		mcp.WithDescription("Read a session's messages in full, paginated. Tool output is excluded unless include_tool_output is true."),
@@ -47,7 +49,7 @@ func NewServer(database *db.DB, version string) *server.MCPServer {
 		mcp.WithNumber("offset", mcp.Description("Message offset for pagination"), mcp.DefaultNumber(0), mcp.Min(0)),
 		mcp.WithNumber("limit", mcp.Description("Max messages per page (default 50, max 200)"), mcp.DefaultNumber(defaultReadLimit), mcp.Min(1), mcp.Max(maxReadLimit)),
 		mcp.WithBoolean("include_tool_output", mcp.Description("Include tool output / thinking"), mcp.DefaultBool(false)),
-	), handleReadSession(database))
+	), handleReadSession(database, beforeRead))
 
 	return s
 }

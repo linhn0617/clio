@@ -92,7 +92,7 @@ func TestParseSince(t *testing.T) {
 
 func TestHandleSearchRequiresQuery(t *testing.T) {
 	d := testDB(t)
-	r := call(t, handleSearch(d), map[string]any{})
+	r := call(t, handleSearch(d, nil), map[string]any{})
 	if !r.IsError {
 		t.Fatal("expected error result when query missing")
 	}
@@ -102,7 +102,7 @@ func TestHandleSearchReturnsHits(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p/x")
 	addMsg(t, d, "s1", 0, "user", "design the authentication module")
-	r := call(t, handleSearch(d), map[string]any{"query": "authentication"})
+	r := call(t, handleSearch(d, nil), map[string]any{"query": "authentication"})
 	m := resultJSON(t, r)
 	if int(m["count"].(float64)) != 1 {
 		t.Fatalf("count=%v want 1", m["count"])
@@ -115,7 +115,7 @@ func TestHandleReadSessionPagination(t *testing.T) {
 	for i := range 5 {
 		addMsg(t, d, "s1", i, "user", "message")
 	}
-	r := call(t, handleReadSession(d), map[string]any{"uuid": "s1", "limit": 2, "offset": 0})
+	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "s1", "limit": 2, "offset": 0})
 	m := resultJSON(t, r)
 	if m["has_more"] != true {
 		t.Fatalf("expected has_more=true, got %v", m["has_more"])
@@ -124,7 +124,7 @@ func TestHandleReadSessionPagination(t *testing.T) {
 		t.Fatalf("expected 2 messages, got %d", len(m["messages"].([]any)))
 	}
 
-	r2 := call(t, handleReadSession(d), map[string]any{"uuid": "s1", "limit": 2, "offset": 4})
+	r2 := call(t, handleReadSession(d, nil), map[string]any{"uuid": "s1", "limit": 2, "offset": 4})
 	m2 := resultJSON(t, r2)
 	if m2["has_more"] != false {
 		t.Fatalf("expected has_more=false at end, got %v", m2["has_more"])
@@ -133,7 +133,7 @@ func TestHandleReadSessionPagination(t *testing.T) {
 
 func TestHandleReadSessionUnknownUUID(t *testing.T) {
 	d := testDB(t)
-	r := call(t, handleReadSession(d), map[string]any{"uuid": "does-not-exist"})
+	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "does-not-exist"})
 	if !r.IsError {
 		t.Fatal("expected error for unknown uuid")
 	}
@@ -143,7 +143,7 @@ func TestHandleActivitySummary(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p/x")
 	addMsg(t, d, "s1", 0, "user", "hi")
-	r := call(t, handleActivitySummary(d), map[string]any{"since": "7d", "group_by": "project"})
+	r := call(t, handleActivitySummary(d, nil), map[string]any{"since": "7d", "group_by": "project"})
 	m := resultJSON(t, r)
 	if _, ok := m["buckets"]; !ok {
 		t.Fatal("expected buckets in summary")
