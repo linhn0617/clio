@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -36,9 +38,17 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	if err := sqlDB.Ping(); err != nil {
+	var pingErr error
+	for attempt := 0; attempt < 50; attempt++ {
+		pingErr = sqlDB.Ping()
+		if pingErr == nil || !isBusyErr(pingErr) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if pingErr != nil {
 		sqlDB.Close()
-		return nil, fmt.Errorf("ping sqlite: %w", err)
+		return nil, fmt.Errorf("ping sqlite: %w", pingErr)
 	}
 	// Serialize writes within this process (watcher + catch-up ingest share the
 	// pool); WAL still allows the read-only pool to read concurrently.
@@ -118,6 +128,22 @@ func (d *DB) migrationApplied(name string) (bool, error) {
 		return false, fmt.Errorf("check migration %s: %w", name, err)
 	}
 	return n > 0, nil
+}
+
+// isBusyErr reports whether err is a SQLite "database is locked" / SQLITE_BUSY
+// error as returned by modernc.org/sqlite. busy_timeout(3000) in the DSN
+// covers normal write-lock contention but the one-time WAL-mode conversion on
+// a brand-new file can still surface SQLITE_BUSY to Ping(); this helper lets
+// the caller retry at the Go level.
+func isBusyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked") ||
+		strings.Contains(msg, "sqlite_busy") ||
+		strings.Contains(msg, "(5)")
 }
 
 // applyMigration runs one migration inside an IMMEDIATE transaction. It
