@@ -23,11 +23,6 @@ var ErrSuperseded = errors.New("lease superseded by another leader")
 // DefaultTTL is how long a heartbeat is considered fresh.
 const DefaultTTL = 10 * time.Second
 
-// mutexStaleAfter is the age fallback for .lk files whose holder pid cannot be
-// checked (e.g. pid reuse after a long-dead crash). A live-but-slow holder is
-// never revoked; only a dead-pid holder (or an unreadably-old file) is broken.
-const mutexStaleAfter = 30 * time.Second
-
 // Lease represents this process's participation in leader election.
 type Lease struct {
 	path  string
@@ -57,56 +52,6 @@ func AcquireOrFollow(path string) (*Lease, bool, error) {
 		return nil, false, err
 	}
 	return l, ok, nil
-}
-
-// mutexPath returns the sidecar lockfile path for a given lease path.
-func mutexPath(leasePath string) string { return leasePath + ".lk" }
-
-// withMutex runs fn while holding a cross-process lock on the lease's sidecar
-// .lk file, so lease read-modify-write critical sections never interleave
-// between processes. The holder's pid is recorded so a crashed holder's lock is
-// reclaimed (pid dead), while a live-but-slow holder is never revoked. The age
-// fallback only guards against pid reuse of a long-dead holder.
-func withMutex(leasePath string, fn func() error) error {
-	lk := mutexPath(leasePath)
-	for {
-		f, err := os.OpenFile(lk, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err == nil {
-			fmt.Fprintf(f, "%d", os.Getpid())
-			ferr := fn()
-			f.Close()
-			os.Remove(lk)
-			return ferr
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return err
-		}
-		if mutexHolderDead(lk) {
-			os.Remove(lk) // O_EXCL on the next loop iteration arbitrates the winner
-			continue
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-}
-
-// mutexHolderDead reports whether the .lk holder has crashed: its recorded pid is
-// not alive, or — defensively against pid reuse — the lock is older than
-// mutexStaleAfter. A live holder mid-critical-section is never reported dead.
-func mutexHolderDead(lk string) bool {
-	fi, err := os.Stat(lk)
-	if err != nil {
-		return false // gone already; let the next O_EXCL create win
-	}
-	if data, rerr := os.ReadFile(lk); rerr == nil {
-		if pid, perr := strconv.Atoi(strings.TrimSpace(string(data))); perr == nil && pid > 0 {
-			if pid == os.Getpid() {
-				return false
-			}
-			return !pidAlive(pid)
-		}
-	}
-	// Unwritten/garbage pid (holder crashed between create and write): fall back to age.
-	return time.Since(fi.ModTime()) > mutexStaleAfter
 }
 
 // randomNonce returns a cryptographically random non-zero uint64.
