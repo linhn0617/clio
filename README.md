@@ -15,12 +15,16 @@ It is local-first, read-only against your `.claude` data, and never writes to yo
 
 **1. Install the binary**
 
+**Prebuilt (recommended)** — download the asset for your platform from the [latest release](https://github.com/linhn0617/clio/releases/latest) (macOS/Linux `amd64`+`arm64`, Windows `amd64`), put it on your `PATH`, and verify it against `SHASUMS256.txt`. This repo is private, so download while signed in to GitHub.
+
+**Or with `go install`:**
+
 ```
+export GOPRIVATE=github.com/linhn0617/*   # private repo: set once
 go install github.com/linhn0617/clio/cmd/clio@latest
 ```
 
-This drops `clio` into `$(go env GOPATH)/bin` — make sure that's on your `PATH`.
-(Or download a prebuilt binary from the [Releases](https://github.com/linhn0617/clio/releases) page: macOS/Linux/Windows, amd64/arm64.)
+This drops `clio` into `$(go env GOPATH)/bin` — make sure that's on your `PATH`, and that your git/GitHub auth can clone the private repo.
 
 **2. Index your history and register the MCP server**
 
