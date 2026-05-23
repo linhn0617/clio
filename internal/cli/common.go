@@ -21,8 +21,9 @@ func discardLogger() *slog.Logger {
 }
 
 // openForQuery opens the database for a read-mostly CLI command and performs a
-// quick incremental catch-up so results reflect the latest sessions. (Phase 3
-// will make this defer to a running MCP writer via a lock file.)
+// quick incremental catch-up so results reflect the latest sessions. When a
+// live MCP leader is detected via the lock file, the CLI defers to it and
+// opens the database read-only instead of running its own catch-up.
 func openForQuery() (*db.DB, error) {
 	dbPath, err := config.DBPath()
 	if err != nil {
@@ -32,8 +33,8 @@ func openForQuery() (*db.DB, error) {
 		return nil, fmt.Errorf("no index found at %s — run `clio index` first", dbPath)
 	}
 
-	// Defer to a running MCP server: it is the sole writer, so query read-only
-	// and skip our own catch-up to avoid write contention.
+	// Defer to a running MCP leader: open read-only and skip catch-up to avoid
+	// write contention with the live leader.
 	if lockPath, err := config.LockPath(); err == nil && lock.IsHeld(lockPath) {
 		return db.OpenReadOnly(dbPath)
 	}

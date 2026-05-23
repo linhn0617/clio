@@ -1,8 +1,10 @@
 package lock
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -82,5 +84,50 @@ func TestReleaseByOwnerRemovesFile(t *testing.T) {
 	}
 	if IsHeld(path) {
 		t.Fatal("lease should be released")
+	}
+}
+
+func TestDeadPidAllowsTakeover(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.lock")
+	now := time.Unix(1000, 0)
+	// Craft a lease file owned by a dead pid but with a FRESH heartbeat, so only
+	// the pid-liveness check (not TTL) can declare it stale.
+	deadPid := 2147483646 // almost certainly not a live process
+	content := fmt.Sprintf("%d %d %d", deadPid, uint64(12345), now.Unix())
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := leaseAt(t, path, &now)
+	ok, err := b.TryPromote()
+	if err != nil || !ok {
+		t.Fatalf("a dead-pid lease must be takeable even with a fresh heartbeat: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestConcurrentPromoteNoCorruption(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.lock")
+	// Use real time so IsHeld (which calls time.Now() internally) sees a fresh
+	// heartbeat and can confirm the winner still holds the lease.
+	now := time.Now()
+	const n = 8
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			l := newLease(path, 10*time.Second, func() time.Time { return now })
+			_, _ = l.TryPromote()
+		}()
+	}
+	wg.Wait()
+	// Whatever the interleaving, the lease file must be a single valid record
+	// (atomic rename never leaves a corrupt/partial file) and a live leader must
+	// be held.
+	rec, err := readRecord(path)
+	if err != nil || rec == nil {
+		t.Fatalf("lease file must be a single valid record after concurrent promotes: rec=%v err=%v", rec, err)
+	}
+	if !IsHeld(path) {
+		t.Fatal("a leader should hold the lease after concurrent promotes")
 	}
 }

@@ -142,8 +142,7 @@ func isBusyErr(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "database is locked") ||
 		strings.Contains(msg, "database table is locked") ||
-		strings.Contains(msg, "sqlite_busy") ||
-		strings.Contains(msg, "(5)")
+		strings.Contains(msg, "sqlite_busy")
 }
 
 // applyMigration runs one migration inside an IMMEDIATE transaction. It

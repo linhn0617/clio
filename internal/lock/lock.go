@@ -53,9 +53,6 @@ func AcquireOrFollow(path string) (*Lease, bool, error) {
 	return l, ok, nil
 }
 
-// IsLeader reports whether this process currently owns the lease.
-func (l *Lease) IsLeader() bool { return l != nil && l.owned }
-
 // TryPromote takes leadership if the current lease is absent or stale. Returns
 // true if this process is now the leader.
 func (l *Lease) TryPromote() (bool, error) {
