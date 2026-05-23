@@ -131,3 +131,47 @@ func TestConcurrentPromoteNoCorruption(t *testing.T) {
 		t.Fatal("a leader should hold the lease after concurrent promotes")
 	}
 }
+
+func TestTwoPromotersExactlyOneWins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.lock")
+	// Shared frozen time so no TTL-based stale decisions interfere.
+	now := time.Now()
+	const n = 8
+	type result struct {
+		won bool
+		err error
+	}
+	results := make(chan result, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			l := newLease(path, 10*time.Second, func() time.Time { return now })
+			won, err := l.TryPromote()
+			results <- result{won, err}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	var winners, failures int
+	for r := range results {
+		if r.err != nil {
+			t.Errorf("unexpected error from TryPromote: %v", r.err)
+			failures++
+		}
+		if r.won {
+			winners++
+		}
+	}
+	if failures > 0 {
+		t.Fatalf("%d goroutine(s) returned errors", failures)
+	}
+	if winners != 1 {
+		t.Fatalf("exactly 1 goroutine should win promotion, got %d", winners)
+	}
+	if !IsHeld(path) {
+		t.Fatal("lease should be held by the winner after concurrent promotes")
+	}
+}
