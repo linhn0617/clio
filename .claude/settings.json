@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go vet *)",
+      "Bash(openspec validate *)",
+      "Bash(openspec show *)",
+      "Bash(openspec list *)"
+    ]
+  }
+}
