@@ -116,4 +116,16 @@ func TestCrossProcessConcurrentIngest(t *testing.T) {
 	if turns != userMsgs {
 		t.Fatalf("turn_count=%d, user messages=%d (drift)", turns, userMsgs)
 	}
+
+	fi, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var watermark int64
+	if err := d.QueryRow(`SELECT last_byte_offset FROM ingest_state WHERE source_file = ?`, file).Scan(&watermark); err != nil {
+		t.Fatal(err)
+	}
+	if watermark != fi.Size() {
+		t.Fatalf("watermark=%d, file size=%d (must match)", watermark, fi.Size())
+	}
 }
