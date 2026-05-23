@@ -118,6 +118,8 @@ func newMCPCmd() *cobra.Command {
 
 // runLeaseRole drives leader/follower transitions until ctx is cancelled.
 // leaderFlag is kept current so beforeRead can skip catch-up when not needed.
+// leaderFlag.Store(true) is deferred into leaderLoop, after the startup
+// catch-up completes, so a just-promoted leader never serves stale reads.
 func runLeaseRole(ctx context.Context, lease *lock.Lease, isLeader bool, leaderFlag *atomic.Bool, ing *ingest.Ingester, projects string, log *slog.Logger) {
 	for {
 		if !isLeader {
@@ -126,11 +128,13 @@ func runLeaseRole(ctx context.Context, lease *lock.Lease, isLeader bool, leaderF
 				return // ctx done
 			}
 		}
-		leaderFlag.Store(true)
-		// Now leader. leaderLoop returns true if superseded (demote), false if ctx done.
-		if !leaderLoop(ctx, lease, ing, projects, log) {
+		// leaderFlag.Store(true) is now done inside leaderLoop, after startup catch-up.
+		// Returns true if superseded (demote), false if ctx done.
+		if !leaderLoop(ctx, lease, leaderFlag, ing, projects, log) {
 			return
 		}
+		// Demoted: clear the flag before going back to follower polling.
+		leaderFlag.Store(false)
 		isLeader = false
 	}
 }
@@ -159,7 +163,9 @@ func pollUntilLeader(ctx context.Context, lease *lock.Lease, log *slog.Logger) b
 
 // leaderLoop runs the watcher + 3s renew while leader. Returns true if the lease
 // was superseded (caller demotes), false if ctx was cancelled.
-func leaderLoop(ctx context.Context, lease *lock.Lease, ing *ingest.Ingester, projects string, log *slog.Logger) bool {
+// leaderFlag is flipped to true only after the startup catch-up completes so
+// that a just-promoted follower never serves stale reads in the promotion window.
+func leaderLoop(ctx context.Context, lease *lock.Lease, leaderFlag *atomic.Bool, ing *ingest.Ingester, projects string, log *slog.Logger) bool {
 	wctx, wcancel := context.WithCancel(ctx)
 	defer wcancel()
 
@@ -168,12 +174,20 @@ func leaderLoop(ctx context.Context, lease *lock.Lease, ing *ingest.Ingester, pr
 			if _, err := ing.IngestAll(wctx, projects, false); err != nil {
 				log.Warn("startup catch-up failed", "err", err)
 			}
+			// Catch-up done: safe to serve reads without follower catch-up.
+			leaderFlag.Store(true)
 			go func() {
 				if err := watcher.New(ing, projects, log).Run(wctx); err != nil {
 					log.Warn("watcher stopped", "err", err)
 				}
 			}()
+		} else {
+			// projects dir doesn't exist; nothing to catch up.
+			leaderFlag.Store(true)
 		}
+	} else {
+		// No projects configured; nothing to catch up.
+		leaderFlag.Store(true)
 	}
 
 	renew := time.NewTicker(leaderRenewInterval)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,7 +34,8 @@ func TestLeaderLoopDemotesOnSupersede(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan bool, 1)
-	go func() { done <- leaderLoop(ctx, lease, ingest.New(nil, nil), "", discardLogger()) }()
+	var flag atomic.Bool
+	go func() { done <- leaderLoop(ctx, lease, &flag, ingest.New(nil, nil), "", discardLogger()) }()
 
 	// Simulate another process taking over: overwrite the lease file with a
 	// different nonce + fresh timestamp. The next Renew (<= ~3s) must see the

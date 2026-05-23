@@ -23,9 +23,10 @@ var ErrSuperseded = errors.New("lease superseded by another leader")
 // DefaultTTL is how long a heartbeat is considered fresh.
 const DefaultTTL = 10 * time.Second
 
-// mutexStaleAfter is how long a .lk sidecar file may exist before being
-// considered a crash artifact and forcibly removed.
-const mutexStaleAfter = 5 * time.Second
+// mutexStaleAfter is the age fallback for .lk files whose holder pid cannot be
+// checked (e.g. pid reuse after a long-dead crash). A live-but-slow holder is
+// never revoked; only a dead-pid holder (or an unreadably-old file) is broken.
+const mutexStaleAfter = 30 * time.Second
 
 // Lease represents this process's participation in leader election.
 type Lease struct {
@@ -63,13 +64,15 @@ func mutexPath(leasePath string) string { return leasePath + ".lk" }
 
 // withMutex runs fn while holding a cross-process lock on the lease's sidecar
 // .lk file, so lease read-modify-write critical sections never interleave
-// between processes. The section is sub-millisecond; a .lk older than
-// mutexStaleAfter means the holder crashed mid-section, so it is broken.
+// between processes. The holder's pid is recorded so a crashed holder's lock is
+// reclaimed (pid dead), while a live-but-slow holder is never revoked. The age
+// fallback only guards against pid reuse of a long-dead holder.
 func withMutex(leasePath string, fn func() error) error {
 	lk := mutexPath(leasePath)
 	for {
 		f, err := os.OpenFile(lk, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
+			fmt.Fprintf(f, "%d", os.Getpid())
 			ferr := fn()
 			f.Close()
 			os.Remove(lk)
@@ -78,25 +81,50 @@ func withMutex(leasePath string, fn func() error) error {
 		if !errors.Is(err, os.ErrExist) {
 			return err
 		}
-		if fi, statErr := os.Stat(lk); statErr == nil && time.Since(fi.ModTime()) > mutexStaleAfter {
-			os.Remove(lk) // stale holder crashed; O_EXCL still arbitrates the retry winner
+		if mutexHolderDead(lk) {
+			os.Remove(lk) // O_EXCL on the next loop iteration arbitrates the winner
 			continue
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
 }
 
+// mutexHolderDead reports whether the .lk holder has crashed: its recorded pid is
+// not alive, or — defensively against pid reuse — the lock is older than
+// mutexStaleAfter. A live holder mid-critical-section is never reported dead.
+func mutexHolderDead(lk string) bool {
+	fi, err := os.Stat(lk)
+	if err != nil {
+		return false // gone already; let the next O_EXCL create win
+	}
+	if data, rerr := os.ReadFile(lk); rerr == nil {
+		if pid, perr := strconv.Atoi(strings.TrimSpace(string(data))); perr == nil && pid > 0 {
+			if pid == os.Getpid() {
+				return false
+			}
+			return !pidAlive(pid)
+		}
+	}
+	// Unwritten/garbage pid (holder crashed between create and write): fall back to age.
+	return time.Since(fi.ModTime()) > mutexStaleAfter
+}
+
 // randomNonce returns a cryptographically random non-zero uint64.
 func randomNonce() uint64 {
 	var b [8]byte
-	for {
-		if _, err := crand.Read(b[:]); err != nil {
-			continue
-		}
-		if n := binary.LittleEndian.Uint64(b[:]); n != 0 {
-			return n
+	for i := 0; i < 10; i++ {
+		if _, err := crand.Read(b[:]); err == nil {
+			if n := binary.LittleEndian.Uint64(b[:]); n != 0 {
+				return n
+			}
 		}
 	}
+	// crypto/rand essentially never fails; fall back to a non-zero unique-ish value.
+	n := uint64(os.Getpid())<<32 ^ uint64(time.Now().UnixNano())
+	if n == 0 {
+		n = 1
+	}
+	return n
 }
 
 // TryPromote takes leadership if the current lease is absent or stale. Returns
