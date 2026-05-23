@@ -1,75 +1,177 @@
-// Package lock implements a pid-based single-writer lock so the CLI can defer
-// to a running MCP server (the sole writer while it runs).
+// Package lock implements a fenced heartbeat leader lease so multiple clio mcp
+// processes can coordinate a single watcher with safe, split-brain-free
+// failover. The lease file holds "pid nonce unix-seconds". Ownership is fenced
+// by the nonce: a superseded leader's Renew/Release become no-ops.
 package lock
 
 import (
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
-// ErrHeld means another live process already holds the lock.
-var ErrHeld = errors.New("lock is held by another running process")
+// ErrSuperseded means another process took leadership; the caller must demote.
+var ErrSuperseded = errors.New("lease superseded by another leader")
 
-// Lock represents an acquired lock file.
-type Lock struct {
-	path string
+// DefaultTTL is how long a heartbeat is considered fresh.
+const DefaultTTL = 10 * time.Second
+
+// Lease represents this process's participation in leader election.
+type Lease struct {
+	path  string
+	pid   int
+	nonce uint64
+	ttl   time.Duration
+	now   func() time.Time
+	owned bool
 }
 
-// Acquire takes an exclusive lock at path by atomically creating the file
-// (O_CREATE|O_EXCL). If the file already exists, it is taken over only when its
-// recorded pid is no longer alive (stale lock); otherwise ErrHeld is returned.
-func Acquire(path string) (*Lock, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		if IsHeld(path) {
-			return nil, ErrHeld
-		}
-		// Stale lock from a dead process: remove and retry once.
-		if rmErr := os.Remove(path); rmErr != nil {
-			return nil, fmt.Errorf("remove stale lock: %w", rmErr)
-		}
-		f, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	}
+type record struct {
+	pid   int
+	nonce uint64
+	ts    int64
+}
+
+func newLease(path string, ttl time.Duration, now func() time.Time) *Lease {
+	return &Lease{path: path, pid: os.Getpid(), ttl: ttl, now: now}
+}
+
+// AcquireOrFollow opens the lease at path, becoming leader if it is absent or
+// stale, otherwise following. Never fatal.
+func AcquireOrFollow(path string) (*Lease, bool, error) {
+	l := newLease(path, DefaultTTL, time.Now)
+	ok, err := l.TryPromote()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	defer f.Close()
-	if _, err := f.WriteString(strconv.Itoa(os.Getpid())); err != nil {
-		return nil, err
-	}
-	return &Lock{path: path}, nil
+	return l, ok, nil
 }
 
-// Release removes the lock file.
-func (l *Lock) Release() error {
-	if l == nil {
+// IsLeader reports whether this process currently owns the lease.
+func (l *Lease) IsLeader() bool { return l != nil && l.owned }
+
+// TryPromote takes leadership if the current lease is absent or stale. Returns
+// true if this process is now the leader.
+func (l *Lease) TryPromote() (bool, error) {
+	rec, _ := readRecord(l.path)
+	if rec != nil && l.live(rec) && rec.nonce != l.nonce {
+		return false, nil
+	}
+	nonce := rand.Uint64()
+	for nonce == 0 {
+		nonce = rand.Uint64()
+	}
+	if err := writeRecordAtomic(l.path, l.pid, nonce, l.now().Unix()); err != nil {
+		return false, err
+	}
+	after, err := readRecord(l.path)
+	if err != nil || after == nil || after.nonce != nonce {
+		l.owned = false
+		return false, nil
+	}
+	l.nonce, l.owned = nonce, true
+	return true, nil
+}
+
+// Renew refreshes the heartbeat, or returns ErrSuperseded if another process
+// has taken over (the caller must stop its watcher and demote).
+func (l *Lease) Renew() error {
+	if !l.owned {
+		return ErrSuperseded
+	}
+	rec, err := readRecord(l.path)
+	if err != nil || rec == nil || rec.nonce != l.nonce {
+		l.owned = false
+		return ErrSuperseded
+	}
+	return writeRecordAtomic(l.path, l.pid, l.nonce, l.now().Unix())
+}
+
+// Release removes the lease only if this process still owns it.
+func (l *Lease) Release() error {
+	if l == nil || !l.owned {
 		return nil
 	}
+	rec, err := readRecord(l.path)
+	if err != nil || rec == nil || rec.nonce != l.nonce {
+		l.owned = false
+		return nil
+	}
+	l.owned = false
 	return os.Remove(l.path)
 }
 
-// IsHeld reports whether a live process currently holds the lock at path.
-// A missing file, unparseable pid, or dead process all count as not held.
+func (l *Lease) live(rec *record) bool {
+	if rec.pid != os.Getpid() && !pidAlive(rec.pid) {
+		return false
+	}
+	return l.now().Unix()-rec.ts <= int64(l.ttl/time.Second)
+}
+
+// IsHeld reports whether a live (non-stale) leader currently holds the lease.
+// Used by CLI commands to defer to a running MCP writer.
 func IsHeld(path string) bool {
+	rec, err := readRecord(path)
+	if err != nil || rec == nil {
+		return false
+	}
+	if rec.pid != os.Getpid() && !pidAlive(rec.pid) {
+		return false
+	}
+	return time.Now().Unix()-rec.ts <= int64(DefaultTTL/time.Second)
+}
+
+func readRecord(path string) (*record, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return nil, err
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return false
+	f := strings.Fields(strings.TrimSpace(string(data)))
+	if len(f) != 3 {
+		return nil, nil
 	}
-	if pid == os.Getpid() {
-		return true
+	pid, e1 := strconv.Atoi(f[0])
+	nonce, e2 := strconv.ParseUint(f[1], 10, 64)
+	ts, e3 := strconv.ParseInt(f[2], 10, 64)
+	if e1 != nil || e2 != nil || e3 != nil || pid <= 0 {
+		return nil, nil
 	}
+	return &record{pid: pid, nonce: nonce, ts: ts}, nil
+}
+
+func writeRecordAtomic(path string, pid int, nonce uint64, ts int64) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".mcp.lock.*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	if _, err := fmt.Fprintf(tmp, "%d %d %d", pid, nonce, ts); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return os.Rename(name, path)
+}
+
+func pidAlive(pid int) bool {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
-	// Signal 0 probes for existence without actually signaling.
 	return proc.Signal(syscall.Signal(0)) == nil
 }

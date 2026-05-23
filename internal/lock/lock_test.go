@@ -3,74 +3,84 @@ package lock
 import (
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
+	"time"
 )
 
-func TestAcquireAndIsHeld(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "mcp.lock")
-	if IsHeld(p) {
-		t.Fatal("missing lock should not be held")
+func leaseAt(t *testing.T, path string, now *time.Time) *Lease {
+	t.Helper()
+	l := newLease(path, 10*time.Second, func() time.Time { return *now })
+	return l
+}
+
+func TestAcquireThenFollow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.lock")
+	now := time.Unix(1000, 0)
+
+	a := leaseAt(t, path, &now)
+	ok, err := a.TryPromote()
+	if err != nil || !ok {
+		t.Fatalf("A should become leader: ok=%v err=%v", ok, err)
 	}
-	lk, err := Acquire(p)
+
+	b := leaseAt(t, path, &now)
+	ok, err = b.TryPromote()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !IsHeld(p) {
-		t.Fatal("lock should be held after acquire (own pid)")
+	if ok {
+		t.Fatal("B should follow a live leader, not promote")
 	}
-	if err := lk.Release(); err != nil {
+}
+
+func TestRenewKeepsLeadership(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.lock")
+	now := time.Unix(1000, 0)
+	a := leaseAt(t, path, &now)
+	if ok, _ := a.TryPromote(); !ok {
+		t.Fatal("A should lead")
+	}
+	now = now.Add(20 * time.Second)
+	if err := a.Renew(); err != nil {
+		t.Fatalf("owner renew should succeed: %v", err)
+	}
+}
+
+func TestStaleHeartbeatAllowsTakeover(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.lock")
+	now := time.Unix(1000, 0)
+	a := leaseAt(t, path, &now)
+	if ok, _ := a.TryPromote(); !ok {
+		t.Fatal("A should lead")
+	}
+	now = now.Add(20 * time.Second)
+	b := leaseAt(t, path, &now)
+	if ok, err := b.TryPromote(); err != nil || !ok {
+		t.Fatalf("B should take over a stale lease: ok=%v err=%v", ok, err)
+	}
+	if err := a.Renew(); err != ErrSuperseded {
+		t.Fatalf("A.Renew after takeover = %v, want ErrSuperseded", err)
+	}
+	if err := a.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if IsHeld(p) {
-		t.Fatal("lock should not be held after release")
+	// A was superseded, so its Release must not delete B's lease file.
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("B's lease file should survive A.Release: %v", err)
 	}
 }
 
-func TestAcquireFailsWhenHeldByLiveProcess(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "mcp.lock")
-	lk, err := Acquire(p)
-	if err != nil {
+func TestReleaseByOwnerRemovesFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.lock")
+	now := time.Unix(1000, 0)
+	a := leaseAt(t, path, &now)
+	if ok, _ := a.TryPromote(); !ok {
+		t.Fatal("A should lead")
+	}
+	if err := a.Release(); err != nil {
 		t.Fatal(err)
 	}
-	defer lk.Release()
-	// Second acquire by the same live process must be refused.
-	if _, err := Acquire(p); err != ErrHeld {
-		t.Fatalf("expected ErrHeld, got %v", err)
-	}
-}
-
-func TestAcquireTakesOverStaleLock(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "mcp.lock")
-	// Write a pid that is almost certainly dead.
-	if err := os.WriteFile(p, []byte("999999"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if IsHeld(p) {
-		t.Skip("pid 999999 unexpectedly alive on this host")
-	}
-	lk, err := Acquire(p)
-	if err != nil {
-		t.Fatalf("should take over stale lock, got %v", err)
-	}
-	defer lk.Release()
-	data, _ := os.ReadFile(p)
-	if got, _ := strconv.Atoi(string(data)); got != os.Getpid() {
-		t.Fatalf("lock file should hold our pid, got %s", data)
-	}
-}
-
-func TestIsHeldUnparseable(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "mcp.lock")
-	os.WriteFile(p, []byte("not-a-pid"), 0o600)
-	if IsHeld(p) {
-		t.Fatal("unparseable pid should not count as held")
-	}
-}
-
-func TestReleaseNilSafe(t *testing.T) {
-	var lk *Lock
-	if err := lk.Release(); err != nil {
-		t.Fatalf("nil Release should be safe, got %v", err)
+	if IsHeld(path) {
+		t.Fatal("lease should be released")
 	}
 }
