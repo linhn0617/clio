@@ -66,7 +66,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		case <-debounce:
 			debounce = nil
 			for path := range dirty {
-				if _, _, err := w.ing.IngestFile(path, false); err != nil {
+				if _, _, err := w.ing.IngestFile(ctx, path, false); err != nil {
 					w.log.Warn("watch ingest failed", "file", path, "err", err)
 				}
 				delete(dirty, path)
@@ -81,7 +81,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		case <-backstop.C:
 			// Recover any events fsnotify dropped, and pick up new dirs.
 			w.addDirsRecursive(fsw, w.projectsDir)
-			if _, err := w.ing.IngestAll(w.projectsDir, false); err != nil {
+			if _, err := w.ing.IngestAll(ctx, w.projectsDir, false); err != nil {
 				w.log.Warn("backstop ingest failed", "err", err)
 			}
 		}

@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,7 +54,7 @@ func TestIngestFullAndSearch(t *testing.T) {
 
 	database := openTestDB(t)
 	ing := New(database, nil)
-	st, err := ing.IngestAll(projects, false)
+	st, err := ing.IngestAll(context.Background(), projects, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,10 +101,10 @@ func TestIngestIdempotentSkip(t *testing.T) {
 	database := openTestDB(t)
 	ing := New(database, nil)
 
-	if _, err := ing.IngestAll(projects, false); err != nil {
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
 		t.Fatal(err)
 	}
-	st, err := ing.IngestAll(projects, false) // second run: unchanged
+	st, err := ing.IngestAll(context.Background(), projects, false) // second run: unchanged
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +119,7 @@ func TestIngestIncrementalAppend(t *testing.T) {
 	database := openTestDB(t)
 	ing := New(database, nil)
 
-	if _, err := ing.IngestAll(projects, false); err != nil {
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
 		t.Fatal(err)
 	}
 	var before int
@@ -134,7 +135,7 @@ func TestIngestIncrementalAppend(t *testing.T) {
 	// Force mtime change to be safe across fast filesystems.
 	bumpMtime(t, path)
 
-	if _, err := ing.IngestAll(projects, false); err != nil {
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
 		t.Fatal(err)
 	}
 	var after int
@@ -161,7 +162,7 @@ func TestIngestPartialLineDeferred(t *testing.T) {
 
 	database := openTestDB(t)
 	ing := New(database, nil)
-	if _, err := ing.IngestAll(projects, false); err != nil {
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
 		t.Fatal(err)
 	}
 	var n int
@@ -176,7 +177,7 @@ func TestIngestPartialLineDeferred(t *testing.T) {
 	f.Close()
 	bumpMtime(t, path)
 
-	if _, err := ing.IngestAll(projects, false); err != nil {
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
 		t.Fatal(err)
 	}
 	database.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='sess-1'`).Scan(&n)
@@ -191,7 +192,7 @@ func TestConcurrentReadDuringWrite(t *testing.T) {
 	writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evAsst1, evResult1, evUser2)
 	database := openTestDB(t)
 	ing := New(database, nil)
-	if _, err := ing.IngestAll(projects, false); err != nil {
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
 		t.Fatal(err)
 	}
 	// A read while a write transaction is open should not deadlock (WAL).
@@ -210,7 +211,7 @@ func TestIngestRawJSONRedacted(t *testing.T) {
 	leak := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"sess-1","message":{"role":"user","content":"my key AKIAIOSFODNN7EXAMPLE"}}`
 	writeSession(t, projects, "-p", "sess-1", leak)
 	d := openTestDB(t)
-	if _, err := New(d, nil).IngestAll(projects, false); err != nil {
+	if _, err := New(d, nil).IngestAll(context.Background(), projects, false); err != nil {
 		t.Fatal(err)
 	}
 	var raw, content string
@@ -232,7 +233,7 @@ func TestIngestSameSizeRewriteForcesFull(t *testing.T) {
 	os.WriteFile(path, []byte(a+"\n"), 0o600)
 	d := openTestDB(t)
 	ing := New(d, nil)
-	if _, err := ing.IngestAll(projects, false); err != nil {
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
 		t.Fatal(err)
 	}
 	var before string
@@ -246,7 +247,7 @@ func TestIngestSameSizeRewriteForcesFull(t *testing.T) {
 	}
 	os.WriteFile(path, []byte(b+"\n"), 0o600)
 	bumpMtime(t, path)
-	if _, err := ing.IngestAll(projects, false); err != nil {
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
 		t.Fatal(err)
 	}
 	var after string
@@ -271,7 +272,7 @@ func TestIngestSelfPollutionAcrossIncrements(t *testing.T) {
 	os.WriteFile(path, []byte(use+"\n"), 0o600)
 	d := openTestDB(t)
 	ing := New(d, nil)
-	if _, err := ing.IngestAll(projects, false); err != nil {
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -282,7 +283,7 @@ func TestIngestSelfPollutionAcrossIncrements(t *testing.T) {
 	f.WriteString(res + "\n")
 	f.Close()
 	bumpMtime(t, path)
-	if _, err := ing.IngestAll(projects, false); err != nil {
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -299,10 +300,10 @@ func TestIngestForceTwiceNoDuplicates(t *testing.T) {
 	database := openTestDB(t)
 	ing := New(database, nil)
 
-	if _, _, err := ing.IngestFile(path, true); err != nil {
+	if _, _, err := ing.IngestFile(context.Background(), path, true); err != nil {
 		t.Fatalf("first ingest: %v", err)
 	}
-	if _, _, err := ing.IngestFile(path, true); err != nil { // force full re-ingest again
+	if _, _, err := ing.IngestFile(context.Background(), path, true); err != nil { // force full re-ingest again
 		t.Fatalf("second ingest: %v", err)
 	}
 
@@ -328,10 +329,10 @@ func TestTurnCountStableAcrossReingest(t *testing.T) {
 	database := openTestDB(t)
 	ing := New(database, nil)
 
-	if _, _, err := ing.IngestFile(path, true); err != nil {
+	if _, _, err := ing.IngestFile(context.Background(), path, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := ing.IngestFile(path, true); err != nil {
+	if _, _, err := ing.IngestFile(context.Background(), path, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -349,7 +350,7 @@ func TestIncrementalWatermarkIsMonotonic(t *testing.T) {
 	path := writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evUser2)
 	database := openTestDB(t)
 	ing := New(database, nil)
-	if _, _, err := ing.IngestFile(path, false); err != nil {
+	if _, _, err := ing.IngestFile(context.Background(), path, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -385,27 +386,27 @@ func TestChangeFullAbortsWhenFileChangedUnderUs(t *testing.T) {
 	ing := New(database, nil)
 
 	// Seed V1.
-	if _, _, err := ing.IngestFile(path, true); err != nil {
+	if _, _, err := ing.IngestFile(context.Background(), path, true); err != nil {
 		t.Fatal(err)
 	}
 
 	// While the next full ingest is mid-transaction (after BEGIN, before writes),
 	// replace the file with V2 (four events, different size) to simulate a
 	// concurrent writer's commit.
-	preCommitHook = func() {
+	ing.preCommitHook = func() {
 		writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evAsst1, evResult1, evUser2)
-		preCommitHook = nil
+		ing.preCommitHook = nil
 	}
-	t.Cleanup(func() { preCommitHook = nil })
+	t.Cleanup(func() { ing.preCommitHook = nil })
 
 	// Force a full ingest using the stale (V1) in-memory snapshot. It must abort
 	// cleanly (no error surfaced) rather than revert the DB to V1 over V2.
-	if _, _, err := ing.IngestFile(path, true); err != nil {
+	if _, _, err := ing.IngestFile(context.Background(), path, true); err != nil {
 		t.Fatalf("ingest should abort cleanly, got error: %v", err)
 	}
 
 	// A subsequent ingest reconciles the DB to V2 (more messages than V1's 2).
-	if _, _, err := ing.IngestFile(path, true); err != nil {
+	if _, _, err := ing.IngestFile(context.Background(), path, true); err != nil {
 		t.Fatal(err)
 	}
 	var n int

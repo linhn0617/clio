@@ -55,7 +55,7 @@ func TestWatcherIngestsAppend(t *testing.T) {
 	}
 	defer d.Close()
 	ing := ingest.New(d, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ing.IngestAll(projects, false) // baseline
+	ing.IngestAll(context.Background(), projects, false) // baseline
 	base := msgCount(t, d)
 
 	startWatcher(t, projects, d)

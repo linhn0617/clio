@@ -2,6 +2,7 @@
 package ingest
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -14,11 +15,6 @@ import (
 	"github.com/linhn0617/clio/internal/model"
 )
 
-// preCommitHook, if non-nil, runs inside commit() just after BEGIN and before
-// any writes. Tests use it to mutate the on-disk file and exercise the
-// re-validation guard. Always nil in production.
-var preCommitHook func()
-
 // errStaleSnapshot means the source file changed between read and commit; the
 // caller treats it as a no-op and lets a later pass re-ingest the fresh bytes.
 var errStaleSnapshot = errors.New("source file changed during ingest")
@@ -27,6 +23,10 @@ var errStaleSnapshot = errors.New("source file changed during ingest")
 type Ingester struct {
 	db  *db.DB
 	log *slog.Logger
+	// preCommitHook, if non-nil, runs inside commit() just after BEGIN and
+	// before any writes. Tests use it to mutate the on-disk file and exercise
+	// the re-validation guard. Always nil in production.
+	preCommitHook func()
 }
 
 // New returns an Ingester. If log is nil, logging is discarded.
@@ -46,16 +46,20 @@ type Stats struct {
 }
 
 // IngestAll walks projectsDir and ingests every .jsonl file. force re-ingests
-// from scratch regardless of stored state.
-func (ing *Ingester) IngestAll(projectsDir string, force bool) (Stats, error) {
+// from scratch regardless of stored state. The context is checked before each
+// file so a cancelled (demoted) leader stops promptly.
+func (ing *Ingester) IngestAll(ctx context.Context, projectsDir string, force bool) (Stats, error) {
 	files, err := WalkSessionFiles(projectsDir)
 	if err != nil {
 		return Stats{}, err
 	}
 	var st Stats
 	for _, f := range files {
+		if err := ctx.Err(); err != nil {
+			return st, err
+		}
 		st.FilesScanned++
-		n, ingested, err := ing.IngestFile(f, force)
+		n, ingested, err := ing.IngestFile(ctx, f, force)
 		if err != nil {
 			ing.log.Warn("ingest file failed", "file", f, "err", err)
 			continue
@@ -73,12 +77,15 @@ func (ing *Ingester) IngestAll(projectsDir string, force bool) (Stats, error) {
 // IngestFile ingests a single .jsonl file. Returns the number of messages added
 // and whether any ingest happened (false = skipped as unchanged). The whole
 // file is committed in one transaction.
-func (ing *Ingester) IngestFile(path string, force bool) (int, bool, error) {
+func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (int, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
 	fi, err := os.Stat(path)
 	if err != nil {
 		return 0, false, err
 	}
-	size, mtime := fi.Size(), fi.ModTime().Unix()
+	size, mtime := fi.Size(), fi.ModTime().UnixNano()
 
 	prior, err := ing.loadState(path)
 	if err != nil {
@@ -208,19 +215,17 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 	}
 	defer tx.Rollback()
 
-	if preCommitHook != nil {
-		preCommitHook()
+	if ing.preCommitHook != nil {
+		ing.preCommitHook()
 	}
 
-	// changeFull deletes the session's rows before reinserting. If the file
-	// changed since we read it (a concurrent writer committed newer bytes),
-	// committing our stale snapshot would revert the DB below disk. Re-stat
-	// inside the write lock and abort if it moved.
-	if kind == changeFull {
-		if fi, statErr := os.Stat(fs.SourceFile); statErr == nil {
-			if fi.Size() != fs.LastSize || fi.ModTime().Unix() != fs.LastMTime {
-				return 0, errStaleSnapshot
-			}
+	// If the file changed since we read it (a concurrent writer committed newer
+	// bytes, or a rewrite/truncate happened), committing our stale snapshot
+	// could insert phantom rows or revert the DB below disk. Re-stat inside the
+	// write lock and abort; the next watcher tick / catch-up re-ingests fresh.
+	if fi, statErr := os.Stat(fs.SourceFile); statErr == nil {
+		if fi.Size() != fs.LastSize || fi.ModTime().UnixNano() != fs.LastMTime {
+			return 0, errStaleSnapshot
 		}
 	}
 
@@ -279,29 +284,31 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 		return 0, err
 	}
 
-	if kind == changeFull {
-		if _, err := tx.Exec(`INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, last_ingested_at)
-			VALUES (?,?,?,?,?,?)
-			ON CONFLICT(source_file) DO UPDATE SET last_size=excluded.last_size, last_mtime=excluded.last_mtime,
-			last_byte_offset=excluded.last_byte_offset, tail_fingerprint=excluded.tail_fingerprint, last_ingested_at=excluded.last_ingested_at`,
-			fs.SourceFile, fs.LastSize, fs.LastMTime, fs.LastByteOffset, fs.TailFingerprint, fs.LastIngestedAt); err != nil {
-			return 0, err
-		}
-	} else {
-		if _, err := tx.Exec(`INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, last_ingested_at)
-			VALUES (?,?,?,?,?,?)
-			ON CONFLICT(source_file) DO UPDATE SET last_size=excluded.last_size, last_mtime=excluded.last_mtime,
-			last_byte_offset=excluded.last_byte_offset, tail_fingerprint=excluded.tail_fingerprint, last_ingested_at=excluded.last_ingested_at
-			WHERE excluded.last_byte_offset >= ingest_state.last_byte_offset`,
-			fs.SourceFile, fs.LastSize, fs.LastMTime, fs.LastByteOffset, fs.TailFingerprint, fs.LastIngestedAt); err != nil {
-			return 0, err
-		}
+	monotonic := kind != changeFull
+	if err := ing.upsertIngestState(tx, fs, monotonic); err != nil {
+		return 0, err
 	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return inserted, nil
+}
+
+// upsertIngestState writes the file watermark into ingest_state. When monotonic
+// is true (incremental ingests), the update only applies when the new offset is
+// at least as large as the stored one — preventing a stale writer from moving
+// the watermark backward.
+func (ing *Ingester) upsertIngestState(tx *sql.Tx, fs FileState, monotonic bool) error {
+	q := `INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, last_ingested_at)
+		VALUES (?,?,?,?,?,?)
+		ON CONFLICT(source_file) DO UPDATE SET last_size=excluded.last_size, last_mtime=excluded.last_mtime,
+		last_byte_offset=excluded.last_byte_offset, tail_fingerprint=excluded.tail_fingerprint, last_ingested_at=excluded.last_ingested_at`
+	if monotonic {
+		q += ` WHERE excluded.last_byte_offset >= ingest_state.last_byte_offset`
+	}
+	_, err := tx.Exec(q, fs.SourceFile, fs.LastSize, fs.LastMTime, fs.LastByteOffset, fs.TailFingerprint, fs.LastIngestedAt)
+	return err
 }
 
 func (ing *Ingester) upsertSession(tx *sql.Tx, s model.Session, userTurns int, kind changeKind) error {

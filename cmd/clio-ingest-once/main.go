@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -20,7 +21,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer d.Close()
-	if _, err := ingest.New(d, nil).IngestAll(projects, false); err != nil {
+	if _, err := ingest.New(d, nil).IngestAll(context.Background(), projects, false); err != nil {
 		fmt.Fprintln(os.Stderr, "ingest:", err)
 		os.Exit(1)
 	}

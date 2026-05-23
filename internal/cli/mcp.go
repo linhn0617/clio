@@ -74,7 +74,7 @@ func newMCPCmd() *cobra.Command {
 				}
 				lastCatchup = time.Now()
 				catchupMu.Unlock()
-				if _, err := ing.IngestAll(projects, false); err != nil {
+				if _, err := ing.IngestAll(ctx, projects, false); err != nil {
 					log.Warn("read catch-up failed (serving possibly-stale)", "err", err)
 				}
 			}
@@ -134,7 +134,7 @@ func leaderLoop(ctx context.Context, lease *lock.Lease, ing *ingest.Ingester, pr
 
 	if projects != "" {
 		if _, err := os.Stat(projects); err == nil {
-			if _, err := ing.IngestAll(projects, false); err != nil {
+			if _, err := ing.IngestAll(wctx, projects, false); err != nil {
 				log.Warn("startup catch-up failed", "err", err)
 			}
 			go func() {

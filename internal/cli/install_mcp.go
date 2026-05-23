@@ -45,7 +45,7 @@ func newInstallMCPCmd() *cobra.Command {
 				}
 				ing := ingest.New(database, stderrLogger())
 				fmt.Fprintln(os.Stdout, "Indexing your Claude Code history…")
-				st, err := ing.IngestAll(projects, false)
+				st, err := ing.IngestAll(cmd.Context(), projects, false)
 				if err != nil {
 					database.Close()
 					return fmt.Errorf("indexing failed, leaving ~/.claude.json untouched: %w", err)

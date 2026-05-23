@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -46,7 +47,7 @@ func openForQuery() (*db.DB, error) {
 	if projects, err := config.ClaudeProjectsDir(); err == nil {
 		if _, statErr := os.Stat(projects); statErr == nil {
 			ing := ingest.New(database, discardLogger())
-			if _, err := ing.IngestAll(projects, false); err != nil {
+			if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
 				stderrLogger().Warn("incremental catch-up failed", "err", err)
 			}
 		}

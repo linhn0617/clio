@@ -45,7 +45,7 @@ func newIndexCmd() *cobra.Command {
 			log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 			ing := ingest.New(database, log)
 
-			st, err := ing.IngestAll(projects, full)
+			st, err := ing.IngestAll(cmd.Context(), projects, full)
 			if err != nil {
 				return err
 			}
