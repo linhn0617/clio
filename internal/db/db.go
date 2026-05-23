@@ -19,7 +19,7 @@ import (
 var migrationsFS embed.FS
 
 const (
-	pingMaxAttempts = 50               // ~5s ceiling, above busy_timeout, for cold-start WAL-init races
+	pingMaxAttempts = 50 // ~5s ceiling, above busy_timeout, for cold-start WAL-init races
 	pingRetryDelay  = 100 * time.Millisecond
 )
 
