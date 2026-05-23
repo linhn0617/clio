@@ -27,8 +27,27 @@ and SHALL ensure no secret reaches the session title.
 - **THEN** the system SHALL replace that value with `[REDACTED:key]` in the stored
   `raw_json`, regardless of whether the value matches a shape pattern
 
+#### Scenario: Secret embedded as JSON inside a text field
+
+- **WHEN** a message body is (or contains) JSON text such as `{"apiKey":"…"}`
+- **THEN** the system SHALL parse that JSON, replace the secret-keyed value with
+  `[REDACTED:key]`, and store the redacted form in `content` and `raw_json`
+
+#### Scenario: Whole value redacted regardless of type under a secret key
+
+- **WHEN** a secret-bearing key holds a non-string value (number, array, or object)
+  such as `{"auth_token":{"u":"a"}}`
+- **THEN** the system SHALL redact the entire value, not only string leaves
+
 #### Scenario: Session title never contains a raw secret
 
 - **WHEN** the first user message used to derive a session's title contains a secret
 - **THEN** the stored `sessions.title` SHALL contain only the redacted form, never the
   raw secret
+
+#### Scenario: raw_json fidelity is display-grade, not byte-exact
+
+- **WHEN** redaction re-serializes an event's JSON for `raw_json`
+- **THEN** the system SHALL preserve values including `<`, `>`, `&` and large
+  integers, while object key order and insignificant whitespace MAY be normalized
+  (raw_json is for display via `clio show --format raw`, not byte-exact replay)
