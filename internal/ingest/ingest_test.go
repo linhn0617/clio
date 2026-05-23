@@ -185,6 +185,7 @@ func TestIngestPartialLineDeferred(t *testing.T) {
 	}
 }
 
+// NOTE: in-process only; cross-process safety is covered by TestCrossProcessConcurrentIngest.
 func TestConcurrentReadDuringWrite(t *testing.T) {
 	projects := t.TempDir()
 	writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evAsst1, evResult1, evUser2)
