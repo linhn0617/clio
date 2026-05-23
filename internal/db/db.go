@@ -4,6 +4,7 @@ package db
 import (
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,11 +12,16 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	sqlitelib "modernc.org/sqlite"
 )
 
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
+
+const (
+	pingMaxAttempts = 50               // ~5s ceiling, above busy_timeout, for cold-start WAL-init races
+	pingRetryDelay  = 100 * time.Millisecond
+)
 
 // DB wraps a *sql.DB configured for clio.
 type DB struct {
@@ -39,12 +45,12 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	var pingErr error
-	for attempt := 0; attempt < 50; attempt++ {
+	for attempt := 0; attempt < pingMaxAttempts; attempt++ {
 		pingErr = sqlDB.Ping()
 		if pingErr == nil || !isBusyErr(pingErr) {
 			break
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(pingRetryDelay)
 	}
 	if pingErr != nil {
 		sqlDB.Close()
@@ -139,6 +145,14 @@ func isBusyErr(err error) bool {
 	if err == nil {
 		return false
 	}
+	var se *sqlitelib.Error
+	if errors.As(err, &se) {
+		switch se.Code() & 0xFF { // mask extended result codes to the primary code
+		case 5, 6: // SQLITE_BUSY, SQLITE_LOCKED
+			return true
+		}
+	}
+	// Fallback for wrapped/other error shapes.
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "database is locked") ||
 		strings.Contains(msg, "database table is locked") ||
