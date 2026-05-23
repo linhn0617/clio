@@ -11,6 +11,8 @@ clio indexes Claude Code's session files (`~/.claude/projects/*.jsonl`) into a l
 
 It is local-first, read-only against your `.claude` data, and never writes to your original session files.
 
+📖 **Full usage guide (bilingual):** [docs/USAGE.md](./docs/USAGE.md)
+
 ## Getting started
 
 **1. Install the binary**
