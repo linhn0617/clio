@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -10,6 +12,25 @@ import (
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/doctor"
 )
+
+var errChecksFailed = errors.New("doctor: some checks reported warnings")
+
+func reportDoctor(w io.Writer, results []doctor.Result) error {
+	allOK := true
+	for _, r := range results {
+		mark := "ok  "
+		if !r.OK {
+			mark = "WARN"
+			allOK = false
+		}
+		fmt.Fprintf(w, "[%s] %-22s %s\n", mark, r.Name, r.Detail)
+	}
+	if !allOK {
+		fmt.Fprintln(w, "\nSome checks reported warnings. Run `clio index --full` to rebuild if needed.")
+		return errChecksFailed
+	}
+	return nil
+}
 
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
@@ -30,20 +51,7 @@ func newDoctorCmd() *cobra.Command {
 			}
 			defer database.Close()
 
-			results := doctor.Run(database, projects, dbPath)
-			allOK := true
-			for _, r := range results {
-				mark := "ok  "
-				if !r.OK {
-					mark = "WARN"
-					allOK = false
-				}
-				fmt.Fprintf(os.Stdout, "[%s] %-22s %s\n", mark, r.Name, r.Detail)
-			}
-			if !allOK {
-				fmt.Fprintln(os.Stdout, "\nSome checks reported warnings. Run `clio index --full` to rebuild if needed.")
-			}
-			return nil
+			return reportDoctor(os.Stdout, doctor.Run(database, projects, dbPath))
 		},
 	}
 }
