@@ -226,14 +226,20 @@ func truncateForFTS(s string) string {
 }
 
 func trimToValidUTF8(s string) string {
-	for len(s) > 0 && !utf8.ValidString(s) {
+	for len(s) > 0 {
+		if r, size := utf8.DecodeLastRuneInString(s); r != utf8.RuneError || size > 1 {
+			break
+		}
 		s = s[:len(s)-1]
 	}
 	return s
 }
 
 func trimLeadingToValidUTF8(s string) string {
-	for len(s) > 0 && !utf8.ValidString(s) {
+	for len(s) > 0 {
+		if r, size := utf8.DecodeRuneInString(s); r != utf8.RuneError || size > 1 {
+			break
+		}
 		s = s[1:]
 	}
 	return s

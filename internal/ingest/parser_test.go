@@ -153,6 +153,27 @@ func TestTruncateForFTS(t *testing.T) {
 	}
 }
 
+func TestTrimToValidUTF8(t *testing.T) {
+	if got := trimToValidUTF8("ab" + string([]byte{0xE4, 0xBD})); got != "ab" {
+		t.Fatalf("truncated 3-byte rune not dropped: got %q", got)
+	}
+	if got := trimToValidUTF8("héllo"); got != "héllo" {
+		t.Fatalf("complete trailing rune changed: got %q", got)
+	}
+	if got := trimToValidUTF8("x" + string('�')); got != "x"+string('�') {
+		t.Fatalf("real U+FFFD dropped: got %q", got)
+	}
+	if got := trimToValidUTF8(""); got != "" {
+		t.Fatalf("empty changed: got %q", got)
+	}
+	if got := trimLeadingToValidUTF8(string([]byte{0xBD, 0xBF}) + "cd"); got != "cd" {
+		t.Fatalf("leading continuation bytes not dropped: got %q", got)
+	}
+	if got := trimLeadingToValidUTF8("héllo"); got != "héllo" {
+		t.Fatalf("complete leading rune changed: got %q", got)
+	}
+}
+
 func TestSeqMonotonic(t *testing.T) {
 	p := NewParser(5)
 	line := `{"type":"assistant","sessionId":"s1","message":{"role":"assistant","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}}`
