@@ -11,10 +11,21 @@ import (
 	"github.com/linhn0617/clio/internal/sessions"
 )
 
+const defaultShowMessages = 100000
+
+func resolveShowFormat(format string, jsonFlag bool) string {
+	if jsonFlag {
+		return "json"
+	}
+	return format
+}
+
 func newShowCmd() *cobra.Command {
 	var (
 		format       string
 		noToolOutput bool
+		jsonFlag     bool
+		limit        int
 	)
 	cmd := &cobra.Command{
 		Use:   "show <session-uuid-or-prefix>",
@@ -31,7 +42,11 @@ func newShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			msgs, _, err := sessions.GetMessages(database, sess.UUID, 0, 100000, !noToolOutput)
+			format = resolveShowFormat(format, jsonFlag)
+			if limit <= 0 {
+				limit = defaultShowMessages
+			}
+			msgs, _, err := sessions.GetMessages(database, sess.UUID, 0, limit, !noToolOutput)
 			if err != nil {
 				return err
 			}
@@ -60,6 +75,8 @@ func newShowCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&format, "format", "markdown", "Output format (markdown|json|raw)")
 	cmd.Flags().BoolVar(&noToolOutput, "no-tool-output", false, "Omit tool output")
+	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output JSON (alias for --format json)")
+	cmd.Flags().IntVar(&limit, "limit", defaultShowMessages, "Maximum messages to render")
 	return cmd
 }
 
