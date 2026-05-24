@@ -171,7 +171,7 @@ func ActivitySummary(database *db.DB, since int64, groupBy string) ([]Bucket, er
 	case "project":
 		keyExpr = "COALESCE(s.project_path,'(unknown)')"
 	case "day", "":
-		keyExpr = "date(s.ended_at,'unixepoch')"
+		keyExpr = "date(s.ended_at,'unixepoch','localtime')"
 	default:
 		return nil, fmt.Errorf("invalid group_by %q", groupBy)
 	}
