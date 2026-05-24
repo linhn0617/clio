@@ -65,4 +65,7 @@
 - [x] 8.1 `go test ./... -race -count=1` green.
 - [x] 8.2 `go test ./... -count=1`, `go vet ./...`, `go build ./...`,
   `GOOS=windows GOARCH=amd64 go build ./...` clean; `gofmt -l .` empty.
-- [ ] 8.3 Self-review, then codex re-review of the diff; address findings.
+- [x] 8.3 Self-review, then codex re-review of the diff; address findings.
+  (codex impl-review, 1 Medium, fixed: the unconditional `defer os.Remove(backup)` deleted a
+  pre-existing unrelated `<config>.bak` when this call wrote no backup (config absent); now
+  guarded by a `backupCreated` flag. Added `TestPreExistingBakPreservedWhenNoBackupWritten`.)

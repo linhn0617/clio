@@ -119,14 +119,21 @@ func mutate(configPath string, fn func(map[string]any) error) error {
 
 	// Back up an existing config first.
 	backup := configPath + ".bak"
+	backupCreated := false
 	if existing, rerr := os.ReadFile(configPath); rerr == nil {
 		if werr := os.WriteFile(backup, existing, 0o600); werr != nil {
 			return fmt.Errorf("write backup: %w", werr)
 		}
+		backupCreated = true
 	}
-	// The atomic rename keeps the original intact on failure, so the backup is
-	// redundant on every exit. os.Remove of a missing file is harmless.
-	defer os.Remove(backup)
+	// The atomic rename keeps the original intact on failure, so a backup we wrote
+	// is redundant on every exit. Only remove the backup this call created — never
+	// a pre-existing unrelated <config>.bak.
+	defer func() {
+		if backupCreated {
+			os.Remove(backup)
+		}
+	}()
 
 	// Atomic write: temp file in the same dir, fsync, rename.
 	dir := filepath.Dir(configPath)
