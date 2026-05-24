@@ -196,10 +196,16 @@ func writeRecordAtomic(path string, pid int, nonce uint64, ts int64) error {
 	return os.Rename(name, path)
 }
 
+// signalProc is a seam so tests can simulate signal outcomes (e.g. EPERM).
+var signalProc = func(p *os.Process, sig os.Signal) error { return p.Signal(sig) }
+
 func pidAlive(pid int) bool {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	// EPERM means the process exists but we lack permission to signal it (e.g. a
+	// different user) — still alive, so don't steal its lease.
+	serr := signalProc(proc, syscall.Signal(0))
+	return serr == nil || errors.Is(serr, syscall.EPERM)
 }

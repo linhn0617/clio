@@ -17,10 +17,10 @@ import (
 	"github.com/linhn0617/clio/internal/ingest"
 )
 
-const (
-	debounceWindow = 500 * time.Millisecond
-	backstopPeriod = 60 * time.Second
-)
+const debounceWindow = 500 * time.Millisecond
+
+// backstopPeriod is a var so tests can shorten the reconcile/purge interval.
+var backstopPeriod = 60 * time.Second
 
 // Watcher watches projectsDir and incrementally ingests changes.
 type Watcher struct {
@@ -86,6 +86,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 			w.addDirsRecursive(fsw, w.projectsDir)
 			if _, err := w.ing.IngestAll(ctx, w.projectsDir, false); err != nil {
 				w.log.Warn("backstop ingest failed", "err", err)
+			}
+			if err := w.ing.PurgeMissing(ctx, w.projectsDir); err != nil {
+				w.log.Warn("backstop purge failed", "err", err)
 			}
 		}
 	}

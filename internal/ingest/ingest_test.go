@@ -3,6 +3,7 @@ package ingest
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -465,6 +466,154 @@ func TestIngestAbortsWhenSourceRemovedAtCommit(t *testing.T) {
 	}
 	if ingested {
 		t.Fatal("expected ingested=false when source removed before commit re-validation")
+	}
+}
+
+// sessionEvent builds a one-line user event for the given session uuid and content.
+func sessionEvent(uuid, content string) string {
+	return `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"` + uuid + `","message":{"role":"user","content":"` + content + `"}}`
+}
+
+func sessionCount(t *testing.T, d *db.DB) int {
+	t.Helper()
+	var n int
+	if err := d.QueryRow(`SELECT count(*) FROM sessions`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// PurgeMissing removes a deleted source's rows and leaves survivors intact.
+func TestPurgeMissingRemovesDeletedSource(t *testing.T) {
+	projects := t.TempDir()
+	writeSession(t, projects, "-p", "keep", sessionEvent("keep", "keep content here"))
+	gonePath := writeSession(t, projects, "-p", "gone", sessionEvent("gone", "UNIQUEGONE content here"))
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(gonePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+
+	var n int
+	d.QueryRow(`SELECT count(*) FROM sessions WHERE uuid='gone'`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("deleted session not purged: %d", n)
+	}
+	d.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='gone'`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("deleted messages not purged: %d", n)
+	}
+	d.QueryRow(`SELECT count(*) FROM ingest_state WHERE source_file=?`, gonePath).Scan(&n)
+	if n != 0 {
+		t.Fatalf("deleted ingest_state not purged: %d", n)
+	}
+	d.QueryRow(`SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'UNIQUEGONE'`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("deleted content still in FTS: %d", n)
+	}
+	d.QueryRow(`SELECT count(*) FROM sessions WHERE uuid='keep'`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("survivor session missing: %d", n)
+	}
+}
+
+// PurgeMissing must remove messages even when the sessions row is already gone
+// (ghost state): deletion must key on the canonical uuid, not a sessions subquery.
+func TestPurgeMissingRemovesGhostMessages(t *testing.T) {
+	projects := t.TempDir()
+	gonePath := writeSession(t, projects, "-p", "ghost", sessionEvent("ghost", "GHOSTCONTENT here"))
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a ghost: drop the sessions row but leave messages + ingest_state.
+	if _, err := d.Exec(`DELETE FROM sessions WHERE uuid='ghost'`); err != nil {
+		t.Fatal(err)
+	}
+	var m int
+	d.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='ghost'`).Scan(&m)
+	if m == 0 {
+		t.Fatal("setup: expected ghost messages to exist")
+	}
+	os.Remove(gonePath)
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	d.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='ghost'`).Scan(&m)
+	if m != 0 {
+		t.Fatalf("ghost messages not purged: %d", m)
+	}
+}
+
+// A missing/unreadable projects root must NOT purge anything (filesystem unavailable).
+func TestPurgeMissingSkipsWhenRootMissing(t *testing.T) {
+	projects := t.TempDir()
+	writeSession(t, projects, "-p", "s1", sessionEvent("s1", "content one"))
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	os.RemoveAll(projects) // whole root gone
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionCount(t, d); got != 1 {
+		t.Fatalf("root missing must not purge; sessions=%d want 1", got)
+	}
+}
+
+// A small history where every source is genuinely deleted must still purge (the ratio
+// cap must not block small installs).
+func TestPurgeMissingSmallHistoryStillPurges(t *testing.T) {
+	projects := t.TempDir()
+	p1 := writeSession(t, projects, "-p", "a", sessionEvent("a", "aaa"))
+	p2 := writeSession(t, projects, "-p", "b", sessionEvent("b", "bbb"))
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(p1)
+	os.Remove(p2)
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionCount(t, d); got != 0 {
+		t.Fatalf("small history: expected both purged, sessions=%d", got)
+	}
+}
+
+// A mass disappearance (large count AND most of the corpus) is treated as a filesystem
+// problem and must NOT purge.
+func TestPurgeMissingAbortsOnMassDisappearance(t *testing.T) {
+	projects := t.TempDir()
+	var paths []string
+	for i := 0; i < 12; i++ {
+		uuid := fmt.Sprintf("s%02d", i)
+		paths = append(paths, writeSession(t, projects, "-p", uuid, sessionEvent(uuid, "content "+uuid)))
+	}
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range paths {
+		os.Remove(p)
+	}
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionCount(t, d); got != 12 {
+		t.Fatalf("mass disappearance must abort purge; sessions=%d want 12", got)
 	}
 }
 

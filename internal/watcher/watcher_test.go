@@ -67,6 +67,43 @@ func TestWatcherIngestsAppend(t *testing.T) {
 	waitFor(t, base+1, d)
 }
 
+func TestWatcherBackstopPurgesDeleted(t *testing.T) {
+	orig := backstopPeriod
+	backstopPeriod = 200 * time.Millisecond
+	t.Cleanup(func() { backstopPeriod = orig })
+
+	projects := t.TempDir()
+	dir := filepath.Join(projects, "-Users-x-p")
+	os.MkdirAll(dir, 0o755)
+	path := filepath.Join(dir, "del-1.jsonl")
+	os.WriteFile(path, []byte(line("del-1", "to be deleted")+"\n"), 0o600)
+
+	d, err := db.Open(filepath.Join(t.TempDir(), "w.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	ing := ingest.New(d, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ing.IngestAll(context.Background(), projects, false)
+	if msgCount(t, d) == 0 {
+		t.Fatal("baseline ingest produced no messages")
+	}
+
+	startWatcher(t, projects, d)
+	os.Remove(path)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int
+		d.QueryRow(`SELECT count(*) FROM sessions WHERE uuid='del-1'`).Scan(&n)
+		if n == 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("deleted source not purged by backstop")
+}
+
 func TestWatcherPicksUpNewProjectDir(t *testing.T) {
 	projects := t.TempDir()
 	d, err := db.Open(filepath.Join(t.TempDir(), "w.sqlite"))

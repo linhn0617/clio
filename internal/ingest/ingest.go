@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"time"
@@ -425,6 +426,110 @@ func (ing *Ingester) upsertSession(tx *sql.Tx, s model.Session, userTurns int, k
 		VALUES (?,?,?,?,?,?,?)`,
 		s.UUID, nullEmpty(s.ProjectPath), s.SourceFile, nullZero(s.StartedAt), nullZero(s.EndedAt), userTurns, nullEmpty(s.Title))
 	return err
+}
+
+// PurgeMissing reconciles the DB against the filesystem and removes rows for source
+// files confirmed gone (a not-exist stat result). It is the authoritative deletion path
+// (fsnotify Remove/Rename events fire during atomic temp->rename writes, so a raw event
+// is not trustworthy). Two blast-radius guards: it does nothing if the projects root is
+// missing/unreadable, and it refuses to purge when the missing set is both a large count
+// and most of the corpus (a filesystem problem, not deletions).
+func (ing *Ingester) PurgeMissing(ctx context.Context, projectsDir string) error {
+	// Root guard: if the projects dir is missing/unreadable, the filesystem is
+	// unavailable — never read that as "the user deleted everything". Use ReadDir, not
+	// Stat, so an unreadable (not just absent) root is also caught.
+	if _, err := os.ReadDir(projectsDir); err != nil {
+		ing.log.Warn("purge skipped: projects dir unavailable", "dir", projectsDir, "err", err)
+		return nil
+	}
+
+	srcs, err := ing.allSourceFiles()
+	if err != nil {
+		return err
+	}
+	var missing []string
+	for _, src := range srcs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, serr := os.Stat(src); errors.Is(serr, fs.ErrNotExist) {
+			missing = append(missing, src)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	// Safety cap: refuse a purge that is BOTH a large absolute count AND most of the
+	// corpus — that pattern is a filesystem problem, not real deletions. A small number
+	// of genuine deletions (even all sources on a tiny install) still purges.
+	const minPurgeForCap = 10
+	if len(missing) > minPurgeForCap && len(missing)*2 > len(srcs) {
+		ing.log.Warn("purge refused: most sources missing at once, likely a filesystem problem",
+			"missing", len(missing), "total", len(srcs))
+		return nil
+	}
+
+	for _, src := range missing {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := ing.purgeSource(src); err != nil {
+			ing.log.Warn("purge source failed", "file", src, "err", err)
+		}
+	}
+	return nil
+}
+
+func (ing *Ingester) allSourceFiles() ([]string, error) {
+	rows, err := ing.db.Query(`SELECT source_file FROM ingest_state
+		UNION SELECT source_file FROM sessions WHERE source_file IS NOT NULL AND source_file <> ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// purgeSource removes one source's session, messages (FTS via delete triggers), orphaned
+// tool_calls, and ingest_state row in a single transaction. It deletes by the canonical
+// uuid (sessionUUIDFromPath), so messages are removed even if the sessions row is already
+// gone (ghost state). A final re-stat closes the scan->delete TOCTOU window: if the file
+// reappeared since it was found missing, skip the purge.
+func (ing *Ingester) purgeSource(src string) error {
+	// Purge only when a fresh stat still confirms the file is gone. Skip on success
+	// (reappeared) AND on any non-ErrNotExist error (permission/IO) — those don't prove
+	// deletion and must never trigger a purge.
+	if _, err := os.Stat(src); !errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	uuid := sessionUUIDFromPath(src)
+	tx, err := ing.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM messages WHERE session_uuid = ?`, uuid); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM tool_calls WHERE message_id NOT IN (SELECT id FROM messages)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM sessions WHERE uuid = ? OR source_file = ?`, uuid, src); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM ingest_state WHERE source_file = ?`, src); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (ing *Ingester) loadState(path string) (*FileState, error) {

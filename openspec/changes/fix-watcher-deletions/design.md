@@ -63,6 +63,21 @@ so a test can force an `EPERM` return and assert `pidAlive` is true, without dep
 process ownership in CI. PID reuse (a recycled pid pointing at an unrelated process) is a
 known limitation of pid-based liveness and is out of scope for this change.
 
+## Codex review outcomes (implementation)
+
+- TOCTOU: `purgeSource` re-stats the source immediately before deleting; if it reappeared
+  since the missing-scan, the purge is skipped.
+- Ghost rows: deletion keys on `sessionUUIDFromPath(src)` (the canonical uuid), so messages
+  / tool_calls / FTS are removed even when the `sessions` row is already gone — not on a
+  `sessions` subquery that would miss them.
+- Kept single-pass purge (rejected codex's 2-pass / subdir-guard) with reasoning: Claude
+  session files are append-only and never atomically rewritten, so an `ErrNotExist` is a
+  strong signal of genuine deletion, not a transient window. A subdir-guard would refuse to
+  purge a deliberately deleted project directory (the intended behavior), and in-memory
+  2-pass confirmation would never fire on the CLI path (a fresh Ingester per command). The
+  root guard plus the pre-delete re-stat cover whole-filesystem unavailability. If a
+  non-append source type is ever added, revisit with a persisted missing-since confirmation.
+
 ## Out of scope
 
 - Reacting to individual `Remove`/`Rename` events for faster purge (decision 1 makes the
