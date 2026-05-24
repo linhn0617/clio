@@ -5,6 +5,25 @@ import (
 	"testing"
 )
 
+func TestBuildMatchQuery(t *testing.T) {
+	cases := []struct {
+		in   []string
+		want string
+	}{
+		{[]string{"c++", "foo"}, `"c++" "foo"`},
+		{[]string{`has"quote`}, `"has""quote"`},
+		{[]string{}, ""},
+		{[]string{"auth"}, `"auth"`},
+		{[]string{"auth", "ui"}, `"auth" "ui"`},
+	}
+	for _, c := range cases {
+		got := buildMatchQuery(c.in)
+		if got != c.want {
+			t.Errorf("buildMatchQuery(%v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestTerms(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -22,19 +41,24 @@ func TestTerms(t *testing.T) {
 	}
 }
 
-func TestNeedsLikeFallback(t *testing.T) {
-	cases := map[string]bool{
-		"驗證":       true,  // 2-char CJK
-		"資料驗證":     false, // 4-char CJK
-		"auth":     false,
-		"ab":       true, // 2-char latin
-		"auth ab":  true, // one short term
-		"資料庫 遷移流程": false,
-		"":         false,
+func TestPartitionTerms(t *testing.T) {
+	cases := []struct {
+		in        []string
+		wantLong  []string
+		wantShort []string
+	}{
+		{[]string{"auth", "ui"}, []string{"auth"}, []string{"ui"}},
+		{[]string{"auth", "flow"}, []string{"auth", "flow"}, nil},
+		{[]string{"ui", "ok"}, nil, []string{"ui", "ok"}},
+		{[]string{}, nil, nil},
+		{[]string{"資料庫"}, []string{"資料庫"}, nil}, // 3-char CJK is long
+		{[]string{"驗證"}, nil, []string{"驗證"}},   // 2-char CJK is short
 	}
-	for q, want := range cases {
-		if got := needsLikeFallback(q); got != want {
-			t.Errorf("needsLikeFallback(%q)=%v want %v", q, got, want)
+	for _, c := range cases {
+		gotLong, gotShort := partitionTerms(c.in)
+		if !reflect.DeepEqual(gotLong, c.wantLong) || !reflect.DeepEqual(gotShort, c.wantShort) {
+			t.Errorf("partitionTerms(%v) = (%v, %v), want (%v, %v)",
+				c.in, gotLong, gotShort, c.wantLong, c.wantShort)
 		}
 	}
 }

@@ -52,17 +52,24 @@ func terms(q string) []string {
 	return out
 }
 
-// needsLikeFallback reports whether any term is too short for the trigram
-// tokenizer (fewer than 3 runes), which would make FTS MATCH return nothing.
-func needsLikeFallback(q string) bool {
-	ts := terms(q)
-	if len(ts) == 0 {
-		return false
-	}
+// partitionTerms splits terms into long (>=3 runes) and short (<3 runes) groups.
+func partitionTerms(ts []string) (long, short []string) {
 	for _, t := range ts {
-		if utf8.RuneCountInString(t) < 3 {
-			return true
+		if utf8.RuneCountInString(t) >= 3 {
+			long = append(long, t)
+		} else {
+			short = append(short, t)
 		}
 	}
-	return false
+	return
+}
+
+// buildMatchQuery turns terms into an operator-safe FTS5 MATCH expression: each
+// term is a quoted phrase (embedded " doubled), joined by spaces (AND).
+func buildMatchQuery(terms []string) string {
+	parts := make([]string, 0, len(terms))
+	for _, t := range terms {
+		parts = append(parts, `"`+strings.ReplaceAll(t, `"`, `""`)+`"`)
+	}
+	return strings.Join(parts, " ")
 }

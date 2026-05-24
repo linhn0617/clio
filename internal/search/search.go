@@ -20,14 +20,23 @@ func Search(database *db.DB, opt Options) ([]Result, error) {
 		opt.Limit = 20
 	}
 
+	ts := terms(opt.Query)
+	if len(ts) == 0 {
+		// Non-empty input that parses to zero terms (e.g. only quote characters)
+		// has nothing searchable; return an empty set rather than building
+		// malformed SQL with no content predicate.
+		return nil, nil
+	}
+	long, short := partitionTerms(ts)
+
 	var (
 		rows *sql.Rows
 		err  error
 	)
-	if needsLikeFallback(opt.Query) {
-		rows, err = likeQuery(database, opt)
+	if len(long) > 0 {
+		rows, err = hybridQuery(database, opt, long, short)
 	} else {
-		rows, err = ftsQuery(database, opt)
+		rows, err = likeQuery(database, opt)
 	}
 	if err != nil {
 		return nil, err
@@ -77,22 +86,36 @@ func commonFilters(opt Options) (string, []any) {
 		args = append(args, opt.Since)
 	}
 	if opt.ProjectPrefix != "" {
-		sb.WriteString(" AND s.project_path LIKE ?")
-		args = append(args, opt.ProjectPrefix+"%")
+		sb.WriteString(` AND s.project_path LIKE ? ESCAPE '\'`)
+		args = append(args, db.EscapeLike(opt.ProjectPrefix)+"%")
 	}
 	return sb.String(), args
 }
 
-func ftsQuery(database *db.DB, opt Options) (*sql.Rows, error) {
+// hybridQuery uses FTS MATCH for long terms and adds per-short-term LIKE filters.
+func hybridQuery(database *db.DB, opt Options, long, short []string) (*sql.Rows, error) {
 	filt, fargs := commonFilters(opt)
+
+	// Build short-term LIKE clauses.
+	var shortClauses strings.Builder
+	var shortArgs []any
+	for _, t := range short {
+		shortClauses.WriteString(` AND m.content LIKE ? ESCAPE '\'`)
+		shortArgs = append(shortArgs, "%"+db.EscapeLike(t)+"%")
+	}
+
+	matchExpr := buildMatchQuery(long)
 	q := `SELECT m.id, m.session_uuid, COALESCE(s.project_path,''), m.role, COALESCE(m.ts,0),
 		snippet(messages_fts,0,'[',']','…',10), bm25(messages_fts)
 		FROM messages_fts
 		JOIN messages m ON m.id = messages_fts.rowid
 		LEFT JOIN sessions s ON s.uuid = m.session_uuid
-		WHERE messages_fts MATCH ?` + filt + `
+		WHERE messages_fts MATCH ?` + shortClauses.String() + filt + `
 		ORDER BY bm25(messages_fts) LIMIT ?`
-	args := append([]any{opt.Query}, fargs...)
+
+	args := []any{matchExpr}
+	args = append(args, shortArgs...)
+	args = append(args, fargs...)
 	args = append(args, opt.Limit*overscan)
 	return database.Query(q, args...)
 }
@@ -102,8 +125,8 @@ func likeQuery(database *db.DB, opt Options) (*sql.Rows, error) {
 	var conds []string
 	var args []any
 	for _, t := range terms(opt.Query) {
-		conds = append(conds, "m.content LIKE ?")
-		args = append(args, "%"+t+"%")
+		conds = append(conds, `m.content LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+db.EscapeLike(t)+"%")
 	}
 	where := strings.Join(conds, " AND ")
 	// LIKE has no bm25; emit content as the "snippet" source (trimmed later) and 0 score.
