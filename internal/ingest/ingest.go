@@ -500,10 +500,12 @@ func (ing *Ingester) allSourceFiles() ([]string, error) {
 }
 
 // purgeSource removes one source's session, messages (FTS via delete triggers), orphaned
-// tool_calls, and ingest_state row in a single transaction. It deletes by the canonical
-// uuid (sessionUUIDFromPath), so messages are removed even if the sessions row is already
-// gone (ghost state). A final re-stat closes the scan->delete TOCTOU window: if the file
-// reappeared since it was found missing, skip the purge.
+// tool_calls, and ingest_state row in a single transaction. It deletes the session/messages
+// by the canonical uuid (sessionUUIDFromPath) so they go even if the sessions row is gone
+// (ghost state) — BUT only when this src still owns the uuid. If the session row now points
+// at a different, re-ingested path (the file was moved/renamed under the same name, e.g. a
+// renamed project dir), deleting by uuid would clobber the live data, so only the stale
+// ingest_state for src is removed. A final re-stat closes the scan->delete TOCTOU window.
 func (ing *Ingester) purgeSource(src string) error {
 	// Purge only when a fresh stat still confirms the file is gone. Skip on success
 	// (reappeared) AND on any non-ErrNotExist error (permission/IO) — those don't prove
@@ -517,15 +519,29 @@ func (ing *Ingester) purgeSource(src string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM messages WHERE session_uuid = ?`, uuid); err != nil {
-		return err
+
+	// Does this src still own the uuid? Owned when there is no session row (ghost) or its
+	// source_file is empty or equals src. If it points elsewhere, the file was moved and
+	// re-ingested under that path; don't touch its rows.
+	var curSource sql.NullString
+	serr := tx.QueryRow(`SELECT source_file FROM sessions WHERE uuid = ?`, uuid).Scan(&curSource)
+	if serr != nil && !errors.Is(serr, sql.ErrNoRows) {
+		return serr
 	}
-	if _, err := tx.Exec(`DELETE FROM tool_calls WHERE message_id NOT IN (SELECT id FROM messages)`); err != nil {
-		return err
+	owns := errors.Is(serr, sql.ErrNoRows) || !curSource.Valid || curSource.String == "" || curSource.String == src
+
+	if owns {
+		if _, err := tx.Exec(`DELETE FROM messages WHERE session_uuid = ?`, uuid); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM tool_calls WHERE message_id NOT IN (SELECT id FROM messages)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM sessions WHERE uuid = ?`, uuid); err != nil {
+			return err
+		}
 	}
-	if _, err := tx.Exec(`DELETE FROM sessions WHERE uuid = ? OR source_file = ?`, uuid, src); err != nil {
-		return err
-	}
+	// Always drop the stale ingest_state row for this exact source path.
 	if _, err := tx.Exec(`DELETE FROM ingest_state WHERE source_file = ?`, src); err != nil {
 		return err
 	}

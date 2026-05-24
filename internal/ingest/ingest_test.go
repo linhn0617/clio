@@ -585,6 +585,44 @@ func TestPurgeMissingRemovesGhostMessages(t *testing.T) {
 	}
 }
 
+// When a session file is moved/renamed to a new path (same filename => same uuid) and
+// re-ingested, purging the OLD path must NOT delete the session that now lives at the new
+// path — only the stale ingest_state for the old path. (Integration of ② ingest + ③ purge;
+// e.g. a renamed project directory.)
+func TestPurgeMissingKeepsMovedSession(t *testing.T) {
+	projects := t.TempDir()
+	oldPath := writeSession(t, projects, "-old", "moved", sessionEvent("moved", "moved content here"))
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	// Move: remove old path, recreate the same-named file under a new project dir.
+	os.Remove(oldPath)
+	writeSession(t, projects, "-new", "moved", sessionEvent("moved", "moved content here"))
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+
+	var n int
+	d.QueryRow(`SELECT count(*) FROM sessions WHERE uuid='moved'`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("moved session wrongly purged: sessions=%d want 1", n)
+	}
+	d.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='moved'`).Scan(&n)
+	if n == 0 {
+		t.Fatal("moved session's messages wrongly purged")
+	}
+	d.QueryRow(`SELECT count(*) FROM ingest_state WHERE source_file=?`, oldPath).Scan(&n)
+	if n != 0 {
+		t.Fatalf("stale ingest_state for old path not cleaned: %d", n)
+	}
+}
+
 // A missing/unreadable projects root must NOT purge anything (filesystem unavailable).
 func TestPurgeMissingSkipsWhenRootMissing(t *testing.T) {
 	projects := t.TempDir()

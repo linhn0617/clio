@@ -78,6 +78,17 @@ known limitation of pid-based liveness and is out of scope for this change.
   root guard plus the pre-delete re-stat cover whole-filesystem unavailability. If a
   non-append source type is ever added, revisit with a persisted missing-since confirmation.
 
+## Integration review outcomes (cross-change, codex)
+
+- Moved/renamed source (same filename => same uuid, e.g. a renamed project dir):
+  `IngestAll` re-ingests the new path under the same uuid first, so purging the OLD path
+  by uuid would clobber the live session. `purgeSource` now only deletes the session/
+  messages when this src still owns the uuid (no session row, or its `source_file` is
+  empty/equals src); otherwise it removes just the stale `ingest_state` row.
+- The MCP leader runs `PurgeMissing` right after startup catch-up and before serving, so
+  deletions that happened while clio was down are reflected immediately (not up to one
+  60s backstop later), including for CLI readers that defer to the live leader.
+
 ## Out of scope
 
 - Reacting to individual `Remove`/`Rename` events for faster purge (decision 1 makes the
