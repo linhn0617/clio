@@ -6,6 +6,26 @@ import (
 	"testing"
 )
 
+func TestEscapeLike(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{`a%_\b`, `a\%\_\\b`},
+		{`plain text`, `plain text`},
+		{`%`, `\%`},
+		{`_`, `\_`},
+		{`\`, `\\`},
+		{`no special chars`, `no special chars`},
+		{`a%b_c\d`, `a\%b\_c\\d`},
+	}
+	for _, c := range cases {
+		got := EscapeLike(c.in)
+		if got != c.want {
+			t.Errorf("EscapeLike(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestMigrateIsConcurrencySafe(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "db.sqlite")

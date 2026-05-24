@@ -159,6 +159,11 @@ func isBusyErr(err error) bool {
 		strings.Contains(msg, "sqlite_busy")
 }
 
+// EscapeLike escapes %, _, and \ for use in a LIKE pattern with ESCAPE '\'.
+func EscapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
 // applyMigration runs one migration inside an IMMEDIATE transaction. It
 // re-checks the marker inside the transaction so a concurrent process that
 // already applied it is a clean no-op rather than a primary-key failure.

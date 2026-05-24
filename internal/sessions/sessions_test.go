@@ -116,6 +116,47 @@ func TestListSessionsMinTurns(t *testing.T) {
 	}
 }
 
+func TestListSessionsProjectPrefixEscaping(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/x/a_b", 1)
+	addSession(t, d, "s2", "/x/axb", 1)
+
+	rows, err := ListSessions(d, ListFilter{ProjectPrefix: "/x/a_b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range rows {
+		if s.UUID == "s2" {
+			t.Errorf("project /x/axb should NOT match prefix /x/a_b (underscore must be escaped)")
+		}
+	}
+	found := false
+	for _, s := range rows {
+		if s.UUID == "s1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("project /x/a_b should match prefix /x/a_b, got %+v", rows)
+	}
+}
+
+func TestListSessionsProjectPercentEscaping(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/x/a%b", 1)
+	addSession(t, d, "s2", "/x/axb", 1)
+
+	rows, err := ListSessions(d, ListFilter{ProjectPrefix: "/x/a%b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range rows {
+		if s.UUID == "s2" {
+			t.Errorf("project /x/axb should NOT match prefix /x/a%%b (percent must be escaped)")
+		}
+	}
+}
+
 func TestActivitySummaryGrouping(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p/a", 1)

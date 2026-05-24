@@ -49,8 +49,8 @@ func ListSessions(database *db.DB, f ListFilter) ([]Session, error) {
 		args = append(args, f.Since)
 	}
 	if f.ProjectPrefix != "" {
-		q += " AND project_path LIKE ?"
-		args = append(args, f.ProjectPrefix+"%")
+		q += ` AND project_path LIKE ? ESCAPE '\'`
+		args = append(args, db.EscapeLike(f.ProjectPrefix)+"%")
 	}
 	if f.MinTurns > 0 {
 		q += " AND turn_count >= ?"
