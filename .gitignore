@@ -8,5 +8,8 @@
 *.sqlite-wal
 *.sqlite-shm
 
+# Claude Code per-machine local settings (shared settings.json is tracked)
+.claude/settings.local.json
+
 # OS
 .DS_Store
