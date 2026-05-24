@@ -2,6 +2,8 @@
 package ingest
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -108,27 +110,30 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 
 	startOffset := int64(0)
 	if kind == changeIncremental && prior != nil {
-		fp, err := fingerprintAt(f, prior.LastByteOffset)
+		tailFP, err := fingerprintAt(f, prior.LastByteOffset)
 		if err != nil {
 			return 0, false, err
 		}
-		if fp == prior.TailFingerprint {
+		headFP, err := headFingerprint(f)
+		if err != nil {
+			return 0, false, err
+		}
+		// Empty stored head fingerprint = unknown (row predates migration 0005): skip
+		// the head check and backfill it (eng-review D2), so upgrades don't force a full
+		// reingest of every file. This branch is only reachable when the file GREW
+		// (classifyChange returns changeIncremental only for size growth; a same-size
+		// rewrite is changeFull), i.e. a genuine append. Claude session files are
+		// append-only, so an append never rewrites the prefix — resuming from the stored
+		// offset is safe. (A prefix rewrite on a grown file would need non-append
+		// behavior these files never exhibit; that is the documented fingerprint-window
+		// limitation, not specific to the empty-head case.)
+		headOK := prior.HeadFingerprint == "" || headFP == prior.HeadFingerprint
+		if tailFP == prior.TailFingerprint && headOK {
 			startOffset = prior.LastByteOffset
 		} else {
-			kind = changeFull // bytes before offset changed: rewritten
+			kind = changeFull // bytes before the offset changed: rewritten
 		}
 	}
-
-	buf, err := readFrom(f, startOffset)
-	if err != nil {
-		return 0, false, err
-	}
-	completeLen := lastCompleteNewline(buf)
-	if completeLen == 0 {
-		return 0, false, nil // no complete new line yet
-	}
-	newOffset := startOffset + int64(completeLen)
-	complete := buf[:completeLen]
 
 	startSeq := 0
 	if kind == changeIncremental {
@@ -145,9 +150,20 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 	} else {
 		parser.Seed(excluded)
 	}
-	msgs, sess := ing.parseBuffer(parser, complete, path)
+	msgs, sess, consumed, unparsed, err := ing.streamParse(f, startOffset, parser, path)
+	if err != nil {
+		return 0, false, err
+	}
+	if consumed == 0 {
+		return 0, false, nil // no complete new line yet
+	}
+	newOffset := startOffset + consumed
 
-	newFP, err := fingerprintAt(f, newOffset)
+	newTailFP, err := fingerprintAt(f, newOffset)
+	if err != nil {
+		return 0, false, err
+	}
+	newHeadFP, err := headFingerprint(f)
 	if err != nil {
 		return 0, false, err
 	}
@@ -157,8 +173,10 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 		LastSize:        size,
 		LastMTime:       mtime,
 		LastByteOffset:  newOffset,
-		TailFingerprint: newFP,
+		TailFingerprint: newTailFP,
+		HeadFingerprint: newHeadFP,
 		LastIngestedAt:  time.Now().Unix(),
+		UnparsedLines:   unparsed,
 	})
 	if err != nil {
 		if errors.Is(err, errStaleSnapshot) {
@@ -169,17 +187,42 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 	return n, true, nil
 }
 
-// parseBuffer parses complete lines and accumulates session metadata.
-func (ing *Ingester) parseBuffer(p *Parser, complete []byte, path string) ([]model.Message, model.Session) {
+// streamParse reads complete lines from f starting at startOffset, parses each, and
+// accumulates messages + session metadata with bounded per-line memory. It returns the
+// bytes consumed (sum of complete lines including their newline; a trailing partial or
+// over-cap-without-newline line is NOT consumed and is left for the next pass) and the
+// count of lines skipped because they failed to parse or exceeded maxLineBytes.
+func (ing *Ingester) streamParse(f *os.File, startOffset int64, p *Parser, path string) ([]model.Message, model.Session, int64, int64, error) {
 	sess := model.Session{UUID: sessionUUIDFromPath(path), SourceFile: path}
 	var msgs []model.Message
-	for _, line := range splitLines(complete) {
+	var consumed, unparsed int64
+
+	if _, err := f.Seek(startOffset, io.SeekStart); err != nil {
+		return nil, sess, 0, 0, err
+	}
+	r := bufio.NewReader(f)
+	for {
+		data, n, terminated, overCap, err := readCappedLine(r, maxLineBytes)
+		if err != nil && err != io.EOF {
+			return nil, sess, 0, 0, err
+		}
+		if !terminated {
+			break // partial trailing line (incl. over-cap w/o newline): leave for next pass
+		}
+		consumed += int64(n)
+		if overCap {
+			ing.log.Warn("skip over-cap line", "file", path, "bytes", n)
+			unparsed++
+			continue
+		}
+		line := bytes.TrimSuffix(data, []byte("\n"))
 		if len(line) == 0 {
 			continue
 		}
-		lineMsgs, info, err := p.ParseLine(line)
-		if err != nil {
-			ing.log.Warn("skip malformed line", "file", path, "err", err)
+		lineMsgs, info, perr := p.ParseLine(line)
+		if perr != nil {
+			ing.log.Warn("skip malformed line", "file", path, "err", perr)
+			unparsed++
 			continue
 		}
 		if sess.UUID == "" && info.SessionID != "" {
@@ -207,7 +250,35 @@ func (ing *Ingester) parseBuffer(p *Parser, complete []byte, path string) ([]mod
 	if sess.ProjectPath == "" {
 		sess.ProjectPath = fallbackProjectPath(parentDirName(path))
 	}
-	return msgs, sess
+	return msgs, sess, consumed, unparsed, nil
+}
+
+// readCappedLine reads one line (through '\n') from r with bounded memory. It returns
+// the line bytes (including the trailing '\n' when terminated; nil when over-cap), the
+// bytes consumed from r, whether a '\n' was found (terminated), whether the line
+// exceeded limit (overCap), and any read error (io.EOF at stream end). A line longer
+// than limit is consumed but not buffered, so a giant or newline-less line cannot OOM.
+func readCappedLine(r *bufio.Reader, limit int) (data []byte, consumed int, terminated, overCap bool, err error) {
+	for {
+		chunk, e := r.ReadSlice('\n')
+		consumed += len(chunk)
+		if !overCap {
+			if len(data)+len(chunk) <= limit {
+				data = append(data, chunk...)
+			} else {
+				overCap = true
+				data = nil // stop buffering; only the byte count matters from here
+			}
+		}
+		switch e {
+		case nil:
+			return data, consumed, true, overCap, nil
+		case bufio.ErrBufferFull:
+			continue
+		default: // io.EOF or a real read error
+			return data, consumed, false, overCap, e
+		}
+	}
 }
 
 func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Message, excludedToolUses []string, fs FileState) (int, error) {
@@ -225,10 +296,13 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 	// bytes, or a rewrite/truncate happened), committing our stale snapshot
 	// could insert phantom rows or revert the DB below disk. Re-stat inside the
 	// write lock and abort; the next watcher tick / catch-up re-ingests fresh.
-	if fi, statErr := os.Stat(fs.SourceFile); statErr == nil {
-		if fi.Size() != fs.LastSize || fi.ModTime().UnixNano() != fs.LastMTime {
-			return 0, errStaleSnapshot
-		}
+	// A stat error (file removed/replaced) is also "changed" — never commit then.
+	fi, statErr := os.Stat(fs.SourceFile)
+	if statErr != nil {
+		return 0, errStaleSnapshot
+	}
+	if fi.Size() != fs.LastSize || fi.ModTime().UnixNano() != fs.LastMTime {
+		return 0, errStaleSnapshot
 	}
 
 	for _, id := range excludedToolUses {
@@ -302,14 +376,25 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 // at least as large as the stored one — preventing a stale writer from moving
 // the watermark backward.
 func (ing *Ingester) upsertIngestState(tx *sql.Tx, fs FileState, monotonic bool) error {
-	q := `INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, last_ingested_at)
-		VALUES (?,?,?,?,?,?)
+	// unparsed_lines: accumulate across incremental passes (each pass only sees new
+	// bytes, so overwriting would lose earlier skips and make doctor go green while
+	// content is still missing); on a full reingest, set it to this pass's count.
+	unparsedExpr := "excluded.unparsed_lines"
+	if monotonic {
+		// Accumulate only on a STRICT advance: a re-commit at the same offset (e.g. a
+		// concurrent writer landing the same append) must not double-count.
+		unparsedExpr = "CASE WHEN excluded.last_byte_offset > ingest_state.last_byte_offset THEN ingest_state.unparsed_lines + excluded.unparsed_lines ELSE ingest_state.unparsed_lines END"
+	}
+	q := `INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, head_fingerprint, last_ingested_at, unparsed_lines)
+		VALUES (?,?,?,?,?,?,?,?)
 		ON CONFLICT(source_file) DO UPDATE SET last_size=excluded.last_size, last_mtime=excluded.last_mtime,
-		last_byte_offset=excluded.last_byte_offset, tail_fingerprint=excluded.tail_fingerprint, last_ingested_at=excluded.last_ingested_at`
+		last_byte_offset=excluded.last_byte_offset, tail_fingerprint=excluded.tail_fingerprint,
+		head_fingerprint=excluded.head_fingerprint, last_ingested_at=excluded.last_ingested_at,
+		unparsed_lines=` + unparsedExpr
 	if monotonic {
 		q += ` WHERE excluded.last_byte_offset >= ingest_state.last_byte_offset`
 	}
-	_, err := tx.Exec(q, fs.SourceFile, fs.LastSize, fs.LastMTime, fs.LastByteOffset, fs.TailFingerprint, fs.LastIngestedAt)
+	_, err := tx.Exec(q, fs.SourceFile, fs.LastSize, fs.LastMTime, fs.LastByteOffset, fs.TailFingerprint, fs.HeadFingerprint, fs.LastIngestedAt, fs.UnparsedLines)
 	return err
 }
 
@@ -344,9 +429,9 @@ func (ing *Ingester) upsertSession(tx *sql.Tx, s model.Session, userTurns int, k
 
 func (ing *Ingester) loadState(path string) (*FileState, error) {
 	var fs FileState
-	err := ing.db.QueryRow(`SELECT source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, last_ingested_at
+	err := ing.db.QueryRow(`SELECT source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, head_fingerprint, last_ingested_at, unparsed_lines
 		FROM ingest_state WHERE source_file = ?`, path).Scan(
-		&fs.SourceFile, &fs.LastSize, &fs.LastMTime, &fs.LastByteOffset, &fs.TailFingerprint, &fs.LastIngestedAt)
+		&fs.SourceFile, &fs.LastSize, &fs.LastMTime, &fs.LastByteOffset, &fs.TailFingerprint, &fs.HeadFingerprint, &fs.LastIngestedAt, &fs.UnparsedLines)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -382,28 +467,6 @@ func (ing *Ingester) maxSeq(sessionUUID string) (int, error) {
 		return -1, nil // so startSeq becomes 0 after +1
 	}
 	return int(seq.Int64), nil
-}
-
-func readFrom(f *os.File, offset int64) ([]byte, error) {
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return nil, err
-	}
-	return io.ReadAll(f)
-}
-
-func splitLines(b []byte) [][]byte {
-	var lines [][]byte
-	start := 0
-	for i := range len(b) {
-		if b[i] == '\n' {
-			lines = append(lines, b[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(b) {
-		lines = append(lines, b[start:])
-	}
-	return lines
 }
 
 func nullZero(v int64) any {

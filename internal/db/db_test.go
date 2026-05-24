@@ -26,6 +26,36 @@ func TestEscapeLike(t *testing.T) {
 	}
 }
 
+func TestMigration0005IngestStateColumns(t *testing.T) {
+	d, err := Open(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer d.Close()
+
+	rows, err := d.Query(`PRAGMA table_info(ingest_state)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		cols[name] = true
+	}
+	for _, want := range []string{"head_fingerprint", "unparsed_lines"} {
+		if !cols[want] {
+			t.Errorf("ingest_state missing column %q (have %v)", want, cols)
+		}
+	}
+}
+
 func TestMigrateIsConcurrencySafe(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "db.sqlite")

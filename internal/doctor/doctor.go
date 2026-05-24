@@ -6,6 +6,7 @@ package doctor
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
@@ -67,6 +68,22 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 		add("source reconciliation", false, rerr.Error())
 	} else {
 		add("source reconciliation", missing == 0 && truncated == 0, fmt.Sprintf("%d missing/unreadable files, %d truncated, %d with new unindexed bytes", missing, truncated, lag))
+	}
+
+	// Unparsed lines: complete source lines ingest could not parse (recorded per source).
+	// doctor opens the DB read-only, so on a pre-0005 DB the column may not exist yet
+	// (migrations run on the next writable open) — treat that as legacy 0, not a failure.
+	var unparsed int64
+	uerr := database.QueryRow(`SELECT COALESCE(SUM(unparsed_lines),0) FROM ingest_state`).Scan(&unparsed)
+	switch {
+	case uerr != nil && strings.Contains(uerr.Error(), "no such column"):
+		add("unparsed lines", true, "0 (pre-migration db)")
+	case uerr != nil:
+		add("unparsed lines", false, uerr.Error())
+	case unparsed == 0:
+		add("unparsed lines", true, "0")
+	default:
+		add("unparsed lines", false, fmt.Sprintf("%d source lines could not be parsed; after upgrading clio, run `clio index --full`", unparsed))
 	}
 
 	// Ingest coverage: files on disk vs files in ingest_state.

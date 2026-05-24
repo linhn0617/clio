@@ -93,6 +93,19 @@ pass) instead of falling through and committing. Size/mtime comparison is unchan
   reads past `last_byte_offset`, so a later clean append would overwrite the count with 0
   and make `doctor` go green while earlier skipped lines are still missing.
 
+## Codex review outcomes (implementation)
+
+- Tolerate a missing `unparsed_lines` column in `doctor` (read-only opens a pre-0005 DB).
+- Accumulate `unparsed_lines` only on a STRICT offset advance (no double-count on an
+  equal-offset duplicate commit).
+- `classifyChange`: same-size + new-mtime is a rewrite → `changeFull` (an append always
+  grows the file), closing the same-size-rewrite gap directly.
+- Kept eng-review D2 (empty head → skip+backfill) over codex's "force a one-time full":
+  the empty-head resume path is only reachable on size growth (a genuine append), and
+  Claude session files are append-only, so the prefix is never rewritten on an append.
+  Forcing full would re-index every file on upgrade (the cost D2 exists to avoid) to
+  defend an edge this data cannot produce. Documented at the call site.
+
 ## Test strategy
 
 TDD per fix in `internal/ingest/*_test.go`, plus a `db` migration test for 0005 and a
