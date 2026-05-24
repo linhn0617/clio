@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -66,6 +67,76 @@ func TestResolvePrefixNotFound(t *testing.T) {
 	d := testDB(t)
 	if _, err := ResolvePrefix(d, "nope"); err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestResolvePrefixExactWinsOverPrefixMatches(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "abc", "/p", 1)
+	addSession(t, d, "abcd", "/p", 1)
+	addSession(t, d, "abcde", "/p", 1)
+
+	// "abc" is itself an exact uuid AND a prefix of two others; exact must win.
+	s, err := ResolvePrefix(d, "abc")
+	if err != nil || s.UUID != "abc" {
+		t.Fatalf("exact-over-prefix: want abc, got %+v err=%v", s, err)
+	}
+	// "abcd" is an exact uuid AND a prefix of "abcde".
+	s, err = ResolvePrefix(d, "abcd")
+	if err != nil || s.UUID != "abcd" {
+		t.Fatalf("exact-over-prefix: want abcd, got %+v err=%v", s, err)
+	}
+	// "ab" has no exact match but 3 prefix matches → ambiguous.
+	if _, err := ResolvePrefix(d, "ab"); !errors.Is(err, ErrAmbiguous) {
+		t.Fatalf("want ErrAmbiguous for 'ab', got %v", err)
+	}
+	// Unknown prefix.
+	if _, err := ResolvePrefix(d, "zzz"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound for 'zzz', got %v", err)
+	}
+	// Full uuid still resolves.
+	s, err = ResolvePrefix(d, "abcde")
+	if err != nil || s.UUID != "abcde" {
+		t.Fatalf("full-uuid resolve: want abcde, got %+v err=%v", s, err)
+	}
+	// Empty prefix must not panic; just returns an error.
+	if _, err := ResolvePrefix(d, ""); err == nil {
+		t.Fatal("empty prefix should return an error")
+	}
+}
+
+func TestResolvePrefixEscapesUnderscore(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "a_x", "/p", 1)
+	addSession(t, d, "abx", "/p", 1)
+	// Exact "a_x" must resolve to exactly "a_x".
+	s, err := ResolvePrefix(d, "a_x")
+	if err != nil || s.UUID != "a_x" {
+		t.Fatalf("underscore escape: want a_x, got %+v err=%v", s, err)
+	}
+	// Underscore must be literal, not a single-char wildcard. "a_" has no exact
+	// row; with an unescaped LIKE it would match both "a_x" and "abx" → ambiguous.
+	// With proper escaping it matches only "a_x".
+	s, err = ResolvePrefix(d, "a_")
+	if err != nil || s.UUID != "a_x" {
+		t.Fatalf("underscore wildcard leak: want unique a_x, got %+v err=%v", s, err)
+	}
+}
+
+func TestResolvePrefixEscapesPercent(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "a%x", "/p", 1)
+	addSession(t, d, "aYx", "/p", 1)
+	// Exact "a%x" must resolve to exactly "a%x".
+	s, err := ResolvePrefix(d, "a%x")
+	if err != nil || s.UUID != "a%x" {
+		t.Fatalf("percent escape: want a%%x, got %+v err=%v", s, err)
+	}
+	// Percent must be literal. "a%" has no exact row; unescaped it matches both
+	// "a%x" and "aYx" → ambiguous. Escaped it matches only "a%x".
+	s, err = ResolvePrefix(d, "a%")
+	if err != nil || s.UUID != "a%x" {
+		t.Fatalf("percent wildcard leak: want unique a%%x, got %+v err=%v", s, err)
 	}
 }
 
