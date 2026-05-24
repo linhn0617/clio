@@ -4,30 +4,37 @@
   share a prefix where one uuid is itself an exact value AND a prefix of others (e.g.
   `abc`, `abcd`, `abcde`); `ResolvePrefix(d, "abc")` returns the exact `abc` (not
   `ErrAmbiguous`). Also: an unambiguous prefix resolves; an ambiguous prefix with no exact
-  match returns `ErrAmbiguous`; an unknown prefix returns `ErrNotFound`; a prefix
-  containing `_` (e.g. `a_x` vs `abx`) does not over-match.
+  match returns `ErrAmbiguous`; an unknown prefix returns `ErrNotFound`; a full-uuid arg
+  resolves; an empty prefix is handled (returns `ErrNotFound`/`ErrAmbiguous`, no panic);
+  and prefixes containing `_`, `%`, and `\` (e.g. `a_x` vs `abx`, `a%x` vs `aXx`) do not
+  over-match.
 - [ ] 1.2 Implement: exact `uuid = ?` via `QueryRow` first (return on hit; propagate
   non-`sql.ErrNoRows` errors); else escaped `uuid LIKE ? ESCAPE '\' LIMIT 2`; check
   `rows.Err()`. Add `database/sql` import. Green.
 
 ## 2. show --format raw dedup (TDD)
 
-- [ ] 2.1 Failing test in `internal/cli/show_test.go` (new) or `internal/cli/common_test.go`:
-  given a `[]sessions.Message` with two adjacent identical `RawJSON` values and one
-  different, the raw writer emits the duplicate once and preserves a later distinct line.
-  (Extract the raw loop into a helper `writeRaw(w io.Writer, msgs []sessions.Message)` to
-  test without cobra/stdout.)
-- [ ] 2.2 Implement `writeRaw` with adjacent dedup; call it from the `case "raw"` branch.
-  Green.
+- [ ] 2.1 Failing test in `internal/cli/show_test.go` (new): `writeRaw(w, msgs)` —
+  (a) two adjacent messages with identical `RawJSON` emit that line once and a later
+  distinct line still prints; (b) **guard**: two adjacent messages with *different*
+  `RawJSON` both print (no over-collapse); (c) two identical lines separated by a distinct
+  line print as three lines (adjacent-only, not global dedup).
+- [ ] 2.2 Implement `writeRaw(w io.Writer, msgs []sessions.Message) error` with
+  adjacent-only dedup; `case "raw"` returns `writeRaw(os.Stdout, msgs)`. Green.
 
 ## 3. claudeconfig reject non-object mcpServers (TDD)
 
-- [ ] 3.1 Failing test in `internal/claudeconfig/claudeconfig_test.go`: write a config with
-  `"mcpServers": []` (array) and one with `"mcpServers": "x"` (string); `AddServer` returns
-  an error AND the on-disk file is byte-for-byte unchanged (no `.bak` left behind);
-  `HasServer` returns an error. A normal object config still works (regression).
-- [ ] 3.2 Implement: `serversMap` returns `(map[string]any, error)`; error on present
-  non-object; update `AddServer`/`RemoveServer`/`HasServer` callers to propagate. Green.
+- [ ] 3.1 Failing tests in `internal/claudeconfig/claudeconfig_test.go`:
+  - `"mcpServers": []` (array) and `"mcpServers": "x"` (string): `AddServer` AND
+    `RemoveServer` each return an error, the on-disk file is byte-for-byte unchanged, and
+    no `.bak` is left behind.
+  - `HasServer` returns an error for those.
+  - `"mcpServers": null`: `AddServer` succeeds and writes `{"mcpServers":{"clio":…}}`
+    (null treated as absent).
+  - a normal object config still works (regression).
+- [ ] 3.2 Implement: `serversMap` returns `(map[string]any, error)`; `nil`/absent → empty
+  map; present non-null non-object → error; update `AddServer`/`RemoveServer`/`HasServer`
+  callers to propagate (error inside the `mutate` closure returns before any write). Green.
 
 ## 4. doctor non-zero exit + no swallowed errors (TDD)
 
@@ -35,21 +42,27 @@
   results)` returns non-nil when any `Result.OK` is false and nil when all OK.
 - [ ] 4.2 Implement `reportDoctor(w io.Writer, results []doctor.Result) error` + sentinel
   `errChecksFailed`; `RunE` calls `return reportDoctor(os.Stdout, doctor.Run(...))`. Green.
-- [ ] 4.3 Failing test in `internal/doctor/doctor_test.go`: open a DB, `DROP TABLE messages`,
-  run `Run`; assert the `fts index` check is `OK == false` (a swallowed `Scan` error would
-  leave it passing with count 0). 
+- [ ] 4.3 Failing tests in `internal/doctor/doctor_test.go`:
+  - `DROP TABLE messages`, run `Run`; the `fts index` check is `OK == false` (a swallowed
+    `Scan` error would leave it passing with count 0).
+  - `DROP TABLE ingest_state`, run `Run`; the `source reconciliation` check is
+    `OK == false` (Query failure must not read as green).
 - [ ] 4.4 Implement: capture `Scan` errors on the `messages` count, orphan count, ingest
   `tracked` count, and `sourceBytes` (now `(int64, error)`) → mark the affected check
-  failed; add `rows.Err()` after the `reconcile` loop. Existing healthy-DB checks still
+  failed; change `reconcile` to `(missing, truncated, lag int, err error)` returning the
+  error on `Query`/`rows.Scan`/`rows.Err`; `source reconciliation` fails when `err != nil`.
+  Update the existing `reconcile` tests to the 4-value signature. Healthy-DB checks still
   pass (regression). Green.
 
 ## 5. activity_summary local-day grouping (TDD)
 
-- [ ] 5.1 Failing test in `internal/sessions/sessions_test.go`: seed two sessions whose
-  `ended_at` are 23:30 and 00:30 of consecutive **local** days (compute via
-  `time.Date(..., time.Local)`); `ActivitySummary(d, since, "day")` returns two buckets
-  whose keys equal `time.Unix(ts,0).Local().Format("2006-01-02")` for each. (A UTC grouping
-  collapses them into one bucket under a non-UTC `TZ`.)
+- [ ] 5.1 Failing test in `internal/sessions/sessions_test.go`
+  (`TestActivitySummaryLocalDay`): re-exec the test in a child process with
+  `TZ=Asia/Taipei` (guarded by an env var). In the child, seed one session with
+  `ended_at = 2026-05-01 20:00:00 UTC` (= 2026-05-02 in Taipei) plus a message; assert
+  `ActivitySummary(d, ts-1, "day")` returns a single bucket whose key equals
+  `time.Unix(ts,0).Local().Format("2006-01-02")` (`2026-05-02`). Pre-fix UTC grouping
+  yields `2026-05-01` → red.
 - [ ] 5.2 Implement: `keyExpr = "date(s.ended_at,'unixepoch','localtime')"` for the
   `day`/`""` case. Green. Existing `TestActivitySummaryGrouping` still passes.
 

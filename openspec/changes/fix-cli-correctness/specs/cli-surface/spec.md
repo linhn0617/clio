@@ -2,10 +2,12 @@
 
 ### Requirement: Search and show output formats
 
-The system SHALL support human-readable and JSON output. The `show --format raw` output
-SHALL reproduce the source `.jsonl` events without repeating an event line that expanded
-into multiple stored messages. Resolving a session id SHALL treat an exact uuid match as
-authoritative even when it is also a prefix of other session ids.
+The system SHALL support human-readable and JSON output. In `show --format raw`, the
+system SHALL collapse consecutive messages that share an identical `raw_json` into a single
+printed line (the multiple content blocks expanded from one source event share one
+`raw_json`), so the raw dump does not repeat that event's line. Resolving a session id
+SHALL treat an exact uuid match as authoritative even when it is also a prefix of other
+session ids.
 
 #### Scenario: JSON output for piping
 
@@ -18,12 +20,12 @@ authoritative even when it is also a prefix of other session ids.
 - **THEN** the system SHALL render the full session in the requested format (markdown by
   default), resolving the prefix to a single session
 
-#### Scenario: Raw format does not repeat event lines
+#### Scenario: Raw format collapses an event's repeated line
 
 - **WHEN** the user runs `clio show <id> --format raw` for a session whose source line
-  expanded into several stored messages sharing the same `raw_json`
-- **THEN** the system SHALL print each distinct source event line once, not once per
-  expanded message
+  expanded into several adjacent stored messages sharing the same `raw_json`
+- **THEN** the system SHALL print that `raw_json` once for the run of identical adjacent
+  lines, while adjacent messages with differing `raw_json` each print
 
 #### Scenario: Exact id wins over prefix collisions
 
