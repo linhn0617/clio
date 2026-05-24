@@ -473,6 +473,39 @@ func TestChangeFullAbortsWhenFileChangedUnderUs(t *testing.T) {
 	}
 }
 
+// Fix 1: tool_use summaries (toolUseSummary) must not leak JSON-shaped secrets.
+// A tool_use whose input.description is a JSON string like {"apiKey":"secret-value-123456"}
+// must have that value structurally redacted via redactString (not just Redact).
+func TestIngestToolUseSummaryRedactsJSONSecret(t *testing.T) {
+	projects := t.TempDir()
+	// Non-clio tool_use whose input.description is JSON with a secret key.
+	evAsstToolUse := `{"type":"assistant","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"tu-sess","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"SomeTool","input":{"description":"{\"apiKey\":\"secret-value-123456\"}"}}]}}`
+	writeSession(t, projects, "-p", "tu-sess", evAsstToolUse)
+
+	d := openTestDB(t)
+	if _, err := New(d, nil).IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := d.Query(`SELECT content FROM messages WHERE session_uuid='tu-sess'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(content, "secret-value-123456") {
+			t.Errorf("tool_use summary leaked JSON secret in messages.content: %q", content)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // bumpMtime advances the file's mtime so classifyChange sees a change even on
 // filesystems with coarse timestamp resolution.
 func bumpMtime(t *testing.T, path string) {

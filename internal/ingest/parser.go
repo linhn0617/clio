@@ -173,7 +173,7 @@ func toolUseSummary(input json.RawMessage) string {
 	for _, k := range []string{"command", "file_path", "path", "pattern", "query", "url", "description"} {
 		if v, ok := m[k]; ok {
 			if s, ok := v.(string); ok && s != "" {
-				return Redact(firstLine(s, 200))
+				return redactString(firstLine(s, 200))
 			}
 		}
 	}

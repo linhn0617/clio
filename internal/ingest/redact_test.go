@@ -217,3 +217,94 @@ func TestRedactJSON(t *testing.T) {
 		t.Errorf("CJK name not preserved: %q", got)
 	}
 }
+
+// Fix 2: redactJSONValue must require EOF — trailing bytes mean "not pure JSON".
+func TestRedactJSONValueTrailingBytes(t *testing.T) {
+	// trailing text: should fall back (ok=false) so no structural redaction is attempted
+	_, ok := redactJSONValue([]byte(`{"token":"x123456"} trailing text`))
+	if ok {
+		t.Error(`redactJSONValue({"token":"x123456"} trailing text) returned ok=true, want false`)
+	}
+
+	// clean JSON with no trailing bytes: structural redaction must succeed (ok=true)
+	result, ok := redactJSONValue([]byte(`{"token":"x123456"}`))
+	if !ok {
+		t.Error(`redactJSONValue({"token":"x123456"}) returned ok=false, want true`)
+	}
+	if strings.Contains(result, "x123456") {
+		t.Errorf("clean JSON still leaked value: %q", result)
+	}
+	if !strings.Contains(result, "[REDACTED:key]") {
+		t.Errorf("expected [REDACTED:key] in clean JSON result: %q", result)
+	}
+}
+
+// Fix 2 (integration): redactString with trailing text falls back to Redact,
+// which keeps the trailing text and uses regex-only redaction.
+func TestRedactStringTrailingTextFallback(t *testing.T) {
+	// The trailing text must be preserved (not dropped); no structural redaction applies.
+	got := redactString(`{"token":"x123456"} trailing text`)
+	if !strings.Contains(got, "trailing text") {
+		t.Errorf("trailing text was dropped: %q", got)
+	}
+	// No structural [REDACTED:key] since it fell back to Redact.
+	if strings.Contains(got, "[REDACTED:key]") {
+		t.Errorf("unexpected structural redaction in fallback path: %q", got)
+	}
+}
+
+// Fix 3: isSecretKey must handle camelCase and kebab-case keys.
+func TestIsSecretKeyCamelAndKebab(t *testing.T) {
+	trueKeys := []string{
+		"secretKey", "authToken", "dbPassword", "api-key", "accessKey", "privateKey",
+	}
+	falseKeys := []string{
+		"author", "tokenizer", "oauthProvider", "publicKey", "secretary", "url", "name", "id", "title",
+	}
+	for _, k := range trueKeys {
+		if !isSecretKey(k) {
+			t.Errorf("isSecretKey(%q) = false, want true", k)
+		}
+	}
+	for _, k := range falseKeys {
+		if isSecretKey(k) {
+			t.Errorf("isSecretKey(%q) = true, want false", k)
+		}
+	}
+}
+
+// Fix 4: connstring regex must stop at common delimiters, not swallow trailing punctuation.
+func TestRedactConnstringDelimiters(t *testing.T) {
+	cases := []struct {
+		in        string
+		preserved []string // substrings that must survive
+		redacted  bool     // expect [REDACTED:connstring]
+	}{
+		{
+			in:        "see (postgres://u:pass@h/db), next",
+			preserved: []string{"),", " next"},
+			redacted:  true,
+		},
+		{
+			in:        `url="mysql://admin:s3cret@db.example.com/mydb"`,
+			preserved: []string{`url="`},
+			redacted:  true,
+		},
+		{
+			in:        "connect to redis://h:p@host/0; done",
+			preserved: []string{"; done"},
+			redacted:  true,
+		},
+	}
+	for _, c := range cases {
+		got := Redact(c.in)
+		if c.redacted && !strings.Contains(got, "[REDACTED:connstring]") {
+			t.Errorf("expected [REDACTED:connstring] in %q, got %q", c.in, got)
+		}
+		for _, p := range c.preserved {
+			if !strings.Contains(got, p) {
+				t.Errorf("expected %q to survive in output %q (input %q)", p, got, c.in)
+			}
+		}
+	}
+}
