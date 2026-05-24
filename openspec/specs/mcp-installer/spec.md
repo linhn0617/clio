@@ -23,7 +23,9 @@ The system SHALL back up and atomically write `~/.claude.json`, preserving exist
 entries. When `mcpServers` is present with a non-null value that is not a JSON object, the
 system SHALL return an error and leave the config file untouched rather than overwriting
 the unexpected value. A missing key or a JSON `null` value carries no server data and SHALL
-be treated as absent (a fresh object is created).
+be treated as absent (a fresh object is created). The system SHALL NOT leave a `.bak` file
+behind on any exit path: the backup is removed after a successful write and also when a
+write step fails after the backup was created (the atomic rename keeps the original intact).
 
 #### Scenario: Existing servers preserved
 
@@ -49,6 +51,12 @@ be treated as absent (a fresh object is created).
 - **WHEN** `~/.claude.json` has `"mcpServers": null`
 - **THEN** the system SHALL create a fresh `mcpServers` object and write the entry, the
   same as for a missing key
+
+#### Scenario: No backup left behind on a failed write
+
+- **WHEN** a write step fails after the `.bak` backup has been created
+- **THEN** the system SHALL remove the `.bak` (leaving no backup behind), the original
+  config remaining intact via the atomic rename
 
 ### Requirement: Uninstall
 
