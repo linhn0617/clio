@@ -12,6 +12,12 @@ phrases; each term is matched as a literal phrase.)
 - **THEN** the system SHALL return results (or an empty set) without an FTS5 syntax
   error, matching the input as literal text
 
+#### Scenario: Query with no searchable terms
+
+- **WHEN** a user searches for input that is non-empty but parses to zero terms
+  (only quote characters, e.g. `"`, `""`, or ` "" `)
+- **THEN** the system SHALL return an empty result set without raising a SQL error
+
 ### Requirement: Hybrid short/long term search
 
 The system SHALL use the FTS index for terms of 3+ runes and apply shorter terms as

@@ -43,4 +43,7 @@
 - [x] 5.1 `go test ./internal/search/ ./internal/sessions/ ./internal/db/ -race -count=1` green.
 - [x] 5.2 `go test ./... -count=1`, `go vet ./...`, `go build ./...`,
   `GOOS=windows GOARCH=amd64 go build ./...` clean; `gofmt -l .` empty.
-- [ ] 5.3 Self-review, then codex re-review of the diff; address findings.
+- [x] 5.3 Self-review, then codex re-review of the diff; address findings.
+  (codex High: zero-term query, e.g. `"`, bypassed the empty-query guard and built
+  malformed SQL. Fixed: `Search` returns an empty set when the query parses to zero
+  terms; added `TestSearchZeroTermQuery` + spec scenario.)

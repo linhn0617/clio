@@ -21,6 +21,12 @@ func Search(database *db.DB, opt Options) ([]Result, error) {
 	}
 
 	ts := terms(opt.Query)
+	if len(ts) == 0 {
+		// Non-empty input that parses to zero terms (e.g. only quote characters)
+		// has nothing searchable; return an empty set rather than building
+		// malformed SQL with no content predicate.
+		return nil, nil
+	}
 	long, short := partitionTerms(ts)
 
 	var (

@@ -419,3 +419,32 @@ func TestSearchExplainQueryPlanUsesFTS(t *testing.T) {
 		t.Errorf("EXPLAIN QUERY PLAN shows full SCAN messages — FTS-first not achieved. Plan: %v", planLines)
 	}
 }
+
+// TestSearchZeroTermQuery verifies that non-empty/non-whitespace input that parses
+// to zero terms (only quote characters) does not raise a raw SQL error — it returns
+// an empty result set. Guards the codex finding that `"`, `""`, `"""`, ` "" ` slipped
+// past the TrimSpace empty-query guard and built malformed `WHERE  AND ...` SQL.
+func TestSearchZeroTermQuery(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p/one")
+	now := time.Now().Unix()
+	addMsg(t, d, "s1", 0, "user", "hello world", now)
+
+	for _, q := range []string{`"`, `""`, `"""`, ` "" `} {
+		res, err := Search(d, Options{Query: q, Limit: 10})
+		if err != nil {
+			t.Errorf("query %q returned unexpected error: %v", q, err)
+		}
+		if len(res) != 0 {
+			t.Errorf("query %q expected empty results, got %d", q, len(res))
+		}
+		// IncludeToolOutput=true exercises the other role-filter branch.
+		res, err = Search(d, Options{Query: q, Limit: 10, IncludeToolOutput: true})
+		if err != nil {
+			t.Errorf("query %q (IncludeToolOutput) returned unexpected error: %v", q, err)
+		}
+		if len(res) != 0 {
+			t.Errorf("query %q (IncludeToolOutput) expected empty results, got %d", q, len(res))
+		}
+	}
+}
