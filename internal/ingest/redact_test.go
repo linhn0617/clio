@@ -297,6 +297,96 @@ func TestIsSecretKeyCamelAndKebab(t *testing.T) {
 	}
 }
 
+// harden-redaction-followup task 1: Authorization: Basic and Cookie/Set-Cookie headers.
+func TestRedactBasicAuthAndCookie(t *testing.T) {
+	redactedCases := []struct {
+		name   string
+		in     string
+		secret string // substring that must NOT survive
+	}{
+		{"authorization basic", "Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="},
+		{"proxy authorization basic", "Proxy-Authorization: Basic c2VjcmV0OnRva2Vu", "c2VjcmV0OnRva2Vu"},
+		{"short basic credential", "Authorization: Basic YTpi", "YTpi"}, // codex: no length floor
+		{"cookie header", "Cookie: session=topsecret123; csrf=abc", "topsecret123"},
+		{"set-cookie header", "Set-Cookie: session=topsecret123; HttpOnly", "topsecret123"},
+		{"quoted cookie value", `Set-Cookie: session="topsecret123"; HttpOnly`, "topsecret123"}, // codex: quote-stop leaked
+	}
+	for _, c := range redactedCases {
+		t.Run(c.name, func(t *testing.T) {
+			got := Redact(c.in)
+			if strings.Contains(got, c.secret) {
+				t.Errorf("secret %q leaked: %q", c.secret, got)
+			}
+			if !strings.Contains(got, "[REDACTED") {
+				t.Errorf("expected a [REDACTED marker for %q, got %q", c.in, got)
+			}
+		})
+	}
+
+	// Negative: prose mentioning "basic" or "cookie" (no header form) is untouched.
+	preserved := []string{
+		"we need a basic understanding of the flow",
+		"the basic functionality works",
+		"I love cookies and milk",
+		"set a cookie consent banner",
+		"cookie: enabled",   // codex: header-shaped prose with no name=value is not a cookie
+		"cookie: docs here", // ditto
+	}
+	for _, s := range preserved {
+		if got := Redact(s); strings.Contains(got, "[REDACTED") {
+			t.Errorf("prose wrongly redacted: in=%q out=%q", s, got)
+		}
+	}
+
+	// Cookie headers redact to end-of-line (HTTP-correct, leak-free). Security wins
+	// over searchability: a quoted cookie value must never leak even though that means
+	// same-line content after a Cookie: header is also redacted.
+	if got := Redact("curl -H 'Cookie: session=abc123'"); strings.Contains(got, "abc123") {
+		t.Errorf("cookie value leaked: %q", got)
+	}
+}
+
+// harden-redaction-followup task 2: authorization/cookie/set-cookie are secret keys.
+func TestIsSecretKeyAuthCookie(t *testing.T) {
+	trueKeys := []string{"authorization", "Authorization", "cookie", "Cookie", "set-cookie", "setCookie", "set_cookie",
+		"proxyAuthorization", "proxy-authorization"} // codex: proxy form must match too
+	// codex: camelCase/phrase keys that merely CONTAIN these nouns must not match.
+	falseKeys := []string{"author", "oauth_provider", "tokenizer", "cookieless_id_doc",
+		"cookieJar", "authorizationURL", "setCookieBanner"}
+	for _, k := range trueKeys {
+		if !isSecretKey(k) {
+			t.Errorf("isSecretKey(%q) = false, want true", k)
+		}
+	}
+	for _, k := range falseKeys {
+		if isSecretKey(k) {
+			t.Errorf("isSecretKey(%q) = true, want false", k)
+		}
+	}
+}
+
+// harden-redaction-followup task 2: structured redaction of authorization/cookie values.
+func TestRedactJSONAuthCookieKeys(t *testing.T) {
+	cases := []struct {
+		in     string
+		secret string
+	}{
+		{`{"authorization":"Basic dXNlcjpwYXNz"}`, "dXNlcjpwYXNz"},
+		{`{"proxyAuthorization":"Basic YWRtaW46cHc="}`, "YWRtaW46cHc="}, // codex: proxy key leaked
+		{`{"cookie":"session=topsecret123"}`, "topsecret123"},
+		{`{"set-cookie":["a=topsecret123","b=more"]}`, "topsecret123"},
+	}
+	for _, c := range cases {
+		got := string(redactJSON([]byte(c.in)))
+		if strings.Contains(got, c.secret) {
+			t.Errorf("secret %q leaked: in=%q out=%q", c.secret, c.in, got)
+		}
+		if !strings.Contains(got, "[REDACTED:key]") {
+			t.Errorf("expected [REDACTED:key] for %q, got %q", c.in, got)
+		}
+	}
+}
+
 // Fix 4: connstring regex must stop at common delimiters, not swallow trailing punctuation.
 func TestRedactConnstringDelimiters(t *testing.T) {
 	cases := []struct {

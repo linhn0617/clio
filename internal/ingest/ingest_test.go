@@ -261,6 +261,62 @@ func TestIngestSecretRedactionPipeline(t *testing.T) {
 	}
 }
 
+// TestIngestRedactsAuthAndCookie verifies Authorization: Basic / Cookie headers and
+// the authorization/cookie JSON keys are scrubbed from title, content, and raw_json.
+func TestIngestRedactsAuthAndCookie(t *testing.T) {
+	projects := t.TempDir()
+	// First user message: a cookie header (also becomes the title source).
+	evUser1 := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"ac-sess","message":{"role":"user","content":"Cookie: session=topsecret123; csrf=abc"}}`
+	// Second user message: an Authorization: Basic header.
+	evUser2 := `{"type":"user","timestamp":"2026-04-26T11:01:00Z","cwd":"/p","sessionId":"ac-sess","message":{"role":"user","content":"curl -H 'Authorization: Basic QWxhZGRpbjpvcGVuc2VzYW1l'"}}`
+	// Assistant tool_use input with an authorization key.
+	evAsst1 := `{"type":"assistant","timestamp":"2026-04-26T11:01:05Z","sessionId":"ac-sess","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"SomeTool","input":{"authorization":"Basic c2VjcmV0OnZhbHVl","command":"ls"}}]}}`
+	writeSession(t, projects, "-p", "ac-sess", evUser1, evUser2, evAsst1)
+
+	d := openTestDB(t)
+	if _, err := New(d, nil).IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+
+	secrets := []string{"topsecret123", "QWxhZGRpbjpvcGVuc2VzYW1l", "c2VjcmV0OnZhbHVl"}
+
+	var title string
+	d.QueryRow(`SELECT title FROM sessions WHERE uuid='ac-sess'`).Scan(&title)
+	for _, s := range secrets {
+		if strings.Contains(title, s) {
+			t.Errorf("session title leaked %q: %q", s, title)
+		}
+	}
+
+	rows, err := d.Query(`SELECT content, raw_json FROM messages WHERE session_uuid='ac-sess'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	msgCount := 0
+	for rows.Next() {
+		var content, rawJSON string
+		if err := rows.Scan(&content, &rawJSON); err != nil {
+			t.Fatal(err)
+		}
+		msgCount++
+		for _, s := range secrets {
+			if strings.Contains(content, s) {
+				t.Errorf("content leaked %q: %q", s, content)
+			}
+			if strings.Contains(rawJSON, s) {
+				t.Errorf("raw_json leaked %q: %q", s, rawJSON)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if msgCount == 0 {
+		t.Fatal("no messages found for ac-sess")
+	}
+}
+
 func TestIngestRawJSONRedacted(t *testing.T) {
 	projects := t.TempDir()
 	leak := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"sess-1","message":{"role":"user","content":"my key AKIAIOSFODNN7EXAMPLE"}}`

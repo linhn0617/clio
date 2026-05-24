@@ -38,3 +38,9 @@ content that lands in Claude Code sessions. They were the gap codex found.
 
 Decoding base64 to redact only the `user:pass` substring — redacting the whole token
 is simpler and strictly safer.
+
+Deferred (codex follow-up): credential-passing CLI flags such as `curl -u user:pass`
+/ `--user` and `curl -b session=...` / `--cookie`. These are new leak vectors beyond the
+verified findings, the short flags (`-u`, `-b`) are FP-prone and need careful design, and
+free-text redaction is explicitly best-effort. Tracked as a follow-up rather than expanding
+this change.
