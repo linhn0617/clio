@@ -1,64 +1,69 @@
 ## Context
 
-A batch of isolated P3 fixes. Each is independent; grouped only to share one review/merge
-cycle. (The `fallbackProjectPath` `_`-collision comment the review asked for already exists
-in `internal/ingest/projectpath.go`, so it is not relisted.)
+A batch of isolated P3 fixes, grouped only to share one review/merge cycle. Each is
+independent and behavior-preserving except the two `show` flags and the installer backup
+cleanup.
+
+Dropped from the original list after codex plan-review:
+- **Bounded large-file read** — capping `readFrom` and "chunking across passes" is incorrect
+  with the current state machine: after a partial read `classifyChange` sees unchanged
+  size/mtime and returns `changeSkip`, so the remainder never ingests; a single line over the
+  cap blocks the file forever. A correct fix needs a pending-remainder state in the
+  incremental machine (with truncation/fingerprint interactions) — a feature, deferred to its
+  own change.
+- **`excluded_tool_uses` per-Ingester cache** — the `*Ingester` is shared between `beforeRead`
+  (`IngestAll`) and the leader loop's catch-up, so mutable cache fields would race; and
+  `Parser.ClioToolUseIDs()` returns seeded ids too, so appending them per file grows the cache
+  without bound. Only the error-logging part of that item is kept (below).
+- The `fallbackProjectPath` `_`-collision comment already exists in `projectpath.go`.
 
 ## Decision
 
-### 1. Bounded large-file read (`internal/ingest/ingest.go`)
+### 1. `show --json` alias + `--limit` (`internal/cli/show.go`)
 
-`readFrom` currently does `io.ReadAll(f)` from the offset — unbounded memory for a huge
-file. Cap it; the incremental offset machinery already advances per pass, so a capped read
-naturally chunks a large file across passes:
+Add `--json` (bool; forces JSON) and `--limit` (int; default `defaultShowMessages = 100000`,
+replacing the literal). Extract the precedence into a tested helper:
 
 ```go
-const maxIngestReadBytes = 256 << 20 // 256 MiB per pass
-
-func readFrom(f *os.File, offset, limit int64) ([]byte, error) {
-    if _, err := f.Seek(offset, io.SeekStart); err != nil {
-        return nil, err
+func resolveShowFormat(format string, jsonFlag bool) string {
+    if jsonFlag {
+        return "json"
     }
-    return io.ReadAll(io.LimitReader(f, limit))
+    return format
 }
 ```
 
-In `IngestFile`, when the unread remainder exceeds the cap, log it; and if the capped read
-contains no complete newline (a single line larger than the cap), skip the file with a
-warning rather than spin (offset can't advance):
+`--json` wins over `--format`. For `--limit`, a non-positive value falls back to the default
+ceiling (the CLI converts it before calling `GetMessages`, so `--limit 0` does not hit
+`GetMessages`' unrelated 50-row fallback):
 
 ```go
-if size-startOffset > maxIngestReadBytes {
-    ing.log.Warn("large source file; ingesting in chunks", "file", path, "remaining", size-startOffset)
+if limit <= 0 {
+    limit = defaultShowMessages
 }
-buf, err := readFrom(f, startOffset, maxIngestReadBytes)
-...
-completeLen := lastCompleteNewline(buf)
-if completeLen == 0 {
-    if int64(len(buf)) >= maxIngestReadBytes {
-        ing.log.Warn("source line exceeds max ingest read; skipping file", "file", path)
-    }
-    return 0, false, nil
-}
+msgs, _, err := sessions.GetMessages(database, sess.UUID, 0, limit, !noToolOutput)
 ```
 
-Trade-off: a single line > 256 MiB is skipped (logged) instead of OOM-ing — acceptable;
-such a line is pathological and previously risked crashing the process.
-
-### 2. `show --json` alias + `--limit` (`internal/cli/show.go`)
-
-Add a `--json` bool (forces `format = "json"`) and a `--limit` int (default
-`defaultShowMessages = 100000`, replacing the literal). `--json` takes precedence over
-`--format`. `GetMessages` already clamps `limit <= 0` to its own default.
-
-### 3. Installer `.bak` cleanup on failure (`internal/claudeconfig/claudeconfig.go`)
+### 2. Installer `.bak` cleanup on failure (`internal/claudeconfig/claudeconfig.go`)
 
 The atomic rename keeps the original intact on failure, so the `.bak` is redundant on every
-exit. Replace the success-only `os.Remove(backup)` with a `defer os.Remove(backup)` placed
-right after the backup is created, so the chmod/rename/temp-write failure paths no longer
-leak a `.bak`.
+exit. Replace the success-only `os.Remove(backup)` with `defer os.Remove(backup)` right after
+the backup is written (`os.Remove` of a missing file is harmless, so the no-backup paths are
+fine). To make the post-backup failure path testable, route the rename through a package var
+seam (mirroring the existing `preCommitHook` test pattern):
 
-### 4. UTF-8 trim at the boundary (`internal/ingest/parser.go`)
+```go
+var renameFile = os.Rename // overridable in tests
+...
+if err := renameFile(tmpName, configPath); err != nil {
+    return err // defer removes the .bak
+}
+```
+
+A test sets `renameFile` to return an error and asserts no `.bak` remains and the original is
+intact.
+
+### 3. UTF-8 trim at the boundary (`internal/ingest/parser.go`)
 
 `trimToValidUTF8` calls `utf8.ValidString(s)` (whole-string) in a loop. Decode only the
 boundary rune:
@@ -67,7 +72,7 @@ boundary rune:
 func trimToValidUTF8(s string) string {
     for len(s) > 0 {
         if r, size := utf8.DecodeLastRuneInString(s); r != utf8.RuneError || size > 1 {
-            break // last rune is valid (size>1 keeps a real U+FFFD)
+            break // last rune valid (size>1 keeps a real U+FFFD)
         }
         s = s[:len(s)-1]
     }
@@ -75,56 +80,48 @@ func trimToValidUTF8(s string) string {
 }
 ```
 
-and symmetrically `trimLeadingToValidUTF8` with `utf8.DecodeRuneInString` trimming from the
-front. Behavior identical; no longer revalidates the whole (up to 32 KiB) half on each step.
+and symmetrically `trimLeadingToValidUTF8` with `utf8.DecodeRuneInString` from the front.
+Behavior identical (empty string returns empty; a complete trailing rune or a real U+FFFD,
+which decodes as `(RuneError, 3)`, is kept; only a truncated `(RuneError, 1)` byte is
+trimmed).
 
-### 5. `excluded_tool_uses` per-Ingester cache + error logging (`internal/ingest/ingest.go`)
+### 4. `excluded_tool_uses` load error logged (`internal/ingest/ingest.go`)
 
-`loadExcludedToolUses` runs `SELECT … FROM excluded_tool_uses` for every file. Cache it on
-the `Ingester` (loaded once; a `bool` distinguishes "loaded empty" from "unloaded"), and
-after a successful commit append that file's new clio ids so later files see them:
-
-```go
-type Ingester struct {
-    ...
-    excluded       []string
-    excludedLoaded bool
-}
-func (ing *Ingester) excludedToolUses() ([]string, error) {
-    if ing.excludedLoaded {
-        return ing.excluded, nil
-    }
-    ids, err := ing.queryExcludedToolUses() // the old body
-    if err != nil {
-        return nil, err
-    }
-    ing.excluded, ing.excludedLoaded = ids, true
-    return ids, nil
-}
-```
-
-In `IngestFile`, the load error is now logged (was silently dropped):
+Only the error-visibility part of the original item (no cache). In `IngestFile`, the swallowed
+load error is logged:
 
 ```go
-if excluded, err := ing.excludedToolUses(); err != nil {
+if excluded, err := ing.loadExcludedToolUses(); err != nil {
     ing.log.Warn("load excluded tool uses failed", "err", err)
 } else {
     parser.Seed(excluded)
 }
 ```
 
-and after a successful commit (past the `errStaleSnapshot` check):
-`if ing.excludedLoaded { ing.excluded = append(ing.excluded, parser.ClioToolUseIDs()...) }`.
-The new ids are per-file-unique (each parser tracks only its own file's clio tool_use ids),
-so no duplicates accumulate.
-
-### 6. Walker error logging (`internal/ingest/walker.go`)
+### 5. Walker error logging (`internal/ingest/walker.go`)
 
 `WalkSessionFiles` swallows per-entry errors (`return nil`). Add a `log *slog.Logger`
-parameter (nil → discard) and `log.Warn("skip unreadable entry", "path", path, "err", err)`.
-Callers: `IngestAll` passes `ing.log`; `doctor.Run` passes nil (it has no logger).
+parameter (nil → discard) and log skipped entries. **All three production callers** plus test
+callers must pass the new argument:
+- `internal/ingest/ingest.go` `IngestAll` → `ing.log`
+- `internal/doctor/doctor.go` `Run` → `nil`
+- `internal/watcher/watcher.go` `handleEvent` → `w.log`
 
-### 7. `XDG_DATA_HOME` absolute-only (`internal/config/config.go`)
+```go
+func WalkSessionFiles(projectsDir string, log *slog.Logger) ([]string, error) {
+    if log == nil {
+        log = slog.New(slog.NewTextHandler(io.Discard, nil))
+    }
+    ...
+    if err != nil {
+        log.Warn("skip unreadable entry", "path", path, "err", err)
+        return nil
+    }
+    ...
+}
+```
+
+### 6. `XDG_DATA_HOME` absolute-only (`internal/config/config.go`)
 
 Per the XDG spec a relative `XDG_DATA_HOME` is ignored. Honor it only when absolute:
 
@@ -135,22 +132,22 @@ if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" && filepath.IsAbs(xdg) {
 // else fall through to the platform default
 ```
 
-### 8. `errors.Is(err, fs.ErrNotExist)` (`claudeconfig.go`, `db/db.go`)
+### 7. `errors.Is(err, fs.ErrNotExist)` (`claudeconfig.go`, `db/db.go`)
 
-Replace `os.IsNotExist(err)` with `errors.Is(err, fs.ErrNotExist)` at the two non-test
-sites (`claudeconfig.load`, `db.Open` chmod). Add `io/fs` imports.
+Replace `os.IsNotExist(err)` with `errors.Is(err, fs.ErrNotExist)` at the two non-test sites
+(`claudeconfig.load`, `db.Open` chmod). Add `io/fs` imports.
 
-### 9. `format.go` → `display.go`; `titleFrom` uses `strings.Cut`
+### 8. `format.go` → `display.go`; `titleFrom` uses `strings.Cut`
 
-`git mv internal/cli/format.go internal/cli/display.go` (contents unchanged — they are CLI
-display helpers). In `internal/ingest/parser.go`, `titleFrom` extracts the command name with
+`git mv internal/cli/format.go internal/cli/display.go` (contents unchanged — CLI display
+helpers). In `internal/ingest/parser.go`, `titleFrom` extracts the command name with
 `strings.Cut` instead of `strings.Index`+slicing.
 
 ## Trade-offs / risks
 
-- The read cap (256 MiB) chunks very large files across passes; a single line above it is
-  skipped+logged (better than OOM).
-- Adding a logger param to `WalkSessionFiles` touches its 2–3 callers; mechanical.
-- The excluded cache lives for the `Ingester`'s lifetime (one per command; one for the
-  watcher leader) and is kept consistent by appending committed ids — correct because the
-  table only grows and ids are per-file-unique.
+- Adding a logger param to `WalkSessionFiles` touches its 3 production callers + test callers;
+  mechanical, caught at compile time.
+- The `renameFile` seam is a single package var defaulting to `os.Rename`, nil-free, only
+  swapped in tests.
+- All changes outside `show`/installer are behavior-preserving and covered by existing tests
+  plus the few targeted unit tests below.

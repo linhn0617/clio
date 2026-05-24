@@ -1,87 +1,68 @@
-## 1. Bounded large-file read (TDD)
+## 1. show --json alias + --limit flag (TDD)
 
-- [ ] 1.1 Make the cap a package var for testability:
-  `var maxIngestReadBytes int64 = 256 << 20`.
-- [ ] 1.2 Failing test in `internal/ingest/ingest_test.go`: with `maxIngestReadBytes`
-  temporarily lowered (save/restore via `t.Cleanup`), write a file of two newline-terminated
-  lines whose first line's length sits below the cap and whose total exceeds it; the first
-  `IngestFile` ingests line 1 and advances the offset, a second `IngestFile` ingests line 2
-  (chunked across passes, no data loss). Also: a single line larger than the cap is skipped
-  (`ingested == false`, 0 messages) and does not spin.
-- [ ] 1.3 Implement `readFrom(f, offset, limit)` with `io.LimitReader`; in `IngestFile` warn
-  when `size-startOffset > maxIngestReadBytes`, and when `completeLen == 0 &&
-  len(buf) >= maxIngestReadBytes` warn "source line exceeds max ingest read; skipping file"
-  and return skipped. Green.
+- [ ] 1.1 Failing test in `internal/cli/show_test.go`: `resolveShowFormat(format, jsonFlag)`
+  returns `"json"` when `jsonFlag` is true (overriding `format`), else `format`.
+- [ ] 1.2 Implement `resolveShowFormat`; add `--json` (bool) and `--limit` (int, default
+  `defaultShowMessages = 100000`) to `newShowCmd`; use `resolveShowFormat` for the switch;
+  convert `limit <= 0` to `defaultShowMessages` before `GetMessages` (so `--limit 0` does not
+  fall into GetMessages' 50-row default); pass `limit` (replacing the literal `100000`).
+  Green; default behavior unchanged when neither flag is set.
 
-## 2. show --json alias + --limit flag (TDD)
+## 2. Installer .bak cleanup on failure (TDD via rename seam)
 
-- [ ] 2.1 Failing test in `internal/cli/show_test.go`: `resolveShowFormat(format string,
-  jsonFlag bool) string` returns `"json"` when `jsonFlag` is true (overriding `format`),
-  else returns `format`.
-- [ ] 2.2 Implement `resolveShowFormat`; add `--json` (bool) and `--limit` (int, default
-  `defaultShowMessages = 100000`) flags to `newShowCmd`; use `resolveShowFormat` for the
-  switch and pass `limit` to `GetMessages` (replacing the literal `100000`). Green; existing
-  show behavior unchanged when neither flag is set.
+- [ ] 2.1 Add a package var seam `var renameFile = os.Rename` and route the rename through it.
+- [ ] 2.2 Failing test in `internal/claudeconfig/claudeconfig_test.go`: set
+  `renameFile` to a func returning an error (restore via `t.Cleanup`); `AddServer` on an
+  existing config returns that error AND no `<path>.bak` remains AND the original file is
+  unchanged.
+- [ ] 2.3 Implement: replace the success-only `os.Remove(backup)` with `defer os.Remove(backup)`
+  immediately after the backup is written. Green; existing `TestNoBackupLeftBehindOnSuccess`
+  still passes.
 
-## 3. Installer .bak cleanup on failure paths
+## 3. UTF-8 trim at the boundary (TDD)
 
-- [ ] 3.1 Implement: in `mutate`, replace the success-only `os.Remove(backup)` with
-  `defer os.Remove(backup)` right after the backup is written, so chmod/rename/temp-write
-  failures no longer leak a `.bak`.
-- [ ] 3.2 Regression: existing `TestNoBackupLeftBehindOnSuccess` still passes. (The
-  post-backup failure paths — chmod/rename — cannot be induced deterministically in a unit
-  test without a hook; the `defer` removes the backup on every path by construction.)
+- [ ] 3.1 Failing test in `internal/ingest/parser_test.go`: `trimToValidUTF8` drops a trailing
+  truncated multibyte sequence (`"ab"+string([]byte{0xE4,0xBD})` → `"ab"`), keeps a complete
+  trailing rune (`"héllo"` unchanged) and a real U+FFFD (`"x"+string('�')` unchanged);
+  `trimLeadingToValidUTF8` symmetric on a leading partial sequence; empty string → empty.
+- [ ] 3.2 Implement both with `utf8.DecodeLastRuneInString` / `utf8.DecodeRuneInString`
+  (keep a rune iff `r != utf8.RuneError || size > 1`). Green; existing `truncateForFTS` tests
+  pass.
 
-## 4. UTF-8 trim at the boundary (TDD)
+## 4. excluded_tool_uses load error logged
 
-- [ ] 4.1 Failing test in `internal/ingest/parser_test.go`: `trimToValidUTF8` drops a
-  trailing truncated multibyte sequence (e.g. `"ab"+string([]byte{0xE4,0xBD})` → `"ab"`) but
-  keeps a complete trailing rune and a real U+FFFD (`"x�"` unchanged);
-  `trimLeadingToValidUTF8` symmetric on a leading partial sequence.
-- [ ] 4.2 Implement both with `utf8.DecodeLastRuneInString` / `utf8.DecodeRuneInString`
-  (keep a rune iff `r != utf8.RuneError || size > 1`). Green; existing `truncateForFTS`
-  tests still pass.
+- [ ] 4.1 Implement: in `IngestFile`, log a `Warn` when `loadExcludedToolUses()` errors
+  instead of silently skipping the seed. (No cache — that was dropped as racy/dup-prone.)
+  Build + existing "exclude clio MCP traffic" test still green.
 
-## 5. excluded_tool_uses per-Ingester cache + error logging (TDD)
+## 5. Walker error logging (all callers)
 
-- [ ] 5.1 Failing test in `internal/ingest/ingest_test.go`: build an `Ingester`; call
-  `excludedToolUses()`; insert a new row directly into `excluded_tool_uses`; a second
-  `excludedToolUses()` returns the original cached set (proves it is cached, not re-queried).
-- [ ] 5.2 Implement: add `excluded []string` + `excludedLoaded bool` to `Ingester`;
-  `excludedToolUses()` lazy-loads once (keep the existing query body as
-  `queryExcludedToolUses`); in `IngestFile` log a `Warn` on load error instead of swallowing,
-  and after a successful commit append `parser.ClioToolUseIDs()` to the cache. Green; the
-  existing "exclude clio MCP traffic" end-to-end test still passes.
+- [ ] 5.1 Implement: `WalkSessionFiles(projectsDir string, log *slog.Logger)` (nil →
+  discard); `log.Warn("skip unreadable entry", "path", path, "err", err)` instead of silent
+  `return nil`. Update every caller: `IngestAll` (`ing.log`), `doctor.Run` (`nil`),
+  `watcher.handleEvent` (`w.log`), and any test caller (`nil`). `go build ./...` +
+  `go test ./...` confirm no caller missed.
 
-## 6. Walker error logging
+## 6. XDG_DATA_HOME absolute-only (TDD)
 
-- [ ] 6.1 Implement: `WalkSessionFiles(projectsDir string, log *slog.Logger)` (nil →
-  discard); `log.Warn("skip unreadable entry", "path", path, "err", err)` in the callback
-  instead of `return nil` silently. Update callers: `IngestAll` passes `ing.log`,
-  `doctor.Run` passes `nil`. (Triggering a walk error needs an unreadable dir, which is
-  uid-dependent; covered by build + existing walk tests.)
-
-## 7. XDG_DATA_HOME absolute-only (TDD)
-
-- [ ] 7.1 Failing test in `internal/config/config_test.go` (new if absent): with
+- [ ] 6.1 Failing test in `internal/config/config_test.go` (new): with
   `t.Setenv("XDG_DATA_HOME", "relative/dir")`, `DataDir()` does NOT return a path under
   `relative/dir` (falls back to the platform default); with an absolute value it returns
   `<abs>/clio`.
-- [ ] 7.2 Implement: honor `XDG_DATA_HOME` only when `filepath.IsAbs`. Green.
+- [ ] 6.2 Implement: honor `XDG_DATA_HOME` only when `filepath.IsAbs`. Green.
 
-## 8. errors.Is(fs.ErrNotExist) + 9. rename + strings.Cut (refactors)
+## 7. errors.Is + rename + strings.Cut (refactors)
 
-- [ ] 8.1 Replace `os.IsNotExist(err)` with `errors.Is(err, fs.ErrNotExist)` in
+- [ ] 7.1 Replace `os.IsNotExist(err)` with `errors.Is(err, fs.ErrNotExist)` in
   `internal/claudeconfig/claudeconfig.go` (load) and `internal/db/db.go` (Open chmod); add
   `io/fs` imports. Behavior-preserving; existing tests cover.
-- [ ] 8.2 `git mv internal/cli/format.go internal/cli/display.go` (contents unchanged).
-- [ ] 8.3 `titleFrom` in `internal/ingest/parser.go` uses `strings.Cut` for the
-  `<command-name>…</command-name>` extraction; add/confirm a `titleFrom` test for the
-  command-name case and a plain-text case.
+- [ ] 7.2 `git mv internal/cli/format.go internal/cli/display.go` (contents unchanged).
+- [ ] 7.3 `titleFrom` in `internal/ingest/parser.go` uses `strings.Cut`; add a `titleFrom`
+  test (command-name case + plain-text case) in `internal/ingest/parser_test.go`.
 
-## 10. Verify
+## 8. Verify
 
-- [ ] 10.1 `go test ./... -race -count=1` green.
-- [ ] 10.2 `go test ./... -count=1`, `go vet ./...`, `go build ./...`,
+- [ ] 8.1 `go test ./... -race -count=1` green.
+- [ ] 8.2 `go test ./... -count=1`, `go vet ./...`, `go build ./...`,
   `GOOS=windows GOARCH=amd64 go build ./...` clean; `gofmt -l .` empty.
-- [ ] 10.3 Self-review, then codex re-review of the diff; address findings.
+- [ ] 8.3 Self-review, then codex re-review of the diff; address findings.

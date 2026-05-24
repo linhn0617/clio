@@ -28,8 +28,9 @@ other session ids.
 
 #### Scenario: Show message limit
 
-- **WHEN** the user runs `clio show <id> --limit N`
-- **THEN** the system SHALL render at most N messages, rather than a hard-coded ceiling
+- **WHEN** the user runs `clio show <id> --limit N` with N greater than 0
+- **THEN** the system SHALL render at most N messages, rather than a hard-coded ceiling (a
+  non-positive N falls back to the default ceiling)
 
 #### Scenario: Raw format collapses an event's repeated line
 
