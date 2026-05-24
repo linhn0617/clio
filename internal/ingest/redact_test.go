@@ -254,6 +254,29 @@ func TestRedactStringJSONThenTrailingText(t *testing.T) {
 	}
 }
 
+// JSON embedded anywhere in prose (leading, trailing, or middle), and multiple
+// blobs, must each be structurally redacted while surrounding prose is kept.
+func TestRedactStringEmbeddedJSONAnywhere(t *testing.T) {
+	cases := []string{
+		`please rotate {"apiKey":"secret-value-123456"}`,
+		`{"a":"ok"} and also {"token":"secret-value-123456"} here`,
+		`note: {"dbPassword":"secret-value-123456"}.`,
+	}
+	for _, in := range cases {
+		got := redactString(in)
+		if strings.Contains(got, "secret-value-123456") {
+			t.Errorf("embedded JSON secret leaked: in=%q got=%q", in, got)
+		}
+		if !strings.Contains(got, "[REDACTED:key]") {
+			t.Errorf("expected structural redaction: in=%q got=%q", in, got)
+		}
+	}
+	// Prose with stray braces that are NOT valid JSON must be left intact.
+	if got := redactString("use {a, b} for the set"); got != "use {a, b} for the set" {
+		t.Errorf("non-JSON braces mangled: %q", got)
+	}
+}
+
 // Fix 3: isSecretKey must handle camelCase and kebab-case keys.
 func TestIsSecretKeyCamelAndKebab(t *testing.T) {
 	trueKeys := []string{

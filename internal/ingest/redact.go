@@ -74,42 +74,55 @@ func isSecretKey(k string) bool {
 // redactString is the single text redactor used for message content, session
 // titles, and string leaves inside JSON.
 //
-// If the (trimmed) string looks like a JSON object or array, it is parsed and
-// walked structurally; otherwise the shape regexes (Redact) are applied.
+// It structurally redacts any JSON object/array embedded ANYWHERE in the string
+// (so a secret under a generic key like {"apiKey":"…"} is caught even amid
+// surrounding prose), and applies the shape regexes to the non-JSON text around
+// those spans. Free-text secrets with no recognizable shape are best-effort.
 func redactString(s string) string {
-	t := strings.TrimSpace(s)
-	if len(t) > 0 && (t[0] == '{' || t[0] == '[') {
-		if red, rest, ok := redactJSONPrefix(t); ok {
-			if strings.TrimSpace(rest) == "" {
-				return red
-			}
-			// JSON blob followed by prose, e.g. `{"apiKey":"x"} please rotate`:
-			// structurally redact the JSON, regex-redact the remainder, keep both.
-			return red + Redact(rest)
-		}
+	if !strings.ContainsAny(s, "{[") {
+		return Redact(s) // fast path: no JSON to find
 	}
-	return Redact(s)
+	var out strings.Builder
+	textStart := 0
+	for i := 0; i < len(s); {
+		if s[i] == '{' || s[i] == '[' {
+			if red, n, ok := redactJSONAt(s[i:]); ok {
+				out.WriteString(Redact(s[textStart:i])) // regex-redact preceding prose
+				out.WriteString(red)                    // structurally-redacted JSON span
+				i += n
+				textStart = i
+				continue
+			}
+		}
+		i++
+	}
+	out.WriteString(Redact(s[textStart:]))
+	return out.String()
 }
 
-// redactJSONPrefix decodes the leading JSON value in t, redacts it structurally,
-// and returns (redacted, trailingRemainder, true). Unlike redactJSONValue it does
-// not require EOF, so a JSON blob followed by trailing text is still structurally
-// redacted (the remainder is handled by the caller) rather than dropped or left raw.
-func redactJSONPrefix(t string) (string, string, bool) {
+// redactJSONAt tries to decode a single JSON object or array at the start of t.
+// On success it returns the structurally-redacted JSON and the bytes consumed.
+// Bare scalars are NOT treated as embedded JSON, so a stray '{'/'[' in prose
+// (or things like "{1,2}" which are not valid JSON) do not trigger.
+func redactJSONAt(t string) (string, int, bool) {
 	dec := json.NewDecoder(strings.NewReader(t))
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
-		return "", "", false
+		return "", 0, false
 	}
-	off := dec.InputOffset()
+	switch v.(type) {
+	case map[string]any, []any:
+	default:
+		return "", 0, false
+	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(redactWalk(v)); err != nil {
-		return "", "", false
+		return "", 0, false
 	}
-	return strings.TrimRight(buf.String(), "\n"), t[off:], true
+	return strings.TrimRight(buf.String(), "\n"), int(dec.InputOffset()), true
 }
 
 // redactJSON walks a raw JSON event line and redacts secret values structurally.
