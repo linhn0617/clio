@@ -49,7 +49,7 @@ type Stats struct {
 // from scratch regardless of stored state. The context is checked before each
 // file so a cancelled (demoted) leader stops promptly.
 func (ing *Ingester) IngestAll(ctx context.Context, projectsDir string, force bool) (Stats, error) {
-	files, err := WalkSessionFiles(projectsDir)
+	files, err := WalkSessionFiles(projectsDir, ing.log)
 	if err != nil {
 		return Stats{}, err
 	}

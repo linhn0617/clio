@@ -97,7 +97,7 @@ func (w *Watcher) handleEvent(fsw *fsnotify.Watcher, ev fsnotify.Event, dirty ma
 		if err == nil && fi.IsDir() {
 			// New project directory: watch it and ingest anything already inside.
 			w.addDirsRecursive(fsw, ev.Name)
-			if files, err := ingest.WalkSessionFiles(ev.Name); err == nil {
+			if files, err := ingest.WalkSessionFiles(ev.Name, w.log); err == nil {
 				for _, f := range files {
 					dirty[f] = struct{}{}
 				}
