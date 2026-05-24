@@ -20,7 +20,10 @@ type ServerEntry struct {
 // other config keys are preserved.
 func AddServer(configPath, name string, entry ServerEntry) error {
 	return mutate(configPath, func(root map[string]any) error {
-		servers := serversMap(root)
+		servers, err := serversMap(root)
+		if err != nil {
+			return err
+		}
 		b, _ := json.Marshal(entry)
 		var m map[string]any
 		_ = json.Unmarshal(b, &m)
@@ -33,7 +36,10 @@ func AddServer(configPath, name string, entry ServerEntry) error {
 // RemoveServer deletes the named server entry if present.
 func RemoveServer(configPath, name string) error {
 	return mutate(configPath, func(root map[string]any) error {
-		servers := serversMap(root)
+		servers, err := serversMap(root)
+		if err != nil {
+			return err
+		}
 		delete(servers, name)
 		root["mcpServers"] = servers
 		return nil
@@ -46,16 +52,24 @@ func HasServer(configPath, name string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	servers := serversMap(root)
+	servers, err := serversMap(root)
+	if err != nil {
+		return false, err
+	}
 	_, ok := servers[name]
 	return ok, nil
 }
 
-func serversMap(root map[string]any) map[string]any {
-	if v, ok := root["mcpServers"].(map[string]any); ok {
-		return v
+func serversMap(root map[string]any) (map[string]any, error) {
+	v, ok := root["mcpServers"]
+	if !ok || v == nil { // absent or JSON null → safe to create a fresh map
+		return map[string]any{}, nil
 	}
-	return map[string]any{}
+	m, ok := v.(map[string]any)
+	if !ok { // present, non-null, not an object → meaningful data; refuse
+		return nil, fmt.Errorf("mcpServers in config is not a JSON object (found %T); refusing to modify", v)
+	}
+	return m, nil
 }
 
 func load(configPath string) (map[string]any, error) {

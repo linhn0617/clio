@@ -118,6 +118,55 @@ func TestAddServerRefusesMalformedExisting(t *testing.T) {
 	}
 }
 
+func TestAddRemoveRefuseNonObjectMcpServers(t *testing.T) {
+	for _, body := range []string{`{"mcpServers":[]}`, `{"mcpServers":"x"}`} {
+		t.Run(body, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), ".claude.json")
+			if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := AddServer(p, "clio", ServerEntry{Command: "clio"}); err == nil {
+				t.Fatal("AddServer should refuse a non-object mcpServers")
+			}
+			if after, _ := os.ReadFile(p); string(after) != body {
+				t.Fatalf("AddServer modified file; before=%q after=%q", body, string(after))
+			}
+			if _, err := os.Stat(p + ".bak"); !os.IsNotExist(err) {
+				t.Fatal("AddServer must not leave a .bak behind")
+			}
+
+			if err := RemoveServer(p, "clio"); err == nil {
+				t.Fatal("RemoveServer should refuse a non-object mcpServers")
+			}
+			if after, _ := os.ReadFile(p); string(after) != body {
+				t.Fatalf("RemoveServer modified file; before=%q after=%q", body, string(after))
+			}
+			if _, err := os.Stat(p + ".bak"); !os.IsNotExist(err) {
+				t.Fatal("RemoveServer must not leave a .bak behind")
+			}
+
+			if _, err := HasServer(p, "clio"); err == nil {
+				t.Fatal("HasServer should return an error for a non-object mcpServers")
+			}
+		})
+	}
+}
+
+func TestAddServerTreatsNullMcpServersAsAbsent(t *testing.T) {
+	p := filepath.Join(t.TempDir(), ".claude.json")
+	if err := os.WriteFile(p, []byte(`{"mcpServers":null}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddServer(p, "clio", ServerEntry{Command: "clio"}); err != nil {
+		t.Fatalf("AddServer should treat null mcpServers as absent: %v", err)
+	}
+	s := servers(t, read(t, p))
+	if _, ok := s["clio"]; !ok {
+		t.Fatalf("clio entry not written into a fresh object; got %+v", s)
+	}
+}
+
 func TestHasServer(t *testing.T) {
 	p := filepath.Join(t.TempDir(), ".claude.json")
 	if has, _ := HasServer(p, "clio"); has {
