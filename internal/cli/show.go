@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -44,10 +45,7 @@ func newShowCmd() *cobra.Command {
 					Messages []sessions.Message `json:"messages"`
 				}{sess, msgs})
 			case "raw":
-				for _, m := range msgs {
-					fmt.Fprintln(os.Stdout, m.RawJSON)
-				}
-				return nil
+				return writeRaw(os.Stdout, msgs)
 			case "markdown", "":
 				fmt.Fprintf(os.Stdout, "# %s\n\n_%s · %s · %d turns_\n\n",
 					orPlaceholder(sess.Title, "(untitled session)"), sess.ProjectPath, formatTS(sess.StartedAt), sess.TurnCount)
@@ -63,6 +61,24 @@ func newShowCmd() *cobra.Command {
 	cmd.Flags().StringVar(&format, "format", "markdown", "Output format (markdown|json|raw)")
 	cmd.Flags().BoolVar(&noToolOutput, "no-tool-output", false, "Omit tool output")
 	return cmd
+}
+
+// writeRaw prints each message's raw_json, collapsing only runs of consecutive
+// identical lines (a session-ingest line expands into adjacent messages that
+// share its raw_json). Non-adjacent identical lines are kept distinct.
+func writeRaw(w io.Writer, msgs []sessions.Message) error {
+	have := false
+	var last string
+	for _, m := range msgs {
+		if have && m.RawJSON == last {
+			continue
+		}
+		if _, err := fmt.Fprintln(w, m.RawJSON); err != nil {
+			return err
+		}
+		last, have = m.RawJSON, true
+	}
+	return nil
 }
 
 func orPlaceholder(s, ph string) string {

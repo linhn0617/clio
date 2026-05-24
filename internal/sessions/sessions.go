@@ -3,6 +3,7 @@
 package sessions
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 
@@ -83,23 +84,33 @@ var (
 
 // ResolvePrefix resolves a full uuid or unambiguous prefix to a Session.
 func ResolvePrefix(database *db.DB, prefix string) (Session, error) {
-	rows, err := database.Query(`SELECT uuid, COALESCE(project_path,''), COALESCE(title,''), COALESCE(started_at,0), COALESCE(ended_at,0), turn_count
-		FROM sessions WHERE uuid = ? OR uuid LIKE ? LIMIT 2`, prefix, prefix+"%")
+	const cols = `uuid, COALESCE(project_path,''), COALESCE(title,''), COALESCE(started_at,0), COALESCE(ended_at,0), turn_count`
+	// Exact match wins regardless of how many prefixes also match.
+	var s Session
+	err := database.QueryRow(`SELECT `+cols+` FROM sessions WHERE uuid = ?`, prefix).
+		Scan(&s.UUID, &s.ProjectPath, &s.Title, &s.StartedAt, &s.EndedAt, &s.TurnCount)
+	switch {
+	case err == nil:
+		return s, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return Session{}, err
+	}
+	// No exact match: resolve by unique prefix (escaped, cap 2 to detect ambiguity).
+	rows, err := database.Query(`SELECT `+cols+` FROM sessions WHERE uuid LIKE ? ESCAPE '\' LIMIT 2`, db.EscapeLike(prefix)+"%")
 	if err != nil {
 		return Session{}, err
 	}
 	defer rows.Close()
 	var matches []Session
 	for rows.Next() {
-		var s Session
-		if err := rows.Scan(&s.UUID, &s.ProjectPath, &s.Title, &s.StartedAt, &s.EndedAt, &s.TurnCount); err != nil {
+		var m Session
+		if err := rows.Scan(&m.UUID, &m.ProjectPath, &m.Title, &m.StartedAt, &m.EndedAt, &m.TurnCount); err != nil {
 			return Session{}, err
 		}
-		matches = append(matches, s)
-		// Exact match wins immediately.
-		if s.UUID == prefix {
-			return s, nil
-		}
+		matches = append(matches, m)
+	}
+	if err := rows.Err(); err != nil {
+		return Session{}, err
 	}
 	switch len(matches) {
 	case 0:
@@ -160,7 +171,7 @@ func ActivitySummary(database *db.DB, since int64, groupBy string) ([]Bucket, er
 	case "project":
 		keyExpr = "COALESCE(s.project_path,'(unknown)')"
 	case "day", "":
-		keyExpr = "date(s.ended_at,'unixepoch')"
+		keyExpr = "date(s.ended_at,'unixepoch','localtime')"
 	default:
 		return nil, fmt.Errorf("invalid group_by %q", groupBy)
 	}
