@@ -48,4 +48,5 @@
 - [x] 4.1 `go test ./internal/ingest/ -race -count=1` green.
 - [x] 4.2 `go test ./... -count=1`, `go vet ./...`, `go build ./...`,
   `GOOS=windows GOARCH=amd64 go build ./...` clean; `gofmt -l` empty.
-- [ ] 4.3 Self-review, then codex re-review of the diff; address findings.
+- [x] 4.3 Self-review, then codex re-review of the diff; address findings. (5 codex
+  passes: plan-review + 4 impl rounds; final verdict "no findings, ship as-is".)
