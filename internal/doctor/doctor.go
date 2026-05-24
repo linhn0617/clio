@@ -70,7 +70,7 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 	}
 
 	// Ingest coverage: files on disk vs files in ingest_state.
-	if files, err := ingest.WalkSessionFiles(projectsDir); err == nil {
+	if files, err := ingest.WalkSessionFiles(projectsDir, nil); err == nil {
 		var tracked int
 		if serr := database.QueryRow(`SELECT count(*) FROM ingest_state`).Scan(&tracked); serr != nil {
 			add("ingest coverage", false, serr.Error())

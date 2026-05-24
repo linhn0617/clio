@@ -2,6 +2,7 @@ package claudeconfig
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -102,6 +103,26 @@ func TestNoBackupLeftBehindOnSuccess(t *testing.T) {
 	}
 }
 
+func TestBackupRemovedOnRenameFailure(t *testing.T) {
+	p := filepath.Join(t.TempDir(), ".claude.json")
+	if err := os.WriteFile(p, []byte(`{"mcpServers":{"other":{"command":"x"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	orig, _ := os.ReadFile(p)
+	renameFile = func(string, string) error { return fmt.Errorf("forced rename failure") }
+	t.Cleanup(func() { renameFile = os.Rename })
+	if err := AddServer(p, "clio", ServerEntry{Command: "clio"}); err == nil {
+		t.Fatal("expected error from forced rename failure")
+	}
+	if _, err := os.Stat(p + ".bak"); !os.IsNotExist(err) {
+		t.Fatal(".bak must be removed on a failed write")
+	}
+	after, _ := os.ReadFile(p)
+	if string(after) != string(orig) {
+		t.Fatalf("original config changed; before=%q after=%q", orig, after)
+	}
+}
+
 func TestAddServerRefusesMalformedExisting(t *testing.T) {
 	p := filepath.Join(t.TempDir(), ".claude.json")
 	bad := `{"mcpServers": {"other": {"command":"x"}` // truncated, invalid JSON
@@ -192,5 +213,27 @@ func TestAddServerTopLevelNull(t *testing.T) {
 	s := servers(t, read(t, p))
 	if _, ok := s["clio"]; !ok {
 		t.Fatal("clio entry not written")
+	}
+}
+
+// TestPreExistingBakPreservedWhenNoBackupWritten guards against deleting a user's
+// unrelated <config>.bak: when configPath is absent this call writes no backup, so
+// the cleanup must not remove a pre-existing .bak it did not create.
+func TestPreExistingBakPreservedWhenNoBackupWritten(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, ".claude.json")
+	bak := p + ".bak"
+	if err := os.WriteFile(bak, []byte("unrelated backup"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddServer(p, "clio", ServerEntry{Command: "clio"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(bak)
+	if err != nil {
+		t.Fatalf("pre-existing unrelated .bak was deleted: %v", err)
+	}
+	if string(got) != "unrelated backup" {
+		t.Fatalf("pre-existing .bak changed: %q", got)
 	}
 }

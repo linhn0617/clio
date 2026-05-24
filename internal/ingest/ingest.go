@@ -49,7 +49,7 @@ type Stats struct {
 // from scratch regardless of stored state. The context is checked before each
 // file so a cancelled (demoted) leader stops promptly.
 func (ing *Ingester) IngestAll(ctx context.Context, projectsDir string, force bool) (Stats, error) {
-	files, err := WalkSessionFiles(projectsDir)
+	files, err := WalkSessionFiles(projectsDir, ing.log)
 	if err != nil {
 		return Stats{}, err
 	}
@@ -140,7 +140,9 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 	}
 
 	parser := NewParser(startSeq)
-	if excluded, err := ing.loadExcludedToolUses(); err == nil {
+	if excluded, err := ing.loadExcludedToolUses(); err != nil {
+		ing.log.Warn("load excluded tool uses failed", "err", err)
+	} else {
 		parser.Seed(excluded)
 	}
 	msgs, sess := ing.parseBuffer(parser, complete, path)

@@ -149,10 +149,9 @@ func parseTS(s string) int64 {
 func titleFrom(s string) string {
 	s = strings.TrimSpace(s)
 	if strings.HasPrefix(s, "<command-") {
-		if i := strings.Index(s, "<command-name>"); i >= 0 {
-			rest := s[i+len("<command-name>"):]
-			if j := strings.Index(rest, "</command-name>"); j >= 0 {
-				return strings.TrimSpace(rest[:j])
+		if _, rest, found := strings.Cut(s, "<command-name>"); found {
+			if name, _, found := strings.Cut(rest, "</command-name>"); found {
+				return strings.TrimSpace(name)
 			}
 		}
 	}
@@ -226,14 +225,20 @@ func truncateForFTS(s string) string {
 }
 
 func trimToValidUTF8(s string) string {
-	for len(s) > 0 && !utf8.ValidString(s) {
+	for len(s) > 0 {
+		if r, size := utf8.DecodeLastRuneInString(s); r != utf8.RuneError || size > 1 {
+			break
+		}
 		s = s[:len(s)-1]
 	}
 	return s
 }
 
 func trimLeadingToValidUTF8(s string) string {
-	for len(s) > 0 && !utf8.ValidString(s) {
+	for len(s) > 0 {
+		if r, size := utf8.DecodeRuneInString(s); r != utf8.RuneError || size > 1 {
+			break
+		}
 		s = s[1:]
 	}
 	return s

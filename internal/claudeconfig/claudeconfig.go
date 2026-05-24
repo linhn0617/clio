@@ -5,10 +5,14 @@ package claudeconfig
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
+
+var renameFile = os.Rename // overridable in tests
 
 // ServerEntry is one mcpServers entry.
 type ServerEntry struct {
@@ -74,7 +78,7 @@ func serversMap(root map[string]any) (map[string]any, error) {
 
 func load(configPath string) (map[string]any, error) {
 	data, err := os.ReadFile(configPath)
-	if os.IsNotExist(err) {
+	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]any{}, nil
 	}
 	if err != nil {
@@ -115,11 +119,21 @@ func mutate(configPath string, fn func(map[string]any) error) error {
 
 	// Back up an existing config first.
 	backup := configPath + ".bak"
+	backupCreated := false
 	if existing, rerr := os.ReadFile(configPath); rerr == nil {
 		if werr := os.WriteFile(backup, existing, 0o600); werr != nil {
 			return fmt.Errorf("write backup: %w", werr)
 		}
+		backupCreated = true
 	}
+	// The atomic rename keeps the original intact on failure, so a backup we wrote
+	// is redundant on every exit. Only remove the backup this call created — never
+	// a pre-existing unrelated <config>.bak.
+	defer func() {
+		if backupCreated {
+			os.Remove(backup)
+		}
+	}()
 
 	// Atomic write: temp file in the same dir, fsync, rename.
 	dir := filepath.Dir(configPath)
@@ -144,7 +158,7 @@ func mutate(configPath string, fn func(map[string]any) error) error {
 	if err := os.Chmod(tmpName, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, configPath); err != nil {
+	if err := renameFile(tmpName, configPath); err != nil {
 		return err
 	}
 	// fsync the parent dir so the rename survives a crash on filesystems that
@@ -154,7 +168,5 @@ func mutate(configPath string, fn func(map[string]any) error) error {
 		dirF.Close()
 	}
 
-	// Success: backup no longer needed.
-	os.Remove(backup)
 	return nil
 }
