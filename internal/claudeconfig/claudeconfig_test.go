@@ -2,6 +2,7 @@ package claudeconfig
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -99,6 +100,26 @@ func TestNoBackupLeftBehindOnSuccess(t *testing.T) {
 	}
 	if _, err := os.Stat(p + ".bak"); !os.IsNotExist(err) {
 		t.Fatal("backup should be removed after a successful write")
+	}
+}
+
+func TestBackupRemovedOnRenameFailure(t *testing.T) {
+	p := filepath.Join(t.TempDir(), ".claude.json")
+	if err := os.WriteFile(p, []byte(`{"mcpServers":{"other":{"command":"x"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	orig, _ := os.ReadFile(p)
+	renameFile = func(string, string) error { return fmt.Errorf("forced rename failure") }
+	t.Cleanup(func() { renameFile = os.Rename })
+	if err := AddServer(p, "clio", ServerEntry{Command: "clio"}); err == nil {
+		t.Fatal("expected error from forced rename failure")
+	}
+	if _, err := os.Stat(p + ".bak"); !os.IsNotExist(err) {
+		t.Fatal(".bak must be removed on a failed write")
+	}
+	after, _ := os.ReadFile(p)
+	if string(after) != string(orig) {
+		t.Fatalf("original config changed; before=%q after=%q", orig, after)
 	}
 }
 

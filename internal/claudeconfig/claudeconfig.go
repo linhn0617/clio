@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 )
 
+var renameFile = os.Rename // overridable in tests
+
 // ServerEntry is one mcpServers entry.
 type ServerEntry struct {
 	Command string   `json:"command"`
@@ -120,6 +122,9 @@ func mutate(configPath string, fn func(map[string]any) error) error {
 			return fmt.Errorf("write backup: %w", werr)
 		}
 	}
+	// The atomic rename keeps the original intact on failure, so the backup is
+	// redundant on every exit. os.Remove of a missing file is harmless.
+	defer os.Remove(backup)
 
 	// Atomic write: temp file in the same dir, fsync, rename.
 	dir := filepath.Dir(configPath)
@@ -144,7 +149,7 @@ func mutate(configPath string, fn func(map[string]any) error) error {
 	if err := os.Chmod(tmpName, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, configPath); err != nil {
+	if err := renameFile(tmpName, configPath); err != nil {
 		return err
 	}
 	// fsync the parent dir so the rename survives a crash on filesystems that
@@ -154,7 +159,5 @@ func mutate(configPath string, fn func(map[string]any) error) error {
 		dirF.Close()
 	}
 
-	// Success: backup no longer needed.
-	os.Remove(backup)
 	return nil
 }
