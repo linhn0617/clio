@@ -17,13 +17,13 @@ It is local-first, read-only against your `.claude` data, and never writes to yo
 
 **1. Install the binary**
 
-**Prebuilt (recommended)** — download the asset for your platform from the [latest release](https://github.com/linhn0617/clio/releases/latest) (current: [**v0.2.0**](https://github.com/linhn0617/clio/releases/tag/v0.2.0); macOS/Linux `amd64`+`arm64`, Windows `amd64`), put it on your `PATH`, and verify it against `SHASUMS256.txt`. This repo is private, so download while signed in to GitHub.
+**Prebuilt (recommended)** — download the asset for your platform from the [latest release](https://github.com/linhn0617/clio/releases/latest) (current: [**v0.3.0**](https://github.com/linhn0617/clio/releases/tag/v0.3.0); macOS/Linux `amd64`+`arm64`, Windows `amd64`), put it on your `PATH`, and verify it against `SHASUMS256.txt`. This repo is private, so download while signed in to GitHub.
 
 **Or with `go install`:**
 
 ```
 export GOPRIVATE=github.com/linhn0617/*   # private repo: set once
-go install github.com/linhn0617/clio/cmd/clio@v0.2.0   # or @latest for the newest
+go install github.com/linhn0617/clio/cmd/clio@v0.3.0   # or @latest for the newest
 ```
 
 This drops `clio` into `$(go env GOPATH)/bin` — make sure that's on your `PATH`, and that your git/GitHub auth can clone the private repo.
