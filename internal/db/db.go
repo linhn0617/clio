@@ -6,6 +6,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -61,7 +62,7 @@ func Open(path string) (*DB, error) {
 	sqlDB.SetMaxOpenConns(1)
 
 	// Tighten permissions on the freshly created file.
-	if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
+	if err := os.Chmod(path, 0o600); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("chmod db: %w", err)
 	}

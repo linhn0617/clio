@@ -153,6 +153,15 @@ func TestTruncateForFTS(t *testing.T) {
 	}
 }
 
+func TestTitleFrom(t *testing.T) {
+	if got := titleFrom("<command-name>init</command-name>"); got != "init" {
+		t.Fatalf("command-name case: got %q want %q", got, "init")
+	}
+	if got := titleFrom("just some text"); got != "just some text" {
+		t.Fatalf("plain-text case: got %q want %q", got, "just some text")
+	}
+}
+
 func TestTrimToValidUTF8(t *testing.T) {
 	if got := trimToValidUTF8("ab" + string([]byte{0xE4, 0xBD})); got != "ab" {
 		t.Fatalf("truncated 3-byte rune not dropped: got %q", got)

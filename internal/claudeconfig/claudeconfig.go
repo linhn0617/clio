@@ -5,7 +5,9 @@ package claudeconfig
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -76,7 +78,7 @@ func serversMap(root map[string]any) (map[string]any, error) {
 
 func load(configPath string) (map[string]any, error) {
 	data, err := os.ReadFile(configPath)
-	if os.IsNotExist(err) {
+	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]any{}, nil
 	}
 	if err != nil {
