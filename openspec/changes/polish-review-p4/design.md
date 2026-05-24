@@ -23,9 +23,12 @@ build must still pass with the no-op lock.
 
 ### doctor permission checks (covers C9 sidecars)
 
-Add a `doctor` check that stats the DB file, `db.sqlite-wal`, `db.sqlite-shm`, the
-config file, and the lock file, and warns for any whose mode is not `0600`. This both
-surfaces drift and verifies the C9 sidecar-permission fix below.
+Add a `doctor` check that stats the DB file and its `-wal`/`-shm` sidecars and warns for
+any whose mode is not `0600`. This both surfaces drift and verifies the C9
+sidecar-permission fix below. (Scoped to db+sidecars rather than also config/lock:
+`config.*` paths resolve to the real user home, which would make the check stat the
+developer's actual `~/.claude.json` during tests; db+sidecars are dbPath-derived and
+test-controlled. Config and lock files are already created `0600` by their own packages.)
 
 ### group_by validation (R6)
 
@@ -47,8 +50,9 @@ with `mcp.NewToolResultError`, instead of relying on the downstream query to err
   long-lived ctx (the server lifecycle ctx or `context.Background()`), NEVER a per-request
   MCP handler ctx, or a finished tool call would cancel in-flight background indexing.
   Reads triggered by a handler use the handler ctx; background writes do not.
-- **pragmas (R4):** add `_pragma=cache_size(-N)` to the DSN and run `ANALYZE` once after
-  migrations in `db.Open`.
+- **pragmas (R4):** add `_pragma=cache_size(-8000)` to the DSN and run `PRAGMA optimize`
+  after migrations in `db.Open` (chosen over an unconditional `ANALYZE`: it only
+  re-analyzes tables that changed enough to matter, so it stays cheap on every open).
 - **sidecar perms (C9):** after `db.Open`, `chmod 0600` on `path+"-wal"` and
   `path+"-shm"` if present; the data dir is already created `0700`.
 - **overscan (R3):** raise `search.overscan` (e.g. 5 → 12) so a recency-boosted hit just

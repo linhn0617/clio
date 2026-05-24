@@ -149,3 +149,11 @@ func TestHandleActivitySummary(t *testing.T) {
 		t.Fatal("expected buckets in summary")
 	}
 }
+
+func TestHandleActivitySummaryRejectsBadGroupBy(t *testing.T) {
+	d := testDB(t)
+	r := call(t, handleActivitySummary(d, nil), map[string]any{"group_by": "week"})
+	if !r.IsError {
+		t.Fatal("expected an error result for an unsupported group_by")
+	}
+}

@@ -27,6 +27,6 @@ zero-count result.
 
 #### Scenario: World-readable private file flagged
 
-- **WHEN** the database file (or its `-wal`/`-shm` sidecars), the config file, or the lock
-  file has a mode other than `0600`
+- **WHEN** the database file or its `-wal`/`-shm` sidecars (which hold indexed content)
+  have a mode other than `0600`
 - **THEN** `clio doctor` SHALL report a permissions warning naming the file and its mode

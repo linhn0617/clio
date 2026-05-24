@@ -35,7 +35,7 @@ func newSearchCmd() *cobra.Command {
 			}
 			defer database.Close()
 
-			results, err := search.Search(database, search.Options{
+			results, err := search.Search(cmd.Context(), database, search.Options{
 				Query:             strings.Join(args, " "),
 				Since:             sinceTS,
 				ProjectPrefix:     project,

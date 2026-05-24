@@ -4,8 +4,11 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/linhn0617/clio/internal/db"
@@ -84,6 +87,28 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 		add("unparsed lines", true, "0")
 	default:
 		add("unparsed lines", false, fmt.Sprintf("%d source lines could not be parsed; after upgrading clio, run `clio index --full`", unparsed))
+	}
+
+	// File permissions: the DB and its WAL/SHM sidecars hold indexed content and must
+	// be private (0600). Absent sidecars (no writes yet) are skipped.
+	var badPerms []string
+	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		fi, e := os.Stat(p)
+		if errors.Is(e, fs.ErrNotExist) {
+			continue // sidecar not created yet
+		}
+		if e != nil {
+			badPerms = append(badPerms, filepath.Base(p)+"=unverifiable("+e.Error()+")")
+			continue
+		}
+		if mode := fi.Mode().Perm(); mode != 0o600 {
+			badPerms = append(badPerms, fmt.Sprintf("%s=%04o", filepath.Base(p), mode))
+		}
+	}
+	if len(badPerms) == 0 {
+		add("file permissions", true, "0600")
+	} else {
+		add("file permissions", false, "not 0600: "+strings.Join(badPerms, ", "))
 	}
 
 	// Ingest coverage: files on disk vs files in ingest_state.

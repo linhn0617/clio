@@ -3,6 +3,7 @@
 package sessions
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -38,7 +39,7 @@ type ListFilter struct {
 }
 
 // ListSessions returns sessions matching filter, most recent first.
-func ListSessions(database *db.DB, f ListFilter) ([]Session, error) {
+func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session, error) {
 	if f.Limit <= 0 {
 		f.Limit = 50
 	}
@@ -60,7 +61,7 @@ func ListSessions(database *db.DB, f ListFilter) ([]Session, error) {
 	q += " ORDER BY ended_at DESC LIMIT ?"
 	args = append(args, f.Limit)
 
-	rows, err := database.Query(q, args...)
+	rows, err := database.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -83,11 +84,11 @@ var (
 )
 
 // ResolvePrefix resolves a full uuid or unambiguous prefix to a Session.
-func ResolvePrefix(database *db.DB, prefix string) (Session, error) {
+func ResolvePrefix(ctx context.Context, database *db.DB, prefix string) (Session, error) {
 	const cols = `uuid, COALESCE(project_path,''), COALESCE(title,''), COALESCE(started_at,0), COALESCE(ended_at,0), turn_count`
 	// Exact match wins regardless of how many prefixes also match.
 	var s Session
-	err := database.QueryRow(`SELECT `+cols+` FROM sessions WHERE uuid = ?`, prefix).
+	err := database.QueryRowContext(ctx, `SELECT `+cols+` FROM sessions WHERE uuid = ?`, prefix).
 		Scan(&s.UUID, &s.ProjectPath, &s.Title, &s.StartedAt, &s.EndedAt, &s.TurnCount)
 	switch {
 	case err == nil:
@@ -96,7 +97,7 @@ func ResolvePrefix(database *db.DB, prefix string) (Session, error) {
 		return Session{}, err
 	}
 	// No exact match: resolve by unique prefix (escaped, cap 2 to detect ambiguity).
-	rows, err := database.Query(`SELECT `+cols+` FROM sessions WHERE uuid LIKE ? ESCAPE '\' LIMIT 2`, db.EscapeLike(prefix)+"%")
+	rows, err := database.QueryContext(ctx, `SELECT `+cols+` FROM sessions WHERE uuid LIKE ? ESCAPE '\' LIMIT 2`, db.EscapeLike(prefix)+"%")
 	if err != nil {
 		return Session{}, err
 	}
@@ -125,7 +126,7 @@ func ResolvePrefix(database *db.DB, prefix string) (Session, error) {
 // GetMessages returns a session's messages ordered by seq, paginated.
 // When includeToolOutput is false, tool_use/tool_result/thinking are omitted.
 // Returns the page and whether more rows exist past offset+limit.
-func GetMessages(database *db.DB, sessionUUID string, offset, limit int, includeToolOutput bool) ([]Message, bool, error) {
+func GetMessages(ctx context.Context, database *db.DB, sessionUUID string, offset, limit int, includeToolOutput bool) ([]Message, bool, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -134,7 +135,7 @@ func GetMessages(database *db.DB, sessionUUID string, offset, limit int, include
 		q += " AND role IN ('user','assistant')"
 	}
 	q += " ORDER BY seq LIMIT ? OFFSET ?"
-	rows, err := database.Query(q, sessionUUID, limit+1, offset) // +1 to detect more
+	rows, err := database.QueryContext(ctx, q, sessionUUID, limit+1, offset) // +1 to detect more
 	if err != nil {
 		return nil, false, err
 	}
@@ -165,7 +166,7 @@ type Bucket struct {
 }
 
 // ActivitySummary aggregates activity since a time, grouped by "day" or "project".
-func ActivitySummary(database *db.DB, since int64, groupBy string) ([]Bucket, error) {
+func ActivitySummary(ctx context.Context, database *db.DB, since int64, groupBy string) ([]Bucket, error) {
 	var keyExpr string
 	switch groupBy {
 	case "project":
@@ -179,7 +180,7 @@ func ActivitySummary(database *db.DB, since int64, groupBy string) ([]Bucket, er
 		FROM sessions s LEFT JOIN messages m ON m.session_uuid = s.uuid
 		WHERE s.ended_at >= ?
 		GROUP BY k ORDER BY k DESC`
-	rows, err := database.Query(q, since)
+	rows, err := database.QueryContext(ctx, q, since)
 	if err != nil {
 		return nil, err
 	}

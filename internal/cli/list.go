@@ -32,7 +32,7 @@ func newListCmd() *cobra.Command {
 			}
 			defer database.Close()
 
-			rows, err := sessions.ListSessions(database, sessions.ListFilter{
+			rows, err := sessions.ListSessions(cmd.Context(), database, sessions.ListFilter{
 				Since:         sinceTS,
 				ProjectPrefix: project,
 				MinTurns:      minTurns,

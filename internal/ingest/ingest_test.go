@@ -469,6 +469,38 @@ func TestIngestAbortsWhenSourceRemovedAtCommit(t *testing.T) {
 	}
 }
 
+// BenchmarkIngestFullIndex measures a from-scratch index of a synthetic history, to
+// decide whether prepared statements / batched inserts in commit() are worth it (R2).
+func BenchmarkIngestFullIndex(b *testing.B) {
+	projects := b.TempDir()
+	const files, msgsPerFile = 50, 200
+	for f := 0; f < files; f++ {
+		uuid := fmt.Sprintf("bench-%03d", f)
+		lines := make([]string, 0, msgsPerFile)
+		for m := 0; m < msgsPerFile; m++ {
+			lines = append(lines, fmt.Sprintf(`{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"%s","message":{"role":"user","content":"message %d with some content to index for fts search"}}`, uuid, m))
+		}
+		dir := filepath.Join(projects, "-p-"+uuid)
+		os.MkdirAll(dir, 0o755)
+		os.WriteFile(filepath.Join(dir, uuid+".jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		d, err := db.Open(filepath.Join(b.TempDir(), fmt.Sprintf("b-%d.sqlite", i)))
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+		if _, err := New(d, nil).IngestAll(context.Background(), projects, true); err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		d.Close()
+	}
+}
+
 // sessionEvent builds a one-line user event for the given session uuid and content.
 func sessionEvent(uuid, content string) string {
 	return `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"` + uuid + `","message":{"role":"user","content":"` + content + `"}}`

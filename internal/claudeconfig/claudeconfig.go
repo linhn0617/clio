@@ -10,6 +10,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/linhn0617/clio/internal/lock"
 )
 
 var renameFile = os.Rename // overridable in tests
@@ -28,9 +30,14 @@ func AddServer(configPath, name string, entry ServerEntry) error {
 		if err != nil {
 			return err
 		}
-		b, _ := json.Marshal(entry)
+		b, err := json.Marshal(entry)
+		if err != nil {
+			return fmt.Errorf("marshal server entry: %w", err)
+		}
 		var m map[string]any
-		_ = json.Unmarshal(b, &m)
+		if err := json.Unmarshal(b, &m); err != nil {
+			return fmt.Errorf("unmarshal server entry: %w", err)
+		}
 		servers[name] = m
 		root["mcpServers"] = servers
 		return nil
@@ -97,8 +104,16 @@ func load(configPath string) (map[string]any, error) {
 	return root, nil
 }
 
-// mutate loads, applies fn, and writes back atomically with a backup.
+// mutate serializes the read-modify-write across processes (Unix flock) so concurrent
+// install/uninstall runs cannot lost-update each other, then applies mutateLocked.
 func mutate(configPath string, fn func(map[string]any) error) error {
+	return lock.WithFileLock(configPath, func() error {
+		return mutateLocked(configPath, fn)
+	})
+}
+
+// mutateLocked loads, applies fn, and writes back atomically with a backup.
+func mutateLocked(configPath string, fn func(map[string]any) error) error {
 	root, err := load(configPath)
 	if err != nil {
 		return err

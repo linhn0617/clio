@@ -12,8 +12,8 @@ change. Grouped into one batch since each is isolated and low-risk, matching the
   concurrent `install-mcp`/`uninstall-mcp` runs (or one plus another tool editing
   `~/.claude.json`) cannot lost-update each other. The atomic rename already prevents
   corruption; this prevents a dropped edit.
-- **Modified** `clio doctor` to check that the database file, its `-wal`/`-shm`
-  sidecars, the config file, and the lock file are `0600`, reporting any that are not.
+- **Modified** `clio doctor` to check that the database file and its `-wal`/`-shm`
+  sidecars (which hold indexed content) are `0600`, reporting any that are not.
 - **Modified** the MCP `activity_summary` tool to validate `group_by` at the request
   boundary and return a clear tool error for an unsupported value.
 - Internal (no behavior change): thread `context.Context` through the data layer

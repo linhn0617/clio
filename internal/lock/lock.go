@@ -155,6 +155,14 @@ func IsHeld(path string) bool {
 	return time.Now().Unix()-rec.ts <= int64(DefaultTTL/time.Second)
 }
 
+// WithFileLock runs fn while holding an exclusive cross-process advisory lock keyed on
+// path (via a sidecar lock file). On platforms without flock (non-Unix) it runs fn
+// directly — see mutex_other.go. Use it to serialize a read-modify-write of a shared
+// file across processes.
+func WithFileLock(path string, fn func() error) error {
+	return withMutex(path, fn)
+}
+
 func readRecord(path string) (*record, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

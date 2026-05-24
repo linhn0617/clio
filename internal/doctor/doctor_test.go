@@ -108,6 +108,27 @@ func TestRunReportsUnparsedLines(t *testing.T) {
 	}
 }
 
+// The DB file (and its sidecars) must be 0600; a world-readable mode is flagged.
+func TestRunFlagsWorldReadableDB(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "x.sqlite")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	if r := findResult(t, Run(d, dir, dbPath), "file permissions"); !r.OK {
+		t.Fatalf("fresh 0600 db should pass perms, got %+v", r)
+	}
+	if err := os.Chmod(dbPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := findResult(t, Run(d, dir, dbPath), "file permissions"); r.OK {
+		t.Fatalf("expected a perm warning for a 0644 db, got %+v", r)
+	}
+}
+
 // On a pre-0005 DB (doctor opens read-only, no migration), the unparsed_lines column
 // may not exist yet; the check must tolerate that as legacy 0, not warn.
 func TestRunToleratesMissingUnparsedColumn(t *testing.T) {
