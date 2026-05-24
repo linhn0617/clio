@@ -71,4 +71,9 @@
 - [x] 6.1 `go test ./internal/sessions/ ./internal/cli/ ./internal/claudeconfig/ ./internal/doctor/ -race -count=1` green.
 - [x] 6.2 `go test ./... -count=1`, `go vet ./...`, `go build ./...`,
   `GOOS=windows GOARCH=amd64 go build ./...` clean; `gofmt -l .` empty.
-- [ ] 6.3 Self-review, then codex re-review of the diff; address findings.
+- [x] 6.3 Self-review, then codex re-review of the diff; address findings.
+  (codex impl-review, 2 Medium, both fixed: (a) a whole-file literal `null` config made
+  `load` return a nil map → `mutate` panicked on assignment; `load` now treats `null` as an
+  empty config (`TestAddServerTopLevelNull`). (b) `reconcile` `continue`d on non-`IsNotExist`
+  stat errors → `source reconciliation` false-greened on an unverifiable source; it now
+  flags those as missing/unreadable (`TestReconcileFlagsUnverifiable`).)

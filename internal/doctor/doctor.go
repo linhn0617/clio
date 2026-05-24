@@ -66,7 +66,7 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 	if rerr != nil {
 		add("source reconciliation", false, rerr.Error())
 	} else {
-		add("source reconciliation", missing == 0 && truncated == 0, fmt.Sprintf("%d missing files, %d truncated, %d with new unindexed bytes", missing, truncated, lag))
+		add("source reconciliation", missing == 0 && truncated == 0, fmt.Sprintf("%d missing/unreadable files, %d truncated, %d with new unindexed bytes", missing, truncated, lag))
 	}
 
 	// Ingest coverage: files on disk vs files in ingest_state.
@@ -110,12 +110,12 @@ func reconcile(database *db.DB) (missing, truncated, lag int, err error) {
 			return 0, 0, 0, serr
 		}
 		fi, statErr := os.Stat(path)
-		if os.IsNotExist(statErr) {
+		if statErr != nil {
+			// Absent, or unverifiable (e.g. a path component is not a directory,
+			// or the file is unreadable). Flag it rather than silently skipping,
+			// so the check does not false-green on a source clio cannot confirm.
 			missing++
 			continue
-		}
-		if statErr != nil {
-			continue // transient FS error: don't fail the whole DB-health check
 		}
 		switch {
 		case fi.Size() < lastSize:

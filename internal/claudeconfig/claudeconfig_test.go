@@ -177,3 +177,20 @@ func TestHasServer(t *testing.T) {
 		t.Fatal("should report server present")
 	}
 }
+
+// TestAddServerTopLevelNull guards against a panic when the entire config file is
+// the literal JSON `null` (unmarshals to a nil map). It must be treated as an empty
+// config, not crash with "assignment to entry in nil map".
+func TestAddServerTopLevelNull(t *testing.T) {
+	p := filepath.Join(t.TempDir(), ".claude.json")
+	if err := os.WriteFile(p, []byte("null"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddServer(p, "clio", ServerEntry{Command: "clio"}); err != nil {
+		t.Fatalf("top-level null config should be treated as empty, got: %v", err)
+	}
+	s := servers(t, read(t, p))
+	if _, ok := s["clio"]; !ok {
+		t.Fatal("clio entry not written")
+	}
+}

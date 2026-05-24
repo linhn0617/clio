@@ -123,3 +123,30 @@ func TestRunFlagsReconciliationWhenIngestStateQueryErrors(t *testing.T) {
 		t.Fatalf("source reconciliation must fail when the ingest_state query errors; got %+v", r)
 	}
 }
+
+// TestReconcileFlagsUnverifiable: a tracked source path whose parent component is a
+// regular file (not a directory) makes os.Stat return a non-IsNotExist error
+// (ENOTDIR), independent of uid/permissions. reconcile must flag it (count it as
+// missing) rather than silently skip it, so `source reconciliation` does not
+// false-green on an unverifiable file.
+func TestReconcileFlagsUnverifiable(t *testing.T) {
+	dir := t.TempDir()
+	notDir := filepath.Join(dir, "afile")
+	if err := os.WriteFile(notDir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(filepath.Join(dir, "x.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	d.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at) VALUES (?,?,?,?,?,?)`,
+		filepath.Join(notDir, "child.jsonl"), 10, 1, 10, "fp", 1)
+	m, _, _, rerr := reconcile(d)
+	if rerr != nil {
+		t.Fatalf("unexpected error: %v", rerr)
+	}
+	if m != 1 {
+		t.Fatalf("expected unverifiable file flagged (missing=1), got %d", m)
+	}
+}

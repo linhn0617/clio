@@ -87,6 +87,9 @@ func load(configPath string) (map[string]any, error) {
 	if err := json.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", configPath, err)
 	}
+	if root == nil { // file was the literal `null` → treat as an empty config
+		return map[string]any{}, nil
+	}
 	return root, nil
 }
 
