@@ -206,6 +206,61 @@ func TestConcurrentReadDuringWrite(t *testing.T) {
 	}
 }
 
+// TestIngestSecretRedactionPipeline verifies that secrets in user messages (plain text,
+// JSON-as-text) and in assistant event JSON are all scrubbed from sessions.title,
+// messages.content, and messages.raw_json.
+func TestIngestSecretRedactionPipeline(t *testing.T) {
+	projects := t.TempDir()
+	// First user message: plain-text secret (env-var style).
+	evUser1Sec := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"sec-sess","message":{"role":"user","content":"OPENAI_API_KEY=sk-aaaaaaaaaaaaaaaaaaaa"}}`
+	// Second user message: JSON-as-text with a secret key.
+	evUser2Sec := `{"type":"user","timestamp":"2026-04-26T11:01:00Z","cwd":"/p","sessionId":"sec-sess","message":{"role":"user","content":"{\"apiKey\":\"secret-value-123456\"}"}}`
+	// Assistant event whose raw JSON contains a token field in tool_use input.
+	evAsst1Sec := `{"type":"assistant","timestamp":"2026-04-26T11:01:05Z","sessionId":"sec-sess","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"SomeTool","input":{"token":"plainsecret123","command":"ls"}}]}}`
+	writeSession(t, projects, "-p", "sec-sess", evUser1Sec, evUser2Sec, evAsst1Sec)
+
+	d := openTestDB(t)
+	if _, err := New(d, nil).IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Check session title (derived from first user message).
+	var title string
+	d.QueryRow(`SELECT title FROM sessions WHERE uuid='sec-sess'`).Scan(&title)
+	if strings.Contains(title, "sk-aaaaaaaaaaaaaaaaaaaa") {
+		t.Errorf("session title leaked secret: %q", title)
+	}
+
+	// Check all messages for content and raw_json leaks.
+	rows, err := d.Query(`SELECT content, raw_json FROM messages WHERE session_uuid='sec-sess'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	msgCount := 0
+	for rows.Next() {
+		var content, rawJSON string
+		if err := rows.Scan(&content, &rawJSON); err != nil {
+			t.Fatal(err)
+		}
+		msgCount++
+		for _, secret := range []string{"sk-aaaaaaaaaaaaaaaaaaaa", "secret-value-123456", "plainsecret123"} {
+			if strings.Contains(content, secret) {
+				t.Errorf("message content leaked secret %q: %q", secret, content)
+			}
+			if strings.Contains(rawJSON, secret) {
+				t.Errorf("message raw_json leaked secret %q: %q", secret, rawJSON)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if msgCount == 0 {
+		t.Fatal("no messages found for sec-sess")
+	}
+}
+
 func TestIngestRawJSONRedacted(t *testing.T) {
 	projects := t.TempDir()
 	leak := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"sess-1","message":{"role":"user","content":"my key AKIAIOSFODNN7EXAMPLE"}}`

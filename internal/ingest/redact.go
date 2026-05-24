@@ -1,6 +1,11 @@
 package ingest
 
-import "regexp"
+import (
+	"bytes"
+	"encoding/json"
+	"regexp"
+	"strings"
+)
 
 // redactRule pairs a compiled pattern with the replacement applied to matches.
 type redactRule struct {
@@ -32,6 +37,8 @@ var redactRules = []redactRule{
 	{regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._\-]{12,}`), "Bearer [REDACTED:token]"},
 	// KEY=value / KEY: value where KEY names a secret. Value redacted, key kept.
 	{regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|TOKEN|CREDENTIAL)[A-Z0-9_]*)\s*([:=])\s*["']?[^\s"']{6,}["']?`), `$1$2[REDACTED:secret]`},
+	// Connection strings: scheme://user:pass@host (requires user:pass@ authority).
+	{regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:[^\s:/@]+@\S+`), "[REDACTED:connstring]"},
 }
 
 // Redact replaces recognized secret patterns in s. It is intentionally
@@ -41,4 +48,84 @@ func Redact(s string) string {
 		s = r.re.ReplaceAllString(s, r.repl)
 	}
 	return s
+}
+
+// secretKeyRe matches secret-named keys with word boundaries to avoid false
+// positives (e.g. "tokenizer", "author", "oauth_provider").
+// Compound terms use spaces because isSecretKey normalizes underscores to spaces.
+var secretKeyRe = regexp.MustCompile(`\b(password|passwd|secret|secrets|credential|credentials|token|apikey|api key|accesskey|access key|privatekey|private key|secret key|auth token|dsn|connection string|conn str)\b`)
+
+// isSecretKey returns true if the key name looks like a secret holder.
+// Underscores are treated as word separators so that "db_password" matches
+// "password" and "API_KEY" matches "api key" (= api_key).
+func isSecretKey(k string) bool {
+	normalized := strings.ReplaceAll(strings.ToLower(k), "_", " ")
+	return secretKeyRe.MatchString(normalized)
+}
+
+// redactString is the single text redactor used for message content, session
+// titles, and string leaves inside JSON.
+//
+// If the (trimmed) string looks like a JSON object or array, it is parsed and
+// walked structurally; otherwise the shape regexes (Redact) are applied.
+func redactString(s string) string {
+	t := strings.TrimSpace(s)
+	if len(t) > 0 && (t[0] == '{' || t[0] == '[') {
+		if red, ok := redactJSONValue([]byte(t)); ok {
+			return red
+		}
+	}
+	return Redact(s)
+}
+
+// redactJSON walks a raw JSON event line and redacts secret values structurally.
+// On decode failure it falls back to text Redact.
+func redactJSON(line []byte) []byte {
+	if result, ok := redactJSONValue(line); ok {
+		return []byte(result)
+	}
+	return []byte(Redact(string(line)))
+}
+
+// redactJSONValue decodes b as JSON, walks it with redactWalk, and re-encodes
+// it. Returns ("", false) if b is not valid JSON.
+func redactJSONValue(b []byte) (string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return "", false
+	}
+	walked := redactWalk(v)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(walked); err != nil {
+		return "", false
+	}
+	return strings.TrimRight(buf.String(), "\n"), true
+}
+
+// redactWalk recursively walks a decoded JSON value and redacts secrets.
+func redactWalk(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, val := range x {
+			if isSecretKey(k) {
+				x[k] = "[REDACTED:key]" // whole subtree, any type
+			} else {
+				x[k] = redactWalk(val)
+			}
+		}
+		return x
+	case []any:
+		for i := range x {
+			x[i] = redactWalk(x[i])
+		}
+		return x
+	case string:
+		return redactString(x) // recurse into JSON-in-string + regex
+	default:
+		return v // numbers (json.Number), bools, null
+	}
 }

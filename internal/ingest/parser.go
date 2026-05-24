@@ -70,8 +70,8 @@ func (p *Parser) ParseLine(line []byte) ([]model.Message, EventInfo, error) {
 
 	// Redact the whole event line too: raw_json is surfaced by `clio show
 	// --format raw/json`, so storing it unredacted would leak secrets that the
-	// content redaction removed.
-	raw := Redact(string(line))
+	// content redaction removed. Use structured JSON-aware redaction.
+	raw := string(redactJSON(line))
 	var msgs []model.Message
 
 	add := func(role, content string, tcs []model.ToolCall) {
@@ -84,7 +84,7 @@ func (p *Parser) ParseLine(line []byte) ([]model.Message, EventInfo, error) {
 			Seq:         p.seq,
 			TS:          info.TS,
 			Role:        role,
-			Content:     truncateForFTS(Redact(content)),
+			Content:     truncateForFTS(redactString(content)),
 			RawJSON:     raw,
 			ToolCalls:   tcs,
 		}
@@ -97,7 +97,7 @@ func (p *Parser) ParseLine(line []byte) ([]model.Message, EventInfo, error) {
 	if err := json.Unmarshal(ev.Message.Content, &asString); err == nil {
 		add(ev.Type, asString, nil)
 		if info.TitleHint == "" && ev.Type == model.RoleUser {
-			info.TitleHint = titleFrom(asString)
+			info.TitleHint = titleFrom(redactString(asString))
 		}
 		return msgs, info, nil
 	}
@@ -112,7 +112,7 @@ func (p *Parser) ParseLine(line []byte) ([]model.Message, EventInfo, error) {
 		case "text":
 			add(ev.Type, b.Text, nil)
 			if info.TitleHint == "" && ev.Type == model.RoleUser {
-				info.TitleHint = titleFrom(b.Text)
+				info.TitleHint = titleFrom(redactString(b.Text))
 			}
 		case "thinking":
 			add(model.RoleThinking, b.Thinking, nil)
