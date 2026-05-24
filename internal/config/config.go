@@ -29,7 +29,7 @@ func ClaudeConfigFile() (string, error) {
 // the platform default (~/Library/Application Support on macOS, ~/.local/share
 // elsewhere).
 func DataDir() (string, error) {
-	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" && filepath.IsAbs(xdg) {
 		return filepath.Join(xdg, "clio"), nil
 	}
 	home, err := os.UserHomeDir()
