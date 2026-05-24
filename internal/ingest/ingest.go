@@ -140,7 +140,9 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 	}
 
 	parser := NewParser(startSeq)
-	if excluded, err := ing.loadExcludedToolUses(); err == nil {
+	if excluded, err := ing.loadExcludedToolUses(); err != nil {
+		ing.log.Warn("load excluded tool uses failed", "err", err)
+	} else {
 		parser.Seed(excluded)
 	}
 	msgs, sess := ing.parseBuffer(parser, complete, path)
