@@ -174,6 +174,12 @@ func leaderLoop(ctx context.Context, lease *lock.Lease, leaderFlag *atomic.Bool,
 			if _, err := ing.IngestAll(wctx, projects, false); err != nil {
 				log.Warn("startup catch-up failed", "err", err)
 			}
+			// Reflect deletions that happened while clio was down before we start
+			// serving, so a just-promoted leader (and CLI readers deferring to it)
+			// don't surface sources that no longer exist.
+			if err := ing.PurgeMissing(wctx, projects); err != nil {
+				log.Warn("startup purge failed", "err", err)
+			}
 			// Catch-up done: safe to serve reads without follower catch-up.
 			leaderFlag.Store(true)
 			go func() {

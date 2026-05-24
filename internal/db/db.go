@@ -40,7 +40,7 @@ func Open(path string) (*DB, error) {
 		}
 	}
 
-	dsn := "file:" + path + "?_txlock=immediate&_pragma=busy_timeout(3000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)"
+	dsn := "file:" + path + "?_txlock=immediate&_pragma=busy_timeout(3000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)&_pragma=cache_size(-8000)"
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -71,6 +71,17 @@ func Open(path string) (*DB, error) {
 	if err := d.migrate(); err != nil {
 		sqlDB.Close()
 		return nil, err
+	}
+	// Refresh query-planner statistics where beneficial (no-op when already current);
+	// cheaper than an unconditional ANALYZE on every open.
+	_, _ = d.Exec("PRAGMA optimize")
+	// Tighten the WAL/SHM sidecars to match the main file. They may not exist until the
+	// first write (ErrNotExist is fine); any other chmod failure is a real problem.
+	for _, ext := range []string{"-wal", "-shm"} {
+		if err := os.Chmod(path+ext, 0o600); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			sqlDB.Close()
+			return nil, fmt.Errorf("chmod %s: %w", ext, err)
+		}
 	}
 	return d, nil
 }

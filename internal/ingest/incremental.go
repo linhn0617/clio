@@ -9,6 +9,27 @@ import (
 
 const fingerprintWindow = 512
 
+// maxLineBytes caps the in-memory size of a single line during streaming ingest.
+// A line that reaches this without a newline is treated as unparseable (counted and
+// discarded once its newline is seen), so a giant or newline-less line cannot OOM.
+const maxLineBytes = 16 << 20 // 16 MiB
+
+// headFingerprint hashes the leading fingerprintWindow bytes. Validated alongside the
+// tail fingerprint to catch a rewrite that changed the start of an (otherwise
+// append-looking) file. Returns "" for an empty file.
+func headFingerprint(f *os.File) (string, error) {
+	buf := make([]byte, fingerprintWindow)
+	n, err := f.ReadAt(buf, 0)
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	if n == 0 {
+		return "", nil
+	}
+	sum := sha256.Sum256(buf[:n])
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // FileState mirrors a row of the ingest_state table.
 type FileState struct {
 	SourceFile      string
@@ -16,7 +37,9 @@ type FileState struct {
 	LastMTime       int64
 	LastByteOffset  int64
 	TailFingerprint string
+	HeadFingerprint string
 	LastIngestedAt  int64
+	UnparsedLines   int64
 }
 
 type changeKind int
@@ -37,10 +60,12 @@ func classifyChange(prior *FileState, size, mtime int64) changeKind {
 	switch {
 	case size < prior.LastSize:
 		return changeFull // truncated or rewritten smaller
-	case size == prior.LastSize && mtime == prior.LastMTime:
-		return changeSkip
+	case size > prior.LastSize:
+		return changeIncremental // grew: an append
+	case mtime != prior.LastMTime:
+		return changeFull // same size, new mtime: a rewrite, never an append
 	default:
-		return changeIncremental // grew, or same size with new mtime
+		return changeSkip // same size, same mtime
 	}
 }
 

@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sort"
@@ -9,10 +10,12 @@ import (
 	"github.com/linhn0617/clio/internal/db"
 )
 
-const overscan = 5 // fetch extra rows so post-ranking can reorder meaningfully
+// overscan: fetch Limit*overscan rows by bm25 before re-ranking by recency/role, so a
+// recency-boosted hit ranked just outside the top-N by bm25 still survives re-ranking.
+const overscan = 12
 
 // Search runs a query and returns ranked results.
-func Search(database *db.DB, opt Options) ([]Result, error) {
+func Search(ctx context.Context, database *db.DB, opt Options) ([]Result, error) {
 	if strings.TrimSpace(opt.Query) == "" {
 		return nil, fmt.Errorf("empty query")
 	}
@@ -34,9 +37,9 @@ func Search(database *db.DB, opt Options) ([]Result, error) {
 		err  error
 	)
 	if len(long) > 0 {
-		rows, err = hybridQuery(database, opt, long, short)
+		rows, err = hybridQuery(ctx, database, opt, long, short)
 	} else {
-		rows, err = likeQuery(database, opt)
+		rows, err = likeQuery(ctx, database, opt)
 	}
 	if err != nil {
 		return nil, err
@@ -93,7 +96,7 @@ func commonFilters(opt Options) (string, []any) {
 }
 
 // hybridQuery uses FTS MATCH for long terms and adds per-short-term LIKE filters.
-func hybridQuery(database *db.DB, opt Options, long, short []string) (*sql.Rows, error) {
+func hybridQuery(ctx context.Context, database *db.DB, opt Options, long, short []string) (*sql.Rows, error) {
 	filt, fargs := commonFilters(opt)
 
 	// Build short-term LIKE clauses.
@@ -117,10 +120,10 @@ func hybridQuery(database *db.DB, opt Options, long, short []string) (*sql.Rows,
 	args = append(args, shortArgs...)
 	args = append(args, fargs...)
 	args = append(args, opt.Limit*overscan)
-	return database.Query(q, args...)
+	return database.QueryContext(ctx, q, args...)
 }
 
-func likeQuery(database *db.DB, opt Options) (*sql.Rows, error) {
+func likeQuery(ctx context.Context, database *db.DB, opt Options) (*sql.Rows, error) {
 	filt, fargs := commonFilters(opt)
 	var conds []string
 	var args []any
@@ -138,5 +141,5 @@ func likeQuery(database *db.DB, opt Options) (*sql.Rows, error) {
 		ORDER BY m.ts DESC LIMIT ?`
 	args = append(args, fargs...)
 	args = append(args, opt.Limit*overscan)
-	return database.Query(q, args...)
+	return database.QueryContext(ctx, q, args...)
 }

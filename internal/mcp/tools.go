@@ -37,7 +37,7 @@ func clamp(v, def, max int) int {
 }
 
 func handleSearch(database *db.DB, beforeRead func()) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if beforeRead != nil {
 			beforeRead()
 		}
@@ -45,7 +45,7 @@ func handleSearch(database *db.DB, beforeRead func()) func(context.Context, mcp.
 		if err != nil {
 			return mcp.NewToolResultError("query is required"), nil
 		}
-		res, err := search.Search(database, search.Options{
+		res, err := search.Search(ctx, database, search.Options{
 			Query:             query,
 			Since:             parseSince(req.GetString("since", "")),
 			ProjectPrefix:     req.GetString("project", ""),
@@ -72,11 +72,11 @@ func handleSearch(database *db.DB, beforeRead func()) func(context.Context, mcp.
 }
 
 func handleListSessions(database *db.DB, beforeRead func()) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if beforeRead != nil {
 			beforeRead()
 		}
-		rows, err := sessions.ListSessions(database, sessions.ListFilter{
+		rows, err := sessions.ListSessions(ctx, database, sessions.ListFilter{
 			Since:         parseSince(req.GetString("since", "")),
 			ProjectPrefix: req.GetString("project", ""),
 			MinTurns:      req.GetInt("min_turns", 0),
@@ -102,7 +102,7 @@ func handleListSessions(database *db.DB, beforeRead func()) func(context.Context
 }
 
 func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if beforeRead != nil {
 			beforeRead()
 		}
@@ -110,7 +110,11 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 		if since == 0 {
 			since = time.Now().Add(-7 * 24 * time.Hour).Unix()
 		}
-		buckets, err := sessions.ActivitySummary(database, since, req.GetString("group_by", "day"))
+		groupBy := req.GetString("group_by", "day")
+		if groupBy != "day" && groupBy != "project" {
+			return mcp.NewToolResultError(`group_by must be "day" or "project"`), nil
+		}
+		buckets, err := sessions.ActivitySummary(ctx, database, since, groupBy)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -122,7 +126,7 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 }
 
 func handleReadSession(database *db.DB, beforeRead func()) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if beforeRead != nil {
 			beforeRead()
 		}
@@ -130,13 +134,13 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 		if err != nil {
 			return mcp.NewToolResultError("uuid is required"), nil
 		}
-		sess, err := sessions.ResolvePrefix(database, uuid)
+		sess, err := sessions.ResolvePrefix(ctx, database, uuid)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		offset := req.GetInt("offset", 0)
 		limit := clamp(req.GetInt("limit", defaultReadLimit), defaultReadLimit, maxReadLimit)
-		msgs, hasMore, err := sessions.GetMessages(database, sess.UUID, offset, limit, req.GetBool("include_tool_output", false))
+		msgs, hasMore, err := sessions.GetMessages(ctx, database, sess.UUID, offset, limit, req.GetBool("include_tool_output", false))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}

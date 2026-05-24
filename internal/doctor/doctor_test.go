@@ -3,6 +3,7 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/linhn0617/clio/internal/db"
@@ -76,6 +77,73 @@ func TestRunReportsChecks(t *testing.T) {
 	}
 	if !sawIntegrity {
 		t.Fatal("integrity check missing")
+	}
+}
+
+func TestRunReportsUnparsedLines(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "x.sqlite")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	// Zero unparsed lines: the check passes.
+	if r := findResult(t, Run(d, dir, dbPath), "unparsed lines"); !r.OK {
+		t.Fatalf("expected pass with zero unparsed, got %+v", r)
+	}
+
+	// Record some unparsed lines for a source.
+	if _, err := d.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at,unparsed_lines) VALUES (?,?,?,?,?,?,?)`,
+		filepath.Join(dir, "s.jsonl"), 10, 1, 10, "fp", 1, 3); err != nil {
+		t.Fatal(err)
+	}
+	r := findResult(t, Run(d, dir, dbPath), "unparsed lines")
+	if r.OK {
+		t.Fatal("expected failing check when unparsed_lines > 0")
+	}
+	if !strings.Contains(r.Detail, "3") {
+		t.Fatalf("expected the count in detail, got %q", r.Detail)
+	}
+}
+
+// The DB file (and its sidecars) must be 0600; a world-readable mode is flagged.
+func TestRunFlagsWorldReadableDB(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "x.sqlite")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	if r := findResult(t, Run(d, dir, dbPath), "file permissions"); !r.OK {
+		t.Fatalf("fresh 0600 db should pass perms, got %+v", r)
+	}
+	if err := os.Chmod(dbPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := findResult(t, Run(d, dir, dbPath), "file permissions"); r.OK {
+		t.Fatalf("expected a perm warning for a 0644 db, got %+v", r)
+	}
+}
+
+// On a pre-0005 DB (doctor opens read-only, no migration), the unparsed_lines column
+// may not exist yet; the check must tolerate that as legacy 0, not warn.
+func TestRunToleratesMissingUnparsedColumn(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "x.sqlite")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if _, err := d.Exec(`ALTER TABLE ingest_state DROP COLUMN unparsed_lines`); err != nil {
+		t.Skipf("DROP COLUMN unsupported: %v", err)
+	}
+	if r := findResult(t, Run(d, dir, dbPath), "unparsed lines"); !r.OK {
+		t.Fatalf("expected tolerant pass on pre-migration db, got %+v", r)
 	}
 }
 

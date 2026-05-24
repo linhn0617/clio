@@ -18,7 +18,7 @@ func TestClassifyChange(t *testing.T) {
 		{"unchanged", prior, 100, 1000, changeSkip},
 		{"grew", prior, 200, 1001, changeIncremental},
 		{"shrank", prior, 50, 1001, changeFull},
-		{"same size new mtime", prior, 100, 1001, changeIncremental},
+		{"same size new mtime", prior, 100, 1001, changeFull}, // rewrite, not an append
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

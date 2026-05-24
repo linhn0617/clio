@@ -36,6 +36,18 @@ var redactRules = []redactRule{
 	{regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`), "[REDACTED:jwt]"},
 	// Bearer tokens in headers.
 	{regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._\-]{12,}`), "Bearer [REDACTED:token]"},
+	// Basic auth credentials, anchored on the explicit (Proxy-)Authorization header
+	// so the English word "basic" in prose is never matched (base64 of user:pass can
+	// be all letters, so a bare "Basic <word>" rule would eat phrases like "basic
+	// auth"). No length floor: the header shape is already high-signal and short
+	// credentials (e.g. "a:b") must not leak. The capture keeps the header name.
+	{regexp.MustCompile(`(?i)((?:Proxy-)?Authorization:\s*Basic\s+)[A-Za-z0-9+/=]+`), "${1}[REDACTED:token]"},
+	// Cookie / Set-Cookie header values (session ids, CSRF tokens). Anchored on the
+	// header colon form AND requiring a name=value (so prose like "cookie: enabled" is
+	// left untouched). Redact to end-of-line (HTTP-correct): security beats
+	// searchability, so a quoted value like session="secret" is never left exposed even
+	// though same-line trailing content is also redacted.
+	{regexp.MustCompile(`(?i)((?:Set-)?Cookie:\s*)[^\r\n]*=[^\r\n]*`), "${1}[REDACTED:cookie]"},
 	// KEY=value / KEY: value where KEY names a secret. Value redacted, key kept.
 	{regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|TOKEN|CREDENTIAL)[A-Z0-9_]*)\s*([:=])\s*["']?[^\s"']{6,}["']?`), `$1$2[REDACTED:secret]`},
 	// Connection strings: scheme://user:pass@host (requires user:pass@ authority).
@@ -57,6 +69,15 @@ func Redact(s string) string {
 // Compound terms use spaces because isSecretKey normalizes underscores to spaces.
 var secretKeyRe = regexp.MustCompile(`\b(password|passwd|secret|secrets|credential|credentials|token|apikey|api key|accesskey|access key|privatekey|private key|secret key|auth token|dsn|connection string|conn str)\b`)
 
+// secretKeyExact are secret-bearing key names matched only as the WHOLE normalized
+// key (after underscore/hyphen/camelCase splitting), not as a substring — so
+// "authorization"/"cookie"/"set cookie" are caught but "authorizationURL",
+// "cookieJar", and "setCookieBanner" are not.
+var secretKeyExact = map[string]bool{
+	"authorization": true, "proxy authorization": true,
+	"cookie": true, "set cookie": true,
+}
+
 // camelBoundaryRe matches the boundary between a lower/digit and an upper char
 // so "secretKey" → "secret Key" and "dbPassword" → "db Password".
 var camelBoundaryRe = regexp.MustCompile(`([a-z0-9])([A-Z])`)
@@ -68,6 +89,9 @@ func isSecretKey(k string) bool {
 	n := camelBoundaryRe.ReplaceAllString(k, "$1 $2")
 	n = strings.NewReplacer("_", " ", "-", " ").Replace(n)
 	n = strings.ToLower(n)
+	if secretKeyExact[n] {
+		return true
+	}
 	return secretKeyRe.MatchString(n)
 }
 

@@ -4,8 +4,12 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
@@ -67,6 +71,44 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 		add("source reconciliation", false, rerr.Error())
 	} else {
 		add("source reconciliation", missing == 0 && truncated == 0, fmt.Sprintf("%d missing/unreadable files, %d truncated, %d with new unindexed bytes", missing, truncated, lag))
+	}
+
+	// Unparsed lines: complete source lines ingest could not parse (recorded per source).
+	// doctor opens the DB read-only, so on a pre-0005 DB the column may not exist yet
+	// (migrations run on the next writable open) — treat that as legacy 0, not a failure.
+	var unparsed int64
+	uerr := database.QueryRow(`SELECT COALESCE(SUM(unparsed_lines),0) FROM ingest_state`).Scan(&unparsed)
+	switch {
+	case uerr != nil && strings.Contains(uerr.Error(), "no such column"):
+		add("unparsed lines", true, "0 (pre-migration db)")
+	case uerr != nil:
+		add("unparsed lines", false, uerr.Error())
+	case unparsed == 0:
+		add("unparsed lines", true, "0")
+	default:
+		add("unparsed lines", false, fmt.Sprintf("%d source lines could not be parsed; after upgrading clio, run `clio index --full`", unparsed))
+	}
+
+	// File permissions: the DB and its WAL/SHM sidecars hold indexed content and must
+	// be private (0600). Absent sidecars (no writes yet) are skipped.
+	var badPerms []string
+	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		fi, e := os.Stat(p)
+		if errors.Is(e, fs.ErrNotExist) {
+			continue // sidecar not created yet
+		}
+		if e != nil {
+			badPerms = append(badPerms, filepath.Base(p)+"=unverifiable("+e.Error()+")")
+			continue
+		}
+		if mode := fi.Mode().Perm(); mode != 0o600 {
+			badPerms = append(badPerms, fmt.Sprintf("%s=%04o", filepath.Base(p), mode))
+		}
+	}
+	if len(badPerms) == 0 {
+		add("file permissions", true, "0600")
+	} else {
+		add("file permissions", false, "not 0600: "+strings.Join(badPerms, ", "))
 	}
 
 	// Ingest coverage: files on disk vs files in ingest_state.

@@ -50,6 +50,9 @@ func openForQuery() (*db.DB, error) {
 			if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
 				stderrLogger().Warn("incremental catch-up failed", "err", err)
 			}
+			if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+				stderrLogger().Warn("catch-up purge failed", "err", err)
+			}
 		}
 	}
 	return database, nil

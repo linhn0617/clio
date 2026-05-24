@@ -1,6 +1,7 @@
 package search
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,7 +38,7 @@ func addMsg(t *testing.T, d *db.DB, sess string, seq int, role, content string, 
 
 func TestSearchEmptyQueryErrors(t *testing.T) {
 	d := testDB(t)
-	if _, err := Search(d, Options{Query: "  "}); err == nil {
+	if _, err := Search(context.Background(), d, Options{Query: "  "}); err == nil {
 		t.Fatal("expected error for empty query")
 	}
 }
@@ -49,7 +50,7 @@ func TestSearchFTS3Char(t *testing.T) {
 	addMsg(t, d, "s1", 0, "user", "請幫我設計資料庫遷移流程", now)
 	addMsg(t, d, "s1", 1, "assistant", "unrelated english text", now)
 
-	res, err := Search(d, Options{Query: "資料庫", Limit: 10})
+	res, err := Search(context.Background(), d, Options{Query: "資料庫", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +66,7 @@ func TestSearchCJKShortFallback(t *testing.T) {
 	addMsg(t, d, "s1", 0, "user", "資料驗證流程很重要", now)
 
 	// 2-char query: trigram can't match, LIKE fallback must.
-	res, err := Search(d, Options{Query: "驗證", Limit: 10})
+	res, err := Search(context.Background(), d, Options{Query: "驗證", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +82,7 @@ func TestSearchDialogueOutranksToolOutput(t *testing.T) {
 	addMsg(t, d, "s1", 0, "user", "how do we handle authentication here", now)
 	addMsg(t, d, "s1", 1, "tool_result", "authentication authentication authentication log noise", now)
 
-	res, err := Search(d, Options{Query: "authentication", Limit: 10, IncludeToolOutput: true})
+	res, err := Search(context.Background(), d, Options{Query: "authentication", Limit: 10, IncludeToolOutput: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,14 +100,14 @@ func TestSearchExcludesToolOutputByDefault(t *testing.T) {
 	now := time.Now().Unix()
 	addMsg(t, d, "s1", 0, "tool_result", "matched only in tool output zzztoken", now)
 
-	res, err := Search(d, Options{Query: "zzztoken", Limit: 10})
+	res, err := Search(context.Background(), d, Options{Query: "zzztoken", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(res) != 0 {
 		t.Fatalf("tool output should be excluded by default, got %d", len(res))
 	}
-	res, err = Search(d, Options{Query: "zzztoken", Limit: 10, IncludeToolOutput: true})
+	res, err = Search(context.Background(), d, Options{Query: "zzztoken", Limit: 10, IncludeToolOutput: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +127,7 @@ func TestSearchLikeFallbackWithFilters(t *testing.T) {
 	addMsg(t, d, "s2", 0, "user", "資料驗證很重要", now)
 	addMsg(t, d, "s1", 1, "assistant", "資料驗證回覆", now)
 
-	res, err := Search(d, Options{Query: "驗證", ProjectPrefix: "/p/alpha", Role: "user", Limit: 10})
+	res, err := Search(context.Background(), d, Options{Query: "驗證", ProjectPrefix: "/p/alpha", Role: "user", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +144,7 @@ func TestSearchProjectFilter(t *testing.T) {
 	addMsg(t, d, "s1", 0, "user", "shared keyword qubit", now)
 	addMsg(t, d, "s2", 0, "user", "shared keyword qubit", now)
 
-	res, err := Search(d, Options{Query: "qubit", ProjectPrefix: "/p/alpha", Limit: 10})
+	res, err := Search(context.Background(), d, Options{Query: "qubit", ProjectPrefix: "/p/alpha", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,14 +177,14 @@ func TestSearchOperatorSafeTerms(t *testing.T) {
 
 	// The main goal: none of these should return an error.
 	for _, q := range []string{"c++", `"unclosed`, "foo OR", "(test"} {
-		_, err := Search(d, Options{Query: q, Limit: 10, IncludeToolOutput: true})
+		_, err := Search(context.Background(), d, Options{Query: q, Limit: 10, IncludeToolOutput: true})
 		if err != nil {
 			t.Errorf("query %q returned unexpected error: %v", q, err)
 		}
 	}
 
 	// c++ should match the message containing "c++"
-	res, err := Search(d, Options{Query: "c++", Limit: 10, IncludeToolOutput: true})
+	res, err := Search(context.Background(), d, Options{Query: "c++", Limit: 10, IncludeToolOutput: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +216,7 @@ func TestSearchHybridMixedLength(t *testing.T) {
 	// A row with only "ui".
 	addMsg(t, d, "s1", 61, "user", "ui components only", now-101)
 
-	res, err := Search(d, Options{Query: "auth ui", Limit: 10, IncludeToolOutput: true})
+	res, err := Search(context.Background(), d, Options{Query: "auth ui", Limit: 10, IncludeToolOutput: true})
 	if err != nil {
 		t.Fatalf("hybrid query returned error: %v", err)
 	}
@@ -248,7 +249,7 @@ func TestSearchAllShortQuery(t *testing.T) {
 	addMsg(t, d, "s1", 0, "user", "ui panel navigation", now)
 	addMsg(t, d, "s1", 1, "user", "something else entirely", now)
 
-	res, err := Search(d, Options{Query: "ui", Limit: 10})
+	res, err := Search(context.Background(), d, Options{Query: "ui", Limit: 10})
 	if err != nil {
 		t.Fatalf("all-short query error: %v", err)
 	}
@@ -267,7 +268,7 @@ func TestSearchProjectPrefixEscaping(t *testing.T) {
 	addMsg(t, d, "s1", 0, "user", "authentication service here", now)
 	addMsg(t, d, "s2", 0, "user", "authentication service here", now)
 
-	res, err := Search(d, Options{Query: "authentication", ProjectPrefix: "/x/a_b", Limit: 10})
+	res, err := Search(context.Background(), d, Options{Query: "authentication", ProjectPrefix: "/x/a_b", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +300,7 @@ func TestSearchContentLikeEscaping(t *testing.T) {
 	// 2-char "%" would normally match everything in LIKE without escaping.
 	// But "%" is 1 rune, so it goes to the all-short likeQuery path.
 	// With escaping, it should match only messages containing literal %.
-	res, err := Search(d, Options{Query: "%", Limit: 10})
+	res, err := Search(context.Background(), d, Options{Query: "%", Limit: 10})
 	if err != nil {
 		t.Fatalf("percent query error: %v", err)
 	}
@@ -307,7 +308,7 @@ func TestSearchContentLikeEscaping(t *testing.T) {
 		t.Fatalf("'%%' should match only 1 message with literal %%, got %d: %+v", len(res), res)
 	}
 
-	res, err = Search(d, Options{Query: "_", Limit: 10})
+	res, err = Search(context.Background(), d, Options{Query: "_", Limit: 10})
 	if err != nil {
 		t.Fatalf("underscore query error: %v", err)
 	}
@@ -323,7 +324,7 @@ func TestSearchAllPunctuationQuery(t *testing.T) {
 	now := time.Now().Unix()
 	addMsg(t, d, "s1", 0, "user", "hello world", now)
 
-	_, err := Search(d, Options{Query: "***", Limit: 10})
+	_, err := Search(context.Background(), d, Options{Query: "***", Limit: 10})
 	if err != nil {
 		t.Errorf("all-punctuation query *** should not error, got: %v", err)
 	}
@@ -339,7 +340,7 @@ func TestSearchQuotedPhraseWithShortTerm(t *testing.T) {
 	// This has "auth flow" but not "ui".
 	addMsg(t, d, "s1", 1, "user", "auth flow without other thing", now)
 
-	res, err := Search(d, Options{Query: `"auth flow" ui`, Limit: 10})
+	res, err := Search(context.Background(), d, Options{Query: `"auth flow" ui`, Limit: 10})
 	if err != nil {
 		t.Fatalf(`"auth flow" ui returned error: %v`, err)
 	}
@@ -431,7 +432,7 @@ func TestSearchZeroTermQuery(t *testing.T) {
 	addMsg(t, d, "s1", 0, "user", "hello world", now)
 
 	for _, q := range []string{`"`, `""`, `"""`, ` "" `} {
-		res, err := Search(d, Options{Query: q, Limit: 10})
+		res, err := Search(context.Background(), d, Options{Query: q, Limit: 10})
 		if err != nil {
 			t.Errorf("query %q returned unexpected error: %v", q, err)
 		}
@@ -439,7 +440,7 @@ func TestSearchZeroTermQuery(t *testing.T) {
 			t.Errorf("query %q expected empty results, got %d", q, len(res))
 		}
 		// IncludeToolOutput=true exercises the other role-filter branch.
-		res, err = Search(d, Options{Query: q, Limit: 10, IncludeToolOutput: true})
+		res, err = Search(context.Background(), d, Options{Query: q, Limit: 10, IncludeToolOutput: true})
 		if err != nil {
 			t.Errorf("query %q (IncludeToolOutput) returned unexpected error: %v", q, err)
 		}

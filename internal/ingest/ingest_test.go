@@ -1,7 +1,9 @@
 package ingest
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -258,6 +260,430 @@ func TestIngestSecretRedactionPipeline(t *testing.T) {
 	}
 	if msgCount == 0 {
 		t.Fatal("no messages found for sec-sess")
+	}
+}
+
+// TestIngestRedactsAuthAndCookie verifies Authorization: Basic / Cookie headers and
+// the authorization/cookie JSON keys are scrubbed from title, content, and raw_json.
+func TestIngestRedactsAuthAndCookie(t *testing.T) {
+	projects := t.TempDir()
+	// First user message: a cookie header (also becomes the title source).
+	evUser1 := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"ac-sess","message":{"role":"user","content":"Cookie: session=topsecret123; csrf=abc"}}`
+	// Second user message: an Authorization: Basic header.
+	evUser2 := `{"type":"user","timestamp":"2026-04-26T11:01:00Z","cwd":"/p","sessionId":"ac-sess","message":{"role":"user","content":"curl -H 'Authorization: Basic QWxhZGRpbjpvcGVuc2VzYW1l'"}}`
+	// Assistant tool_use input with an authorization key.
+	evAsst1 := `{"type":"assistant","timestamp":"2026-04-26T11:01:05Z","sessionId":"ac-sess","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"SomeTool","input":{"authorization":"Basic c2VjcmV0OnZhbHVl","command":"ls"}}]}}`
+	writeSession(t, projects, "-p", "ac-sess", evUser1, evUser2, evAsst1)
+
+	d := openTestDB(t)
+	if _, err := New(d, nil).IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+
+	secrets := []string{"topsecret123", "QWxhZGRpbjpvcGVuc2VzYW1l", "c2VjcmV0OnZhbHVl"}
+
+	var title string
+	d.QueryRow(`SELECT title FROM sessions WHERE uuid='ac-sess'`).Scan(&title)
+	for _, s := range secrets {
+		if strings.Contains(title, s) {
+			t.Errorf("session title leaked %q: %q", s, title)
+		}
+	}
+
+	rows, err := d.Query(`SELECT content, raw_json FROM messages WHERE session_uuid='ac-sess'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	msgCount := 0
+	for rows.Next() {
+		var content, rawJSON string
+		if err := rows.Scan(&content, &rawJSON); err != nil {
+			t.Fatal(err)
+		}
+		msgCount++
+		for _, s := range secrets {
+			if strings.Contains(content, s) {
+				t.Errorf("content leaked %q: %q", s, content)
+			}
+			if strings.Contains(rawJSON, s) {
+				t.Errorf("raw_json leaked %q: %q", s, rawJSON)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if msgCount == 0 {
+		t.Fatal("no messages found for ac-sess")
+	}
+}
+
+func appendLine(t *testing.T, path, line string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func unparsedCount(t *testing.T, d *db.DB, src string) int64 {
+	t.Helper()
+	var n int64
+	if err := d.QueryRow(`SELECT unparsed_lines FROM ingest_state WHERE source_file=?`, src).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// readCappedLine: the streaming line reader's cap logic (over-cap detection without OOM).
+func TestReadCappedLine(t *testing.T) {
+	mk := func(s string) *bufio.Reader { return bufio.NewReader(strings.NewReader(s)) }
+
+	data, n, term, over, err := readCappedLine(mk("abc\nrest"), 1024)
+	if !term || over || err != nil || string(data) != "abc\n" || n != 4 {
+		t.Fatalf("normal: data=%q n=%d term=%v over=%v err=%v", data, n, term, over, err)
+	}
+	// over-cap but newline present: terminated, over-cap, full byte count consumed, no buffer
+	data, n, term, over, _ = readCappedLine(mk("abcdefghij\nx"), 4)
+	if !term || !over || data != nil || n != 11 {
+		t.Fatalf("overcap-term: data=%q n=%d term=%v over=%v", data, n, term, over)
+	}
+	// over-cap with no newline before EOF: not terminated (leave for next pass), over-cap
+	_, _, term, over, _ = readCappedLine(mk("abcdefghij"), 4)
+	if term || !over {
+		t.Fatalf("overcap-eof: term=%v over=%v", term, over)
+	}
+	// partial trailing line under cap, no newline: not terminated
+	data, _, term, over, _ = readCappedLine(mk("abc"), 1024)
+	if term || over || string(data) != "abc" {
+		t.Fatalf("partial: data=%q term=%v over=%v", data, term, over)
+	}
+}
+
+// headFingerprint distinguishes different leading bytes and is stable for same content.
+func TestHeadFingerprintDistinguishes(t *testing.T) {
+	dir := t.TempDir()
+	p1 := filepath.Join(dir, "a")
+	p2 := filepath.Join(dir, "b")
+	os.WriteFile(p1, []byte("hello world line one\n"), 0o600)
+	os.WriteFile(p2, []byte("DIFFERENT first bytes\n"), 0o600)
+	open := func(p string) *os.File { f, _ := os.Open(p); t.Cleanup(func() { f.Close() }); return f }
+	h1, _ := headFingerprint(open(p1))
+	h2, _ := headFingerprint(open(p2))
+	h1b, _ := headFingerprint(open(p1))
+	if h1 == "" || h1 == h2 {
+		t.Fatalf("expected distinct non-empty head fps, got %q %q", h1, h2)
+	}
+	if h1 != h1b {
+		t.Fatalf("same content different fp: %q %q", h1, h1b)
+	}
+}
+
+// unparsed_lines accumulates across incremental passes and resets on full reingest.
+func TestIngestUnparsedLinesAccumulate(t *testing.T) {
+	projects := t.TempDir()
+	good1 := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"u-sess","message":{"role":"user","content":"hello one"}}`
+	bad := `this is not valid json`
+	good2 := `{"type":"user","timestamp":"2026-04-26T11:02:00Z","cwd":"/p","sessionId":"u-sess","message":{"role":"user","content":"hello two"}}`
+	path := writeSession(t, projects, "-p", "u-sess", good1, bad, good2)
+	d := openTestDB(t)
+	ing := New(d, nil)
+
+	if _, _, err := ing.IngestFile(context.Background(), path, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := unparsedCount(t, d, path); got != 1 {
+		t.Fatalf("pass1 unparsed=%d want 1", got)
+	}
+	var msgs int
+	d.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='u-sess'`).Scan(&msgs)
+	if msgs != 2 {
+		t.Fatalf("msgs=%d want 2 (both good lines ingested past the bad one)", msgs)
+	}
+
+	// Clean incremental append must NOT reset the counter to 0 (accumulate semantics).
+	appendLine(t, path, `{"type":"user","timestamp":"2026-04-26T11:03:00Z","cwd":"/p","sessionId":"u-sess","message":{"role":"user","content":"hello three"}}`)
+	if _, _, err := ing.IngestFile(context.Background(), path, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := unparsedCount(t, d, path); got != 1 {
+		t.Fatalf("after clean append unparsed=%d want 1 (accumulate)", got)
+	}
+
+	// Full reingest resets to the count seen in the full pass (one bad line still present).
+	if _, _, err := ing.IngestFile(context.Background(), path, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := unparsedCount(t, d, path); got != 1 {
+		t.Fatalf("after full reingest unparsed=%d want 1 (reset to pass count)", got)
+	}
+}
+
+// An empty stored head_fingerprint (pre-0005 row) resumes incrementally and backfills,
+// instead of forcing a full reingest on upgrade.
+func TestIngestEmptyHeadFingerprintBackfills(t *testing.T) {
+	projects := t.TempDir()
+	path := writeSession(t, projects, "-p", "h-sess", evUser1)
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, _, err := ing.IngestFile(context.Background(), path, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`UPDATE ingest_state SET head_fingerprint='' WHERE source_file=?`, path); err != nil {
+		t.Fatal(err)
+	}
+	appendLine(t, path, evAsst1)
+	if _, ingested, err := ing.IngestFile(context.Background(), path, false); err != nil || !ingested {
+		t.Fatalf("expected incremental ingest, ingested=%v err=%v", ingested, err)
+	}
+	var head string
+	d.QueryRow(`SELECT head_fingerprint FROM ingest_state WHERE source_file=?`, path).Scan(&head)
+	if head == "" {
+		t.Fatal("head_fingerprint was not backfilled")
+	}
+}
+
+// commit() must abort (not write a stale snapshot) when the source can no longer be
+// stat'd at commit time.
+func TestIngestAbortsWhenSourceRemovedAtCommit(t *testing.T) {
+	projects := t.TempDir()
+	path := writeSession(t, projects, "-p", "rm-sess", evUser1, evUser2)
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, _, err := ing.IngestFile(context.Background(), path, true); err != nil {
+		t.Fatal(err)
+	}
+	ing.preCommitHook = func() { os.Remove(path); ing.preCommitHook = nil }
+	t.Cleanup(func() { ing.preCommitHook = nil })
+	_, ingested, err := ing.IngestFile(context.Background(), path, true)
+	if err != nil {
+		t.Fatalf("expected clean abort, got %v", err)
+	}
+	if ingested {
+		t.Fatal("expected ingested=false when source removed before commit re-validation")
+	}
+}
+
+// BenchmarkIngestFullIndex measures a from-scratch index of a synthetic history, to
+// decide whether prepared statements / batched inserts in commit() are worth it (R2).
+func BenchmarkIngestFullIndex(b *testing.B) {
+	projects := b.TempDir()
+	const files, msgsPerFile = 50, 200
+	for f := 0; f < files; f++ {
+		uuid := fmt.Sprintf("bench-%03d", f)
+		lines := make([]string, 0, msgsPerFile)
+		for m := 0; m < msgsPerFile; m++ {
+			lines = append(lines, fmt.Sprintf(`{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"%s","message":{"role":"user","content":"message %d with some content to index for fts search"}}`, uuid, m))
+		}
+		dir := filepath.Join(projects, "-p-"+uuid)
+		os.MkdirAll(dir, 0o755)
+		os.WriteFile(filepath.Join(dir, uuid+".jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		d, err := db.Open(filepath.Join(b.TempDir(), fmt.Sprintf("b-%d.sqlite", i)))
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+		if _, err := New(d, nil).IngestAll(context.Background(), projects, true); err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		d.Close()
+	}
+}
+
+// sessionEvent builds a one-line user event for the given session uuid and content.
+func sessionEvent(uuid, content string) string {
+	return `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"` + uuid + `","message":{"role":"user","content":"` + content + `"}}`
+}
+
+func sessionCount(t *testing.T, d *db.DB) int {
+	t.Helper()
+	var n int
+	if err := d.QueryRow(`SELECT count(*) FROM sessions`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// PurgeMissing removes a deleted source's rows and leaves survivors intact.
+func TestPurgeMissingRemovesDeletedSource(t *testing.T) {
+	projects := t.TempDir()
+	writeSession(t, projects, "-p", "keep", sessionEvent("keep", "keep content here"))
+	gonePath := writeSession(t, projects, "-p", "gone", sessionEvent("gone", "UNIQUEGONE content here"))
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(gonePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+
+	var n int
+	d.QueryRow(`SELECT count(*) FROM sessions WHERE uuid='gone'`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("deleted session not purged: %d", n)
+	}
+	d.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='gone'`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("deleted messages not purged: %d", n)
+	}
+	d.QueryRow(`SELECT count(*) FROM ingest_state WHERE source_file=?`, gonePath).Scan(&n)
+	if n != 0 {
+		t.Fatalf("deleted ingest_state not purged: %d", n)
+	}
+	d.QueryRow(`SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'UNIQUEGONE'`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("deleted content still in FTS: %d", n)
+	}
+	d.QueryRow(`SELECT count(*) FROM sessions WHERE uuid='keep'`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("survivor session missing: %d", n)
+	}
+}
+
+// PurgeMissing must remove messages even when the sessions row is already gone
+// (ghost state): deletion must key on the canonical uuid, not a sessions subquery.
+func TestPurgeMissingRemovesGhostMessages(t *testing.T) {
+	projects := t.TempDir()
+	gonePath := writeSession(t, projects, "-p", "ghost", sessionEvent("ghost", "GHOSTCONTENT here"))
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a ghost: drop the sessions row but leave messages + ingest_state.
+	if _, err := d.Exec(`DELETE FROM sessions WHERE uuid='ghost'`); err != nil {
+		t.Fatal(err)
+	}
+	var m int
+	d.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='ghost'`).Scan(&m)
+	if m == 0 {
+		t.Fatal("setup: expected ghost messages to exist")
+	}
+	os.Remove(gonePath)
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	d.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='ghost'`).Scan(&m)
+	if m != 0 {
+		t.Fatalf("ghost messages not purged: %d", m)
+	}
+}
+
+// When a session file is moved/renamed to a new path (same filename => same uuid) and
+// re-ingested, purging the OLD path must NOT delete the session that now lives at the new
+// path — only the stale ingest_state for the old path. (Integration of ② ingest + ③ purge;
+// e.g. a renamed project directory.)
+func TestPurgeMissingKeepsMovedSession(t *testing.T) {
+	projects := t.TempDir()
+	oldPath := writeSession(t, projects, "-old", "moved", sessionEvent("moved", "moved content here"))
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	// Move: remove old path, recreate the same-named file under a new project dir.
+	os.Remove(oldPath)
+	writeSession(t, projects, "-new", "moved", sessionEvent("moved", "moved content here"))
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+
+	var n int
+	d.QueryRow(`SELECT count(*) FROM sessions WHERE uuid='moved'`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("moved session wrongly purged: sessions=%d want 1", n)
+	}
+	d.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='moved'`).Scan(&n)
+	if n == 0 {
+		t.Fatal("moved session's messages wrongly purged")
+	}
+	d.QueryRow(`SELECT count(*) FROM ingest_state WHERE source_file=?`, oldPath).Scan(&n)
+	if n != 0 {
+		t.Fatalf("stale ingest_state for old path not cleaned: %d", n)
+	}
+}
+
+// A missing/unreadable projects root must NOT purge anything (filesystem unavailable).
+func TestPurgeMissingSkipsWhenRootMissing(t *testing.T) {
+	projects := t.TempDir()
+	writeSession(t, projects, "-p", "s1", sessionEvent("s1", "content one"))
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	os.RemoveAll(projects) // whole root gone
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionCount(t, d); got != 1 {
+		t.Fatalf("root missing must not purge; sessions=%d want 1", got)
+	}
+}
+
+// A small history where every source is genuinely deleted must still purge (the ratio
+// cap must not block small installs).
+func TestPurgeMissingSmallHistoryStillPurges(t *testing.T) {
+	projects := t.TempDir()
+	p1 := writeSession(t, projects, "-p", "a", sessionEvent("a", "aaa"))
+	p2 := writeSession(t, projects, "-p", "b", sessionEvent("b", "bbb"))
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(p1)
+	os.Remove(p2)
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionCount(t, d); got != 0 {
+		t.Fatalf("small history: expected both purged, sessions=%d", got)
+	}
+}
+
+// A mass disappearance (large count AND most of the corpus) is treated as a filesystem
+// problem and must NOT purge.
+func TestPurgeMissingAbortsOnMassDisappearance(t *testing.T) {
+	projects := t.TempDir()
+	var paths []string
+	for i := 0; i < 12; i++ {
+		uuid := fmt.Sprintf("s%02d", i)
+		paths = append(paths, writeSession(t, projects, "-p", uuid, sessionEvent(uuid, "content "+uuid)))
+	}
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range paths {
+		os.Remove(p)
+	}
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionCount(t, d); got != 12 {
+		t.Fatalf("mass disappearance must abort purge; sessions=%d want 12", got)
 	}
 }
 

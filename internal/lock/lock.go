@@ -155,6 +155,14 @@ func IsHeld(path string) bool {
 	return time.Now().Unix()-rec.ts <= int64(DefaultTTL/time.Second)
 }
 
+// WithFileLock runs fn while holding an exclusive cross-process advisory lock keyed on
+// path (via a sidecar lock file). On platforms without flock (non-Unix) it runs fn
+// directly — see mutex_other.go. Use it to serialize a read-modify-write of a shared
+// file across processes.
+func WithFileLock(path string, fn func() error) error {
+	return withMutex(path, fn)
+}
+
 func readRecord(path string) (*record, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -196,10 +204,16 @@ func writeRecordAtomic(path string, pid int, nonce uint64, ts int64) error {
 	return os.Rename(name, path)
 }
 
+// signalProc is a seam so tests can simulate signal outcomes (e.g. EPERM).
+var signalProc = func(p *os.Process, sig os.Signal) error { return p.Signal(sig) }
+
 func pidAlive(pid int) bool {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	// EPERM means the process exists but we lack permission to signal it (e.g. a
+	// different user) — still alive, so don't steal its lease.
+	serr := signalProc(proc, syscall.Signal(0))
+	return serr == nil || errors.Is(serr, syscall.EPERM)
 }

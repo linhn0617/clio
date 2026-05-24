@@ -38,7 +38,7 @@ func newShowCmd() *cobra.Command {
 			}
 			defer database.Close()
 
-			sess, err := sessions.ResolvePrefix(database, args[0])
+			sess, err := sessions.ResolvePrefix(cmd.Context(), database, args[0])
 			if err != nil {
 				return err
 			}
@@ -46,7 +46,7 @@ func newShowCmd() *cobra.Command {
 			if limit <= 0 {
 				limit = defaultShowMessages
 			}
-			msgs, _, err := sessions.GetMessages(database, sess.UUID, 0, limit, !noToolOutput)
+			msgs, _, err := sessions.GetMessages(cmd.Context(), database, sess.UUID, 0, limit, !noToolOutput)
 			if err != nil {
 				return err
 			}

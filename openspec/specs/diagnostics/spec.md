@@ -6,9 +6,10 @@ TBD - created by archiving change add-cli-and-mcp-foundation. Update Purpose aft
 ### Requirement: Health diagnostics
 
 The system SHALL provide `clio doctor` to check paths, DB integrity, ingest lag, orphaned
-sessions, and FTS health. The command SHALL exit with a non-zero status when any check
-fails. A query or row-scan error while running a check SHALL mark that check failed rather
-than be silently treated as a passing or zero-count result.
+sessions, FTS health, and file permissions on its private files. The command SHALL exit
+with a non-zero status when any check fails. A query or row-scan error while running a
+check SHALL mark that check failed rather than be silently treated as a passing or
+zero-count result.
 
 #### Scenario: Healthy system
 
@@ -27,14 +28,28 @@ than be silently treated as a passing or zero-count result.
 - **THEN** the system SHALL mark that check as failed (surfacing the error detail) instead
   of reporting it as passing
 
+#### Scenario: World-readable private file flagged
+
+- **WHEN** the database file or its `-wal`/`-shm` sidecars (which hold indexed content)
+  have a mode other than `0600`
+- **THEN** `clio doctor` SHALL report a permissions warning naming the file and its mode
+
 ### Requirement: Source-of-truth reconciliation
 
-The system SHALL detect semantic drift between the DB and the source `.jsonl` files.
+The system SHALL detect semantic drift between the DB and the source `.jsonl` files,
+including content that was read but could not be indexed.
 
 #### Scenario: Truncated source file
 
 - **WHEN** a `.jsonl` file is truncated or missing a tail relative to what was ingested
 - **THEN** `clio doctor` SHALL flag the affected session as out of sync
+
+#### Scenario: Unparseable source lines reported
+
+- **WHEN** ingest has skipped one or more complete lines that could not be parsed
+  (recorded in `ingest_state.unparsed_lines`)
+- **THEN** `clio doctor` SHALL report the total count as a warning and suggest running
+  `clio index --full` after upgrading clio; a total of zero SHALL NOT warn
 
 ### Requirement: Storage warning
 
