@@ -79,11 +79,37 @@ func isSecretKey(k string) bool {
 func redactString(s string) string {
 	t := strings.TrimSpace(s)
 	if len(t) > 0 && (t[0] == '{' || t[0] == '[') {
-		if red, ok := redactJSONValue([]byte(t)); ok {
-			return red
+		if red, rest, ok := redactJSONPrefix(t); ok {
+			if strings.TrimSpace(rest) == "" {
+				return red
+			}
+			// JSON blob followed by prose, e.g. `{"apiKey":"x"} please rotate`:
+			// structurally redact the JSON, regex-redact the remainder, keep both.
+			return red + Redact(rest)
 		}
 	}
 	return Redact(s)
+}
+
+// redactJSONPrefix decodes the leading JSON value in t, redacts it structurally,
+// and returns (redacted, trailingRemainder, true). Unlike redactJSONValue it does
+// not require EOF, so a JSON blob followed by trailing text is still structurally
+// redacted (the remainder is handled by the caller) rather than dropped or left raw.
+func redactJSONPrefix(t string) (string, string, bool) {
+	dec := json.NewDecoder(strings.NewReader(t))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return "", "", false
+	}
+	off := dec.InputOffset()
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(redactWalk(v)); err != nil {
+		return "", "", false
+	}
+	return strings.TrimRight(buf.String(), "\n"), t[off:], true
 }
 
 // redactJSON walks a raw JSON event line and redacts secret values structurally.
@@ -128,7 +154,7 @@ func redactWalk(v any) any { return redactWalkDepth(v, 0) }
 
 func redactWalkDepth(v any, depth int) any {
 	if depth > maxRedactDepth {
-		return v
+		return "[REDACTED:depth]" // fail closed: never pass unredacted deep content through
 	}
 	switch x := v.(type) {
 	case map[string]any:

@@ -239,17 +239,18 @@ func TestRedactJSONValueTrailingBytes(t *testing.T) {
 	}
 }
 
-// Fix 2 (integration): redactString with trailing text falls back to Redact,
-// which keeps the trailing text and uses regex-only redaction.
-func TestRedactStringTrailingTextFallback(t *testing.T) {
-	// The trailing text must be preserved (not dropped); no structural redaction applies.
+// A JSON blob followed by trailing prose must be structurally redacted AND keep
+// the trailing text (no key-only leak, no data loss).
+func TestRedactStringJSONThenTrailingText(t *testing.T) {
 	got := redactString(`{"token":"x123456"} trailing text`)
+	if strings.Contains(got, "x123456") {
+		t.Errorf("secret leaked through trailing-text path: %q", got)
+	}
+	if !strings.Contains(got, "[REDACTED:key]") {
+		t.Errorf("expected structural redaction of leading JSON: %q", got)
+	}
 	if !strings.Contains(got, "trailing text") {
 		t.Errorf("trailing text was dropped: %q", got)
-	}
-	// No structural [REDACTED:key] since it fell back to Redact.
-	if strings.Contains(got, "[REDACTED:key]") {
-		t.Errorf("unexpected structural redaction in fallback path: %q", got)
 	}
 }
 
