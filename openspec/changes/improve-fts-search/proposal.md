@@ -19,15 +19,15 @@ There is also no index on `sessions.ended_at`, which `list_sessions` /
 
 ## What Changes
 
-- **Added** a literal-safe FTS MATCH builder: tokenize, escape `"`, wrap each term as a
-  quoted phrase. User text is matched literally; no FTS5 operator surprises or syntax errors.
+- **Added** an operator-safe FTS MATCH builder: tokenize, escape `"`, wrap each term as a
+  quoted phrase. User text is matched without FTS5 operator interpretation and never
+  raises a syntax error (double-quotes still group multi-word phrases, as today).
 - **Modified** the planner to a hybrid: terms ≥ 3 runes drive the FTS index; terms
   < 3 runes are applied as `LIKE` filters on the FTS-narrowed rows (not a full scan).
   Only an all-short query falls back to a pure `LIKE` scan.
-- **Added** `db.EscapeLike` and `ESCAPE '\'` to all `LIKE` clauses (content + project
+- **Added** `db.EscapeLike` and `ESCAPE '\'` to the search `LIKE` clauses (content + project
   prefix in search and `list_sessions`).
-- **Added** migration `0004` with `idx_sessions_ended` (and `idx_messages_role_ts`).
-- **Modified** FTS execution to fall back gracefully if a MATCH ever still errors.
+- **Added** migration `0004` with `idx_sessions_ended`.
 
 ## Capabilities
 

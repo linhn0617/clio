@@ -1,9 +1,10 @@
 ## ADDED Requirements
 
-### Requirement: Literal-safe full-text queries
+### Requirement: Operator-safe full-text queries
 
-The system SHALL treat user search input as literal text, never as FTS5 query
-operators, and SHALL NOT surface FTS syntax errors to the caller.
+The system SHALL NOT interpret user search input as FTS5 query operators and SHALL
+NOT raise an FTS syntax error from user input. (Double quotes still group multi-word
+phrases; each term is matched as a literal phrase.)
 
 #### Scenario: Query with FTS-special characters
 

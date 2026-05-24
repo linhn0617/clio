@@ -18,19 +18,25 @@
   - mixed-length `auth ui` matches a message containing both "auth" and "ui" and does
     NOT error; a message with only "auth" is excluded.
   - a `--project` prefix containing `_` (e.g. `/x/a_b`) matches only that project, not
-    `/x/axb` (escaping works).
-- [ ] 3.2 Implement: `buildMatchQuery`-based `ftsQuery` over the long terms + per-short-term
-  `AND m.content LIKE ? ESCAPE '\'`; all-short → escaped `likeQuery`; remove
-  `needsLikeFallback`; escape content + project LIKE via `db.EscapeLike`. Green.
-- [ ] 3.3 Add graceful MATCH→LIKE fallback in `Search` on an fts error; test by ensuring
-  no realistic input errors (the builder covers it) — keep the fallback as insurance.
+    `/x/axb`; a content term containing `%`/`_` matches literally (escaping works).
+  - an all-punctuation query (e.g. `***`) and an empty query are handled (empty still
+    errors; all-punctuation returns without error).
+  - a quoted phrase mixed with a short bare term (e.g. `"auth flow" ui`) works.
+  - high-cardinality `auth ui` returns rows that contain BOTH terms (guards against an
+    accidental early-LIMIT that would drop short-term matches).
+- [ ] 3.2 Implement: `buildMatchQuery`-based FTS over the long terms + per-short-term
+  `AND m.content LIKE ? ESCAPE '\'` in one query (LIMIT after the LIKE); all-short →
+  escaped `likeQuery`; remove `needsLikeFallback`; escape content + project LIKE via
+  `db.EscapeLike`. No silent FTS→LIKE fallback (operational FTS errors surface). Green.
+- [ ] 3.3 Add a test that `EXPLAIN QUERY PLAN` for the hybrid query uses the FTS
+  virtual table (FTS-first), confirming no full `messages` scan.
 
 ## 4. sessions.ListSessions project escaping + index
 
 - [ ] 4.1 Escape the `project_path LIKE` in `internal/sessions/sessions.go` `ListSessions`
   with `db.EscapeLike` + `ESCAPE '\'`; add/adjust a test asserting `_`/`%` don't over-match.
-- [ ] 4.2 Add `internal/db/migrations/0004_search_indexes.sql` (`idx_sessions_ended`,
-  `idx_messages_role_ts`); confirm migrations still apply (db tests green).
+- [ ] 4.2 Add `internal/db/migrations/0004_search_indexes.sql` (`idx_sessions_ended`
+  only); confirm migrations still apply (db tests green).
 
 ## 5. Verify
 
