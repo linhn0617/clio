@@ -19,8 +19,15 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		server.WithInstructions("clio exposes your Claude Code conversation history. Use `search` to find past discussions, `read_session` to read one in full, `list_sessions` to browse, and `activity_summary` for what you worked on over a period."),
 	)
 
+	// All four tools query the local session index — read-only, non-destructive,
+	// non-open-world. Without these annotations, MCP clients default to the
+	// least-safe assumption (destructive + open-world) and surface scary tags.
 	s.AddTool(mcp.NewTool("search",
 		mcp.WithDescription("Full-text search across all past Claude Code conversations. Returns ranked snippets; tool output is excluded unless include_tool_output is true."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
 		mcp.WithString("query", mcp.Required(), mcp.Description("Search terms; supports phrases in double quotes")),
 		mcp.WithString("since", mcp.Description("Only results since this time: 7d, 12h, 30m, or YYYY-MM-DD")),
 		mcp.WithString("project", mcp.Description("Filter by project path prefix")),
@@ -31,6 +38,10 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 
 	s.AddTool(mcp.NewTool("list_sessions",
 		mcp.WithDescription("List past sessions, most recent first, with optional filters."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
 		mcp.WithString("since", mcp.Description("Only sessions since: 7d, 12h, 30m, or YYYY-MM-DD")),
 		mcp.WithString("project", mcp.Description("Filter by project path prefix")),
 		mcp.WithNumber("min_turns", mcp.Description("Only sessions with at least this many user turns"), mcp.DefaultNumber(0)),
@@ -39,12 +50,20 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 
 	s.AddTool(mcp.NewTool("activity_summary",
 		mcp.WithDescription("Summarize activity over a period: session and message counts grouped by day or project. Good for 'what did I work on last week?'."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
 		mcp.WithString("since", mcp.Description("Period start: 7d, 12h, 30m, or YYYY-MM-DD (default 7d)")),
 		mcp.WithString("group_by", mcp.Description("Grouping"), mcp.Enum("day", "project"), mcp.DefaultString("day")),
 	), handleActivitySummary(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("read_session",
 		mcp.WithDescription("Read a session's messages in full, paginated. Tool output is excluded unless include_tool_output is true."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
 		mcp.WithString("uuid", mcp.Required(), mcp.Description("Session uuid or unambiguous prefix")),
 		mcp.WithNumber("offset", mcp.Description("Message offset for pagination"), mcp.DefaultNumber(0), mcp.Min(0)),
 		mcp.WithNumber("limit", mcp.Description("Max messages per page (default 50, max 200)"), mcp.DefaultNumber(defaultReadLimit), mcp.Min(1), mcp.Max(maxReadLimit)),
