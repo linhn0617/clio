@@ -13,6 +13,15 @@ It is local-first, read-only against your `.claude` data, and never writes to yo
 
 📖 **Full usage guide (bilingual):** [docs/USAGE.md](./docs/USAGE.md)
 
+## Why not just `grep`?
+
+You *could* `grep ~/.claude/projects/*.jsonl` — but that's exactly what clio is built to do well:
+
+- **Memory across sessions.** A fresh Claude Code session can't see past ones. clio gives Claude (and you) a searchable index of every conversation across every project — not just whatever's open now.
+- **Ranked by relevance.** Most queries are ordered by relevance (BM25) and recency, so the conversation you meant rises to the top — instead of every line that merely contains the word, in file order. (Very short queries — 1–2 characters, e.g. some CJK words — fall back to a recency-ordered substring scan.)
+- **Signal, not noise.** Tool output (file dumps, command logs) is excluded by default and snippets are trimmed, so you — and Claude's context window — get the relevant lines, not megabytes of JSONL.
+- **The right session, exactly.** Sessions resolve by id or unambiguous prefix, so you open the one you meant — not whichever file happened to contain the string.
+
 ## Getting started
 
 **1. Install the binary**
@@ -73,7 +82,7 @@ When registered via `clio install-mcp`, Claude Code can call:
 
 | Tool | What it does |
 |------|--------------|
-| `search` | Full-text search across all conversations (tool output excluded by default) |
+| `search` | Full-text search, **ranked** by relevance + recency (short queries fall back to a substring scan; tool output excluded by default) |
 | `list_sessions` | List sessions with date/project/turn filters |
 | `activity_summary` | Counts grouped by day or project ("what did I do last week?") |
 | `read_session` | Read one session in full, paginated |
