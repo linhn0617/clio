@@ -316,6 +316,9 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 		if _, err := tx.Exec(`DELETE FROM tool_calls WHERE message_id IN (SELECT id FROM messages WHERE session_uuid = ?)`, sess.UUID); err != nil {
 			return 0, err
 		}
+		if _, err := tx.Exec(`DELETE FROM tool_targets WHERE session_uuid = ?`, sess.UUID); err != nil {
+			return 0, err
+		}
 		if _, err := tx.Exec(`DELETE FROM messages WHERE session_uuid = ?`, sess.UUID); err != nil {
 			return 0, err
 		}
@@ -339,13 +342,18 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 			continue
 		}
 		inserted++
-		if len(m.ToolCalls) > 0 {
+		if len(m.ToolCalls) > 0 || len(m.Targets) > 0 {
 			id, err := res.LastInsertId()
 			if err != nil {
 				return 0, err
 			}
 			for _, tc := range m.ToolCalls {
 				if _, err := tx.Exec(`INSERT INTO tool_calls(message_id, tool_name, params_summary) VALUES (?,?,?)`, id, tc.ToolName, tc.ParamsSummary); err != nil {
+					return 0, err
+				}
+			}
+			for _, tg := range m.Targets {
+				if _, err := tx.Exec(`INSERT INTO tool_targets(message_id, session_uuid, ts, kind, value) VALUES (?,?,?,?,?)`, id, m.SessionUUID, nullZero(m.TS), tg.Kind, tg.Value); err != nil {
 					return 0, err
 				}
 			}
@@ -535,6 +543,9 @@ func (ing *Ingester) purgeSource(src string) error {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM tool_calls WHERE message_id NOT IN (SELECT id FROM messages)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM tool_targets WHERE session_uuid = ?`, uuid); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM sessions WHERE uuid = ?`, uuid); err != nil {

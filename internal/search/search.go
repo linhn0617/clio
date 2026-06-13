@@ -92,6 +92,18 @@ func commonFilters(opt Options) (string, []any) {
 		sb.WriteString(` AND s.project_path LIKE ? ESCAPE '\'`)
 		args = append(args, db.EscapeLike(opt.ProjectPrefix)+"%")
 	}
+	if opt.Touched != "" {
+		sb.WriteString(` AND m.session_uuid IN (SELECT session_uuid FROM tool_targets WHERE kind='file' AND value LIKE ? ESCAPE '\')`)
+		args = append(args, db.EscapeLike(opt.Touched)+"%")
+	}
+	if opt.Tool != "" {
+		sb.WriteString(` AND m.session_uuid IN (SELECT session_uuid FROM tool_targets WHERE kind='tool' AND value = ?)`)
+		args = append(args, opt.Tool)
+	}
+	if opt.Ran != "" {
+		sb.WriteString(` AND m.session_uuid IN (SELECT session_uuid FROM tool_targets WHERE kind='command' AND value LIKE ? ESCAPE '\')`)
+		args = append(args, "%"+db.EscapeLike(opt.Ran)+"%")
+	}
 	return sb.String(), args
 }
 

@@ -81,6 +81,9 @@ func handleListSessions(database *db.DB, beforeRead func()) func(context.Context
 			ProjectPrefix: req.GetString("project", ""),
 			MinTurns:      req.GetInt("min_turns", 0),
 			Limit:         clamp(req.GetInt("limit", 20), 20, maxSearchLimit),
+			Touched:       req.GetString("touched", ""),
+			Tool:          req.GetString("tool", ""),
+			Ran:           req.GetString("ran", ""),
 		})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -111,17 +114,38 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 			since = time.Now().Add(-7 * 24 * time.Hour).Unix()
 		}
 		groupBy := req.GetString("group_by", "day")
-		if groupBy != "day" && groupBy != "project" {
-			return mcp.NewToolResultError(`group_by must be "day" or "project"`), nil
+		switch groupBy {
+		case "day", "project":
+			buckets, err := sessions.ActivitySummary(ctx, database, since, groupBy)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return mcp.NewToolResultJSON(map[string]any{
+				"since":   tsString(since),
+				"buckets": buckets,
+			})
+		case "file", "command", "tool", "pattern", "url":
+			counts, err := sessions.ActivityByKind(ctx, database, groupBy, since,
+				req.GetString("project", ""), clamp(req.GetInt("limit", 30), 30, maxSearchLimit))
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			type ac struct {
+				Value string `json:"value"`
+				Count int    `json:"count"`
+			}
+			out := make([]ac, 0, len(counts))
+			for _, c := range counts {
+				out = append(out, ac{c.Value, c.Count})
+			}
+			return mcp.NewToolResultJSON(map[string]any{
+				"since":    tsString(since),
+				"group_by": groupBy,
+				"activity": out,
+			})
+		default:
+			return mcp.NewToolResultError(`group_by must be one of "day", "project", "file", "command", "tool", "pattern", "url"`), nil
 		}
-		buckets, err := sessions.ActivitySummary(ctx, database, since, groupBy)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return mcp.NewToolResultJSON(map[string]any{
-			"since":   tsString(since),
-			"buckets": buckets,
-		})
 	}
 }
 

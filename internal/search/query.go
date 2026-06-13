@@ -14,6 +14,9 @@ type Options struct {
 	Role              string // "" = any
 	Limit             int
 	IncludeToolOutput bool
+	Touched           string // restrict to sessions whose tool calls touched this path prefix
+	Tool              string // restrict to sessions that used this tool (exact name)
+	Ran               string // restrict to sessions that ran a command containing this substring
 }
 
 // Result is one matched message.

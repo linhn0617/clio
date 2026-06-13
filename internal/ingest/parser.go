@@ -74,7 +74,7 @@ func (p *Parser) ParseLine(line []byte) ([]model.Message, EventInfo, error) {
 	raw := string(redactJSON(line))
 	var msgs []model.Message
 
-	add := func(role, content string, tcs []model.ToolCall) {
+	add := func(role, content string, tcs []model.ToolCall, targets []model.ToolTarget) {
 		content = strings.TrimSpace(content)
 		if content == "" && len(tcs) == 0 {
 			return
@@ -87,6 +87,7 @@ func (p *Parser) ParseLine(line []byte) ([]model.Message, EventInfo, error) {
 			Content:     truncateForFTS(redactString(content)),
 			RawJSON:     raw,
 			ToolCalls:   tcs,
+			Targets:     targets,
 		}
 		p.seq++
 		msgs = append(msgs, m)
@@ -95,7 +96,7 @@ func (p *Parser) ParseLine(line []byte) ([]model.Message, EventInfo, error) {
 	// content is either a bare JSON string or an array of blocks.
 	var asString string
 	if err := json.Unmarshal(ev.Message.Content, &asString); err == nil {
-		add(ev.Type, asString, nil)
+		add(ev.Type, asString, nil, nil)
 		if info.TitleHint == "" && ev.Type == model.RoleUser {
 			info.TitleHint = titleFrom(redactString(asString))
 		}
@@ -110,24 +111,24 @@ func (p *Parser) ParseLine(line []byte) ([]model.Message, EventInfo, error) {
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
-			add(ev.Type, b.Text, nil)
+			add(ev.Type, b.Text, nil, nil)
 			if info.TitleHint == "" && ev.Type == model.RoleUser {
 				info.TitleHint = titleFrom(redactString(b.Text))
 			}
 		case "thinking":
-			add(model.RoleThinking, b.Thinking, nil)
+			add(model.RoleThinking, b.Thinking, nil, nil)
 		case "tool_use":
 			if strings.HasPrefix(b.Name, clioMCPToolPrefix) {
 				p.clioToolUseIDs[b.ID] = true
 				continue
 			}
 			summary := toolUseSummary(b.Input)
-			add(model.RoleToolUse, b.Name+" "+summary, []model.ToolCall{{ToolName: b.Name, ParamsSummary: summary}})
+			add(model.RoleToolUse, b.Name+" "+summary, []model.ToolCall{{ToolName: b.Name, ParamsSummary: summary}}, extractTargets(b.Name, b.Input))
 		case "tool_result":
 			if p.clioToolUseIDs[b.ToolUseID] {
 				continue
 			}
-			add(model.RoleToolResult, toolResultText(b.Content), nil)
+			add(model.RoleToolResult, toolResultText(b.Content), nil, nil)
 		}
 	}
 	return msgs, info, nil

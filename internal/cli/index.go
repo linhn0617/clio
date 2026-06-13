@@ -49,6 +49,9 @@ func newIndexCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := ing.BackfillActivity(cmd.Context()); err != nil {
+				log.Warn("activity backfill failed", "err", err)
+			}
 			fmt.Fprintf(os.Stdout, "indexed: %d files (%d ingested, %d skipped), %d messages added\n",
 				st.FilesScanned, st.FilesIngested, st.FilesSkipped, st.MessagesAdded)
 			return nil
