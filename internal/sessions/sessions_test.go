@@ -148,6 +148,30 @@ func TestActivityByKindFiltersSinceAndProject(t *testing.T) {
 	}
 }
 
+func TestGetRecall(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/proj", 5)
+	addSession(t, d, "other", "/elsewhere", 3)
+	addTarget(t, d, "s1", "file", "/proj/a.go")
+	addTarget(t, d, "s1", "command", "go test ./...")
+	addTarget(t, d, "other", "file", "/elsewhere/x.go")
+	addTarget(t, d, "other", "command", "ls")
+
+	r, err := GetRecall(context.Background(), d, "/proj", 0, 5, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Sessions) != 1 || r.Sessions[0].UUID != "s1" {
+		t.Fatalf("sessions scoped to project: %+v", r.Sessions)
+	}
+	if len(r.Files) != 1 || r.Files[0].Value != "/proj/a.go" {
+		t.Fatalf("files scoped to project: %+v", r.Files)
+	}
+	if len(r.Commands) != 1 || r.Commands[0].Value != "go test ./..." {
+		t.Fatalf("commands scoped to project: %+v", r.Commands)
+	}
+}
+
 func TestResolvePrefixExact(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "abcdef12-3456", "/p", 1)
