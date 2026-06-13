@@ -5,6 +5,28 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-13
+
+An activity index over your tool calls: search and summarize which files past
+sessions touched, which commands they ran, and which tools they used. The database
+migration and a one-time backfill apply automatically on next run; no forced reindex.
+
+### Added
+
+- Activity index. At ingest, each tool call records structured facts — files
+  touched (Edit/Write/Read/NotebookEdit/MultiEdit), commands run (Bash), search
+  patterns (Grep/Glob), fetched URLs (WebFetch), and the tool used (including MCP
+  servers). Existing history is backfilled automatically from stored events,
+  without re-reading source files.
+- CLI: `clio activity --by file|command|tool|pattern|url` summaries, plus
+  `--touched <path>`, `--tool <name>`, and `--ran <substring>` filters on
+  `clio list` and `clio search`.
+- MCP: `list_sessions` gains `touched`/`tool`/`ran` filters, and `activity_summary`
+  `group_by` gains `file|command|tool|pattern|url`, so Claude can answer "which
+  conversations touched `auth.ts`?" or "what commands did I run last week?".
+- README: a "Why not just `grep`?" section, and the `search` tool now documents its
+  recency-aware ranking.
+
 ## [0.3.0] - 2026-05-25
 
 Privacy hardening and more reliable indexing. Backward-compatible; the database
@@ -104,6 +126,7 @@ Initial release.
 - Secret redaction at ingest time (API keys, tokens, private keys, `.env`-style
   lines), in both the searchable text and the stored raw event.
 
+[0.4.0]: https://github.com/linhn0617/clio/releases/tag/v0.4.0
 [0.3.0]: https://github.com/linhn0617/clio/releases/tag/v0.3.0
 [0.2.0]: https://github.com/linhn0617/clio/releases/tag/v0.2.0
 [0.1.0]: https://github.com/linhn0617/clio/releases/tag/v0.1.0
