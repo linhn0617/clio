@@ -63,6 +63,61 @@ func resultJSON(t *testing.T, r *mcp.CallToolResult) map[string]any {
 	return m
 }
 
+func addTarget(t *testing.T, d *db.DB, sess, kind, value string) {
+	t.Helper()
+	if _, err := d.Exec(`INSERT INTO tool_targets(message_id, session_uuid, ts, kind, value) VALUES (0,?,?,?,?)`,
+		sess, time.Now().Unix(), kind, value); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHandleListSessionsFilterByTool(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	addSession(t, d, "s2", "/p")
+	addTarget(t, d, "s1", "tool", "Bash")
+	r := call(t, handleListSessions(d, nil), map[string]any{"tool": "Bash"})
+	m := resultJSON(t, r)
+	if int(m["count"].(float64)) != 1 {
+		t.Fatalf("count=%v want 1 (only s1 used Bash)", m["count"])
+	}
+}
+
+func TestHandleListSessionsFilterByTouchedAndRan(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	addSession(t, d, "s2", "/p")
+	addTarget(t, d, "s1", "file", "/x/auth.ts")
+	addTarget(t, d, "s2", "command", "go test ./...")
+
+	r := call(t, handleListSessions(d, nil), map[string]any{"touched": "/x/auth"})
+	if got := int(resultJSON(t, r)["count"].(float64)); got != 1 {
+		t.Fatalf("touched filter count=%d want 1", got)
+	}
+	r2 := call(t, handleListSessions(d, nil), map[string]any{"ran": "go test"})
+	if got := int(resultJSON(t, r2)["count"].(float64)); got != 1 {
+		t.Fatalf("ran filter count=%d want 1 (only s2 ran it)", got)
+	}
+}
+
+func TestHandleActivitySummaryByTool(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	addTarget(t, d, "s1", "tool", "Bash")
+	addTarget(t, d, "s1", "tool", "Bash")
+	addTarget(t, d, "s1", "tool", "Edit")
+	r := call(t, handleActivitySummary(d, nil), map[string]any{"group_by": "tool"})
+	m := resultJSON(t, r)
+	acts, ok := m["activity"].([]any)
+	if !ok || len(acts) != 2 {
+		t.Fatalf("expected 2 activity rows, got %v", m["activity"])
+	}
+	top := acts[0].(map[string]any)
+	if top["value"] != "Bash" || int(top["count"].(float64)) != 2 {
+		t.Fatalf("top activity = %v, want Bash count 2", top)
+	}
+}
+
 func TestClamp(t *testing.T) {
 	cases := []struct{ v, def, max, want int }{
 		{0, 10, 50, 10},

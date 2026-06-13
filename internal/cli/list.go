@@ -17,6 +17,9 @@ func newListCmd() *cobra.Command {
 		minTurns int
 		limit    int
 		asJSON   bool
+		touched  string
+		tool     string
+		ran      string
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -37,6 +40,9 @@ func newListCmd() *cobra.Command {
 				ProjectPrefix: project,
 				MinTurns:      minTurns,
 				Limit:         limit,
+				Touched:       touched,
+				Tool:          tool,
+				Ran:           ran,
 			})
 			if err != nil {
 				return err
@@ -62,5 +68,8 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().IntVar(&minTurns, "min-turns", 0, "Only sessions with at least this many turns")
 	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum number of sessions")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Output JSON")
+	cmd.Flags().StringVar(&touched, "touched", "", "Only sessions whose tool calls touched this path prefix")
+	cmd.Flags().StringVar(&tool, "tool", "", "Only sessions that used this tool (exact name)")
+	cmd.Flags().StringVar(&ran, "ran", "", "Only sessions that ran a command containing this substring")
 	return cmd
 }

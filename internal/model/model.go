@@ -34,6 +34,7 @@ type Message struct {
 	Content     string
 	RawJSON     string
 	ToolCalls   []ToolCall
+	Targets     []ToolTarget
 }
 
 // ToolCall records a tool invocation's name and a short summary.
@@ -41,6 +42,22 @@ type ToolCall struct {
 	ToolName      string
 	ParamsSummary string
 }
+
+// ToolTarget is one structured activity fact extracted from a tool call: the
+// tool used, or a file/command/pattern/url it acted on.
+type ToolTarget struct {
+	Kind  string
+	Value string
+}
+
+// Activity fact kinds stored in tool_targets.
+const (
+	TargetFile    = "file"
+	TargetCommand = "command"
+	TargetPattern = "pattern"
+	TargetURL     = "url"
+	TargetTool    = "tool"
+)
 
 // RawEvent is a single line of a .jsonl session file. Only fields clio uses are
 // declared; unknown fields are ignored for forward compatibility.

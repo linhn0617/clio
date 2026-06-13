@@ -28,6 +28,7 @@ func newRootCmd() *cobra.Command {
 		newSearchCmd(),
 		newListCmd(),
 		newShowCmd(),
+		newActivityCmd(),
 		newMCPCmd(),
 		newDoctorCmd(),
 		newInstallMCPCmd(),

@@ -174,6 +174,9 @@ func leaderLoop(ctx context.Context, lease *lock.Lease, leaderFlag *atomic.Bool,
 			if _, err := ing.IngestAll(wctx, projects, false); err != nil {
 				log.Warn("startup catch-up failed", "err", err)
 			}
+			if err := ing.BackfillActivity(wctx); err != nil {
+				log.Warn("activity backfill failed", "err", err)
+			}
 			// Reflect deletions that happened while clio was down before we start
 			// serving, so a just-promoted leader (and CLI readers deferring to it)
 			// don't surface sources that no longer exist.

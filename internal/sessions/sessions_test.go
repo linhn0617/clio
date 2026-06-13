@@ -48,6 +48,106 @@ func addMsg(t *testing.T, d *db.DB, sess string, seq int, role, content string) 
 	}
 }
 
+func addTarget(t *testing.T, d *db.DB, sess, kind, value string) {
+	t.Helper()
+	if _, err := d.Exec(`INSERT INTO tool_targets(message_id, session_uuid, ts, kind, value) VALUES (0,?,?,?,?)`,
+		sess, time.Now().Unix(), kind, value); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListSessionsFilterByTouched(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p", 1)
+	addSession(t, d, "s2", "/p", 1)
+	addTarget(t, d, "s1", "file", "/x/auth.ts")
+	addTarget(t, d, "s2", "file", "/x/other.go")
+	got, err := ListSessions(context.Background(), d, ListFilter{Touched: "/x/auth"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].UUID != "s1" {
+		t.Fatalf("touched filter: got %+v", got)
+	}
+}
+
+func TestListSessionsFilterByTool(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p", 1)
+	addSession(t, d, "s2", "/p", 1)
+	addTarget(t, d, "s1", "tool", "Bash")
+	addTarget(t, d, "s2", "tool", "Edit")
+	got, err := ListSessions(context.Background(), d, ListFilter{Tool: "Bash"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].UUID != "s1" {
+		t.Fatalf("tool filter: got %+v", got)
+	}
+}
+
+func TestListSessionsFilterByRan(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p", 1)
+	addSession(t, d, "s2", "/p", 1)
+	addTarget(t, d, "s1", "command", "go test ./...")
+	addTarget(t, d, "s2", "command", "ls -la")
+	got, err := ListSessions(context.Background(), d, ListFilter{Ran: "go test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].UUID != "s1" {
+		t.Fatalf("ran filter: got %+v", got)
+	}
+}
+
+func TestActivityByKind(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p", 1)
+	addTarget(t, d, "s1", "file", "/x/a.go")
+	addTarget(t, d, "s1", "file", "/x/a.go")
+	addTarget(t, d, "s1", "file", "/x/b.go")
+	addTarget(t, d, "s1", "tool", "Bash")
+	got, err := ActivityByKind(context.Background(), d, "file", 0, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Value != "/x/a.go" || got[0].Count != 2 || got[1].Value != "/x/b.go" || got[1].Count != 1 {
+		t.Fatalf("activity by file: got %+v", got)
+	}
+}
+
+func TestActivityByKindFiltersSinceAndProject(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/proj/a", 1)
+	addSession(t, d, "s2", "/proj/b", 1)
+	old := time.Now().Add(-30 * 24 * time.Hour).Unix()
+	recent := time.Now().Unix()
+	if _, err := d.Exec(`INSERT INTO tool_targets(message_id, session_uuid, ts, kind, value) VALUES (0,'s1',?,'file','/x/a.go')`, recent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO tool_targets(message_id, session_uuid, ts, kind, value) VALUES (0,'s2',?,'file','/x/b.go')`, old); err != nil {
+		t.Fatal(err)
+	}
+
+	since := time.Now().Add(-7 * 24 * time.Hour).Unix()
+	got, err := ActivityByKind(context.Background(), d, "file", since, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Value != "/x/a.go" {
+		t.Fatalf("since filter: got %+v", got)
+	}
+
+	got2, err := ActivityByKind(context.Background(), d, "file", 0, "/proj/b", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got2) != 1 || got2[0].Value != "/x/b.go" {
+		t.Fatalf("project filter: got %+v", got2)
+	}
+}
+
 func TestResolvePrefixExact(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "abcdef12-3456", "/p", 1)

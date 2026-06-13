@@ -36,6 +36,9 @@ type ListFilter struct {
 	ProjectPrefix string
 	MinTurns      int
 	Limit         int
+	Touched       string // only sessions whose tool calls touched a file under this path prefix
+	Tool          string // only sessions that used this tool (exact name)
+	Ran           string // only sessions that ran a command containing this substring
 }
 
 // ListSessions returns sessions matching filter, most recent first.
@@ -57,6 +60,18 @@ func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session
 	if f.MinTurns > 0 {
 		q += " AND turn_count >= ?"
 		args = append(args, f.MinTurns)
+	}
+	if f.Touched != "" {
+		q += ` AND uuid IN (SELECT session_uuid FROM tool_targets WHERE kind='file' AND value LIKE ? ESCAPE '\')`
+		args = append(args, db.EscapeLike(f.Touched)+"%")
+	}
+	if f.Tool != "" {
+		q += ` AND uuid IN (SELECT session_uuid FROM tool_targets WHERE kind='tool' AND value = ?)`
+		args = append(args, f.Tool)
+	}
+	if f.Ran != "" {
+		q += ` AND uuid IN (SELECT session_uuid FROM tool_targets WHERE kind='command' AND value LIKE ? ESCAPE '\')`
+		args = append(args, "%"+db.EscapeLike(f.Ran)+"%")
 	}
 	q += " ORDER BY ended_at DESC LIMIT ?"
 	args = append(args, f.Limit)
@@ -156,6 +171,51 @@ func GetMessages(ctx context.Context, database *db.DB, sessionUUID string, offse
 		out = out[:limit]
 	}
 	return out, hasMore, nil
+}
+
+// ActivityCount is one grouped activity value with its occurrence count.
+type ActivityCount struct {
+	Value string
+	Count int
+}
+
+// ActivityByKind returns the most frequent activity values of a kind
+// (file|command|tool|pattern|url), optionally bounded by time and project.
+func ActivityByKind(ctx context.Context, database *db.DB, kind string, since int64, projectPrefix string, limit int) ([]ActivityCount, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	q := `SELECT tt.value, COUNT(*) FROM tool_targets tt`
+	if projectPrefix != "" {
+		q += ` JOIN sessions s ON s.uuid = tt.session_uuid`
+	}
+	q += ` WHERE tt.kind = ?`
+	args := []any{kind}
+	if projectPrefix != "" {
+		q += ` AND s.project_path LIKE ? ESCAPE '\'`
+		args = append(args, db.EscapeLike(projectPrefix)+"%")
+	}
+	if since > 0 {
+		q += ` AND tt.ts >= ?`
+		args = append(args, since)
+	}
+	q += ` GROUP BY tt.value ORDER BY COUNT(*) DESC, tt.value LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := database.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ActivityCount
+	for rows.Next() {
+		var a ActivityCount
+		if err := rows.Scan(&a.Value, &a.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 // Bucket is one row of an activity summary.

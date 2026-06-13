@@ -36,6 +36,60 @@ func addMsg(t *testing.T, d *db.DB, sess string, seq int, role, content string, 
 	}
 }
 
+func addTarget(t *testing.T, d *db.DB, sess, kind, value string) {
+	t.Helper()
+	if _, err := d.Exec(`INSERT INTO tool_targets(message_id, session_uuid, ts, kind, value) VALUES (0,?,0,?,?)`,
+		sess, kind, value); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSearchFilterByTool(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	addSession(t, d, "s2", "/p")
+	now := time.Now().Unix()
+	addMsg(t, d, "s1", 0, "assistant", "fixing the race condition", now)
+	addMsg(t, d, "s2", 0, "assistant", "fixing the race condition", now)
+	addTarget(t, d, "s1", "tool", "Bash")
+
+	// Both sessions match "race"; only s1 used Bash.
+	res, err := Search(context.Background(), d, Options{Query: "race", Tool: "Bash", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || res[0].SessionUUID != "s1" {
+		t.Fatalf("tool filter: got %+v", res)
+	}
+}
+
+func TestSearchFilterByTouchedAndRan(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	addSession(t, d, "s2", "/p")
+	now := time.Now().Unix()
+	addMsg(t, d, "s1", 0, "assistant", "fixing the race condition", now)
+	addMsg(t, d, "s2", 0, "assistant", "fixing the race condition", now)
+	addTarget(t, d, "s1", "file", "/x/a_b.go") // underscore exercises LIKE escaping
+	addTarget(t, d, "s2", "command", "go test ./...")
+
+	res, err := Search(context.Background(), d, Options{Query: "race", Touched: "/x/a_b", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || res[0].SessionUUID != "s1" {
+		t.Fatalf("touched filter: got %+v", res)
+	}
+
+	res2, err := Search(context.Background(), d, Options{Query: "race", Ran: "go test", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res2) != 1 || res2[0].SessionUUID != "s2" {
+		t.Fatalf("ran filter: got %+v", res2)
+	}
+}
+
 func TestSearchEmptyQueryErrors(t *testing.T) {
 	d := testDB(t)
 	if _, err := Search(context.Background(), d, Options{Query: "  "}); err == nil {

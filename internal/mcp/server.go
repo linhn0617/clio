@@ -46,16 +46,21 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("project", mcp.Description("Filter by project path prefix")),
 		mcp.WithNumber("min_turns", mcp.Description("Only sessions with at least this many user turns"), mcp.DefaultNumber(0)),
 		mcp.WithNumber("limit", mcp.Description("Max sessions (default 20, max 50)"), mcp.DefaultNumber(20), mcp.Min(1), mcp.Max(maxSearchLimit)),
+		mcp.WithString("touched", mcp.Description("Only sessions whose tool calls touched this path prefix")),
+		mcp.WithString("tool", mcp.Description("Only sessions that used this tool, e.g. Bash or mcp__server__name")),
+		mcp.WithString("ran", mcp.Description("Only sessions that ran a command containing this substring")),
 	), handleListSessions(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("activity_summary",
-		mcp.WithDescription("Summarize activity over a period: session and message counts grouped by day or project. Good for 'what did I work on last week?'."),
+		mcp.WithDescription("Summarize activity over a period. Group by day/project for session and message counts ('what did I work on last week?'), or by file/command/tool/pattern/url for the most frequent files touched, commands run, or tools used."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(false),
 		mcp.WithString("since", mcp.Description("Period start: 7d, 12h, 30m, or YYYY-MM-DD (default 7d)")),
-		mcp.WithString("group_by", mcp.Description("Grouping"), mcp.Enum("day", "project"), mcp.DefaultString("day")),
+		mcp.WithString("group_by", mcp.Description("Grouping: day or project (counts), or file/command/tool/pattern/url (activity)"), mcp.Enum("day", "project", "file", "command", "tool", "pattern", "url"), mcp.DefaultString("day")),
+		mcp.WithString("project", mcp.Description("Filter by project path prefix")),
+		mcp.WithNumber("limit", mcp.Description("Max rows for file/command/tool/pattern/url grouping (default 30, max 50)"), mcp.DefaultNumber(30), mcp.Min(1), mcp.Max(maxSearchLimit)),
 	), handleActivitySummary(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("read_session",

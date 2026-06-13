@@ -19,6 +19,9 @@ func newSearchCmd() *cobra.Command {
 		limit     int
 		asJSON    bool
 		inclTools bool
+		touched   string
+		tool      string
+		ran       string
 	)
 	cmd := &cobra.Command{
 		Use:   "search <query>",
@@ -42,6 +45,9 @@ func newSearchCmd() *cobra.Command {
 				Role:              role,
 				Limit:             limit,
 				IncludeToolOutput: inclTools,
+				Touched:           touched,
+				Tool:              tool,
+				Ran:               ran,
 			})
 			if err != nil {
 				return err
@@ -70,5 +76,8 @@ func newSearchCmd() *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 20, "Maximum number of results")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Output JSON")
 	cmd.Flags().BoolVar(&inclTools, "include-tool-output", false, "Include tool output in results")
+	cmd.Flags().StringVar(&touched, "touched", "", "Only sessions whose tool calls touched this path prefix")
+	cmd.Flags().StringVar(&tool, "tool", "", "Only sessions that used this tool (exact name)")
+	cmd.Flags().StringVar(&ran, "ran", "", "Only sessions that ran a command containing this substring")
 	return cmd
 }

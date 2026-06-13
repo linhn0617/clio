@@ -53,6 +53,9 @@ func openForQuery() (*db.DB, error) {
 			if err := ing.PurgeMissing(context.Background(), projects); err != nil {
 				stderrLogger().Warn("catch-up purge failed", "err", err)
 			}
+			if err := ing.BackfillActivity(context.Background()); err != nil {
+				stderrLogger().Warn("activity backfill failed", "err", err)
+			}
 		}
 	}
 	return database, nil
