@@ -5,6 +5,26 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-13
+
+Ambient recall: an opt-in SessionStart hook that opens each new Claude Code
+session with a digest of what recently happened in the project — so past work is
+surfaced proactively, without Claude having to think to search for it first.
+
+### Added
+
+- `clio recall`: a read-only, project-scoped digest of recent activity — the
+  project's most recent sessions (title, date, turns), the files it recently
+  touched, and the commands it recently ran. It detects the project from the
+  working directory (walking up to the repo root), opens the index read-only (no
+  ingest, no write-lock contention with a running MCP server), prints nothing
+  when the project has no indexed history, and exits 0 with empty output on any
+  error so it can never break session startup.
+- `clio install-hook` / `clio uninstall-hook`: opt-in, atomic registration of a
+  Claude Code SessionStart hook (in `~/.claude/settings.json`) that runs
+  `clio recall`. Preserves your existing hooks (removes only clio's own entry on
+  uninstall) and is separate from `install-mcp`.
+
 ## [0.4.0] - 2026-06-13
 
 An activity index over your tool calls: search and summarize which files past
@@ -126,6 +146,7 @@ Initial release.
 - Secret redaction at ingest time (API keys, tokens, private keys, `.env`-style
   lines), in both the searchable text and the stored raw event.
 
+[0.5.0]: https://github.com/linhn0617/clio/releases/tag/v0.5.0
 [0.4.0]: https://github.com/linhn0617/clio/releases/tag/v0.4.0
 [0.3.0]: https://github.com/linhn0617/clio/releases/tag/v0.3.0
 [0.2.0]: https://github.com/linhn0617/clio/releases/tag/v0.2.0
