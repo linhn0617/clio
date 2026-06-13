@@ -218,6 +218,32 @@ func ActivityByKind(ctx context.Context, database *db.DB, kind string, since int
 	return out, rows.Err()
 }
 
+// Recall bundles a project's recent sessions, recently touched files, and
+// recently run commands — the material for clio's session-start recall digest.
+type Recall struct {
+	Sessions []Session
+	Files    []ActivityCount
+	Commands []ActivityCount
+}
+
+// GetRecall gathers a project's recent sessions plus its most-touched files and
+// most-run commands since the given time.
+func GetRecall(ctx context.Context, database *db.DB, projectPrefix string, since int64, limitSessions, limitActivity int) (Recall, error) {
+	sess, err := ListSessions(ctx, database, ListFilter{ProjectPrefix: projectPrefix, Since: since, Limit: limitSessions})
+	if err != nil {
+		return Recall{}, err
+	}
+	files, err := ActivityByKind(ctx, database, "file", since, projectPrefix, limitActivity)
+	if err != nil {
+		return Recall{}, err
+	}
+	commands, err := ActivityByKind(ctx, database, "command", since, projectPrefix, limitActivity)
+	if err != nil {
+		return Recall{}, err
+	}
+	return Recall{Sessions: sess, Files: files, Commands: commands}, nil
+}
+
 // Bucket is one row of an activity summary.
 type Bucket struct {
 	Key      string

@@ -25,6 +25,16 @@ func ClaudeConfigFile() (string, error) {
 	return filepath.Join(home, ".claude.json"), nil
 }
 
+// ClaudeSettingsFile is Claude Code's user settings file (~/.claude/settings.json),
+// where hooks are configured.
+func ClaudeSettingsFile() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude", "settings.json"), nil
+}
+
 // DataDir is clio's own state directory. Honors XDG_DATA_HOME, otherwise uses
 // the platform default (~/Library/Application Support on macOS, ~/.local/share
 // elsewhere).

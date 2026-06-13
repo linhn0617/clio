@@ -29,10 +29,13 @@ func newRootCmd() *cobra.Command {
 		newListCmd(),
 		newShowCmd(),
 		newActivityCmd(),
+		newRecallCmd(),
 		newMCPCmd(),
 		newDoctorCmd(),
 		newInstallMCPCmd(),
 		newUninstallMCPCmd(),
+		newInstallHookCmd(),
+		newUninstallHookCmd(),
 	)
 	return root
 }
