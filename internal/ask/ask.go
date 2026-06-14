@@ -95,11 +95,13 @@ func Ask(ctx context.Context, database *db.DB, opt Options) (Answer, error) {
 		return ans, nil
 	}
 
-	// Group candidates by session, tracking each hit's score and seq (cands are
-	// pre-ranked by score).
+	// Group candidates by session, keeping FTS-hit and LIKE-hit scores apart (their
+	// scales are incompatible) along with every matched seq (cands are pre-ranked).
 	type group struct {
-		scores  []float64
-		hitSeqs []int
+		ftsScores  []float64
+		likeScores []float64
+		hitSeqs    []int
+		hasFTS     bool
 	}
 	groups := map[string]*group{}
 	var order []string
@@ -110,18 +112,31 @@ func Ask(ctx context.Context, database *db.DB, opt Options) (Answer, error) {
 			groups[c.SessionUUID] = g
 			order = append(order, c.SessionUUID)
 		}
-		g.scores = append(g.scores, c.Score)
+		if c.FTS {
+			g.ftsScores = append(g.ftsScores, c.Score)
+			g.hasFTS = true
+		} else {
+			g.likeScores = append(g.likeScores, c.Score)
+		}
 		g.hitSeqs = append(g.hitSeqs, c.Seq)
 	}
 
-	// Rank sessions by combined hit strength (sum of the top hits), so a session
-	// with several relevant turns out-ranks one with a single slightly-stronger
-	// line. Deterministic tiebreak on uuid.
+	// Rank: FTS sessions first (a full-term match beats substring-only matches),
+	// then by combined hit strength within the session's own tier (sum of the top
+	// hits, so several relevant turns out-rank one slightly-stronger line). Never
+	// sum FTS and LIKE scores together. Deterministic tiebreak on uuid.
 	aggOf := make(map[string]float64, len(groups))
 	for uuid, g := range groups {
-		aggOf[uuid] = topKSum(g.scores, maxHitsPerSession)
+		if g.hasFTS {
+			aggOf[uuid] = topKSum(g.ftsScores, maxHitsPerSession)
+		} else {
+			aggOf[uuid] = topKSum(g.likeScores, maxHitsPerSession)
+		}
 	}
 	sort.SliceStable(order, func(i, j int) bool {
+		if gi, gj := groups[order[i]].hasFTS, groups[order[j]].hasFTS; gi != gj {
+			return gi
+		}
 		if aggOf[order[i]] != aggOf[order[j]] {
 			return aggOf[order[i]] > aggOf[order[j]]
 		}

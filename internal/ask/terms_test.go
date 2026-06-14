@@ -66,3 +66,17 @@ func TestExtractTermsEmitsCJKBigrams(t *testing.T) {
 		t.Fatalf("expected bigram 驗證 (LIKE-reachable) in %v", got)
 	}
 }
+
+// CJK runs are split on stopwords before gramming, so common question words like
+// 我們 / 怎麼 don't leak into the gram set and crowd out the real keyword.
+func TestExtractTermsDropsCJKStopwordGrams(t *testing.T) {
+	got := extractTerms("我們怎麼修復驗證")
+	for _, bad := range []string{"我們", "怎麼", "我們怎", "們怎麼", "怎麼修", "麼修復"} {
+		if slices.Contains(got, bad) {
+			t.Fatalf("stopword-derived gram %q should not be emitted: %v", bad, got)
+		}
+	}
+	if !slices.Contains(got, "驗證") || !slices.Contains(got, "修復驗") {
+		t.Fatalf("content grams missing after stopword split: %v", got)
+	}
+}

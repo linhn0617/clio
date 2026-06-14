@@ -101,6 +101,28 @@ func TestAskGroupsWindowsAndCites(t *testing.T) {
 	}
 }
 
+// A session with a full-term (FTS) hit ranks above a session that only matches
+// short substring (LIKE) terms, no matter how many short terms the latter piles
+// up — the two score scales must not be summed against each other.
+func TestAskRanksFTSSessionAboveLikeOnly(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "ftsess", "/p", "fts session")
+	addSession(t, d, "likeonly", "/p", "like only")
+	addMsg(t, d, "ftsess", 0, "user", "the authentication module overview")
+	// Pile up short-term LIKE matches so an unscaled sum would win.
+	addMsg(t, d, "likeonly", 0, "user", "go ci ab pipeline")
+	addMsg(t, d, "likeonly", 1, "user", "go ci ab again")
+	addMsg(t, d, "likeonly", 2, "user", "go ci ab more")
+
+	ans, err := Ask(context.Background(), d, Options{Question: "authentication go ci ab"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ans.Groups) < 2 || ans.Groups[0].SessionUUID != "ftsess" {
+		t.Fatalf("FTS session should rank first; got %+v", ans.Groups)
+	}
+}
+
 func TestAskNoMatchIsEmpty(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p", "t")

@@ -77,6 +77,37 @@ func TestRetrieveShortTermRanksByMatchCount(t *testing.T) {
 	}
 }
 
+// TestRetrieveFTSTierRanksBeforeLikeOnly guards the codex round-3 P1: FTS (full
+// term) hits and LIKE (substring) hits live on different score scales, so a
+// LIKE-only hit must never be ranked above an FTS hit regardless of how many short
+// terms it matches or how recent it is. The tier is explicit (Candidate.FTS).
+func TestRetrieveFTSTierRanksBeforeLikeOnly(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	now := time.Now().Unix()
+	addMsg(t, d, "s1", 0, "user", "the authentication design notes", now-100000) // FTS: "authentication", older
+	addMsg(t, d, "s1", 1, "user", "go ci ab here", now)                          // LIKE-only: go/ci/ab, newer, 3 matches
+
+	cands, err := Retrieve(context.Background(), d, Options{Query: "authentication go ci ab", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) < 2 {
+		t.Fatalf("want both hits, got %d: %+v", len(cands), cands)
+	}
+	seenLike := false
+	for _, c := range cands {
+		if !c.FTS {
+			seenLike = true
+		} else if seenLike {
+			t.Fatalf("an FTS hit ranked after a LIKE-only hit: %+v", cands)
+		}
+	}
+	if !cands[0].FTS {
+		t.Fatalf("top candidate should be the FTS hit, got %+v", cands[0])
+	}
+}
+
 // TestRetrievePopulatesSeq verifies candidates carry the in-session seq used for
 // windowing.
 func TestRetrievePopulatesSeq(t *testing.T) {

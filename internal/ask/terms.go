@@ -50,12 +50,17 @@ func expandTerm(t string) []string {
 				j++
 			}
 			run := runes[i:j]
-			// Trigrams drive the FTS index (relevance + ranking); bigrams reach the
-			// LIKE fallback so a 2-rune keyword embedded in the run is still matched
-			// even when the session uses it on a different 3-char boundary. A lone
-			// CJK char is dropped — a 1-rune LIKE matches almost everything.
-			out = append(out, cjkGrams(run, cjkGram)...)
-			out = append(out, cjkGrams(run, 2)...)
+			// Split the run on CJK stopwords first (我們 / 怎麼 / …) so common
+			// question words don't become grams that crowd the candidate pool, then
+			// gram each content segment. Trigrams drive the FTS index (relevance +
+			// ranking); bigrams reach the LIKE fallback so a 2-rune keyword embedded
+			// in the run is still matched even when a session uses it on a different
+			// 3-char boundary. A lone CJK char is dropped — a 1-rune LIKE matches
+			// almost everything.
+			for _, seg := range segmentCJK(run) {
+				out = append(out, cjkGrams(seg, cjkGram)...)
+				out = append(out, cjkGrams(seg, 2)...)
+			}
 			i = j
 			continue
 		}
@@ -69,6 +74,54 @@ func expandTerm(t string) []string {
 		i = j
 	}
 	return out
+}
+
+// cjkStopwords is the CJK subset of stopwords, used to split unspaced CJK runs
+// into content segments before gramming.
+var cjkStopwords = func() map[string]bool {
+	m := map[string]bool{}
+	for w := range stopwords {
+		if hasCJK(w) {
+			m[w] = true
+		}
+	}
+	return m
+}()
+
+// segmentCJK splits a CJK run into content segments, dropping any CJK stopword
+// (longest match wins) as a delimiter.
+func segmentCJK(run []rune) [][]rune {
+	var segs [][]rune
+	var cur []rune
+	for i := 0; i < len(run); {
+		if w := cjkStopwordPrefix(run[i:]); w > 0 {
+			if len(cur) > 0 {
+				segs = append(segs, cur)
+				cur = nil
+			}
+			i += w
+			continue
+		}
+		cur = append(cur, run[i])
+		i++
+	}
+	if len(cur) > 0 {
+		segs = append(segs, cur)
+	}
+	return segs
+}
+
+// cjkStopwordPrefix returns the rune length of the longest CJK stopword that is a
+// prefix of s, or 0.
+func cjkStopwordPrefix(s []rune) int {
+	best := 0
+	for sw := range cjkStopwords {
+		r := []rune(sw)
+		if len(r) > best && len(r) <= len(s) && string(s[:len(r)]) == sw {
+			best = len(r)
+		}
+	}
+	return best
 }
 
 // cjkGrams returns the overlapping n-grams of run, or nil when run is shorter

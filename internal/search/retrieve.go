@@ -10,7 +10,10 @@ import (
 )
 
 // Candidate is a retrieval hit plus its in-session sequence, for callers that
-// assemble windowed context around it (clio ask).
+// assemble windowed context around it (clio ask). FTS marks a full-term index
+// match (a stronger signal than a short-term substring LIKE), so callers can rank
+// FTS hits ahead of LIKE-only hits without comparing the two incompatible score
+// scales (bm25 relevance vs. substring match count).
 type Candidate struct {
 	SessionUUID string
 	ProjectPath string
@@ -19,6 +22,7 @@ type Candidate struct {
 	Role        string
 	Snippet     string
 	Score       float64
+	FTS         bool
 }
 
 // Retrieve runs an any-term (OR) match over the query terms and returns candidate
@@ -44,7 +48,7 @@ func Retrieve(ctx context.Context, database *db.DB, opt Options) ([]Candidate, e
 		seq  int
 	}
 	byKey := map[key]Candidate{}
-	scan := func(rows *sql.Rows, err error) error {
+	scan := func(rows *sql.Rows, err error, fromFTS bool) error {
 		if err != nil {
 			return err
 		}
@@ -56,8 +60,11 @@ func Retrieve(ctx context.Context, database *db.DB, opt Options) ([]Candidate, e
 				return err
 			}
 			c.Score = adjustedScore(bm, c.Role, c.TS)
+			c.FTS = fromFTS
 			k := key{c.SessionUUID, c.Seq}
-			if prev, ok := byKey[k]; !ok || c.Score > prev.Score {
+			// Prefer the FTS tier when a message matched both an FTS term and a short
+			// LIKE term; within a tier keep the higher score.
+			if prev, ok := byKey[k]; !ok || (c.FTS != prev.FTS && c.FTS) || (c.FTS == prev.FTS && c.Score > prev.Score) {
 				byKey[k] = c
 			}
 		}
@@ -65,12 +72,14 @@ func Retrieve(ctx context.Context, database *db.DB, opt Options) ([]Candidate, e
 	}
 
 	if len(long) > 0 {
-		if err := scan(anyMatchQuery(ctx, database, opt, long)); err != nil {
+		rows, qerr := anyMatchQuery(ctx, database, opt, long)
+		if err := scan(rows, qerr, true); err != nil {
 			return nil, err
 		}
 	}
 	if len(short) > 0 {
-		if err := scan(anyLikeQuery(ctx, database, opt, short)); err != nil {
+		rows, qerr := anyLikeQuery(ctx, database, opt, short)
+		if err := scan(rows, qerr, false); err != nil {
 			return nil, err
 		}
 	}
@@ -79,9 +88,12 @@ func Retrieve(ctx context.Context, database *db.DB, opt Options) ([]Candidate, e
 	for _, c := range byKey {
 		out = append(out, c)
 	}
-	// Deterministic order: score desc, then session/seq so ties don't depend on
-	// map iteration order.
+	// Tier FTS hits ahead of LIKE-only hits (incompatible score scales), then by
+	// score within a tier; session/seq make ties deterministic.
 	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].FTS != out[j].FTS {
+			return out[i].FTS
+		}
 		if out[i].Score != out[j].Score {
 			return out[i].Score > out[j].Score
 		}
