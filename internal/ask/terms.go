@@ -6,8 +6,17 @@ package ask
 import "strings"
 
 // cjkGram is the CJK expansion width; it matches the FTS trigram tokenizer so an
-// unspaced Chinese question still hits the index.
+// unspaced Chinese question still hits the index. It is also coupled to
+// search.partitionTerms' >=3-rune long/short split: trigrams reach the FTS (long)
+// tier and bigrams the LIKE (short) tier — changing that threshold would silently
+// shift which CJK grams are searchable.
 const cjkGram = 3
+
+// maxTerms caps the extracted term count. A long pasted question (especially an
+// unspaced CJK paragraph, which expands into one gram per character) would
+// otherwise build an FTS OR expression past SQLite's hard depth limit (1000) and
+// a wide per-row LIKE scan; the first maxTerms grams are a sufficient basis.
+const maxTerms = 64
 
 // extractTerms reduces a natural-language question to the content terms used for
 // retrieval: lowercased, surrounding punctuation trimmed, stopwords removed, and
@@ -32,7 +41,11 @@ func extractTerms(question string) []string {
 			content = append(content, expand(t, true)...)
 		}
 	}
-	return dedupe(content)
+	out := dedupe(content)
+	if len(out) > maxTerms {
+		out = out[:maxTerms]
+	}
+	return out
 }
 
 // expand passes a non-CJK token through unchanged, and splits a CJK-bearing token
@@ -60,15 +73,11 @@ func expand(t string, raw bool) []string {
 				segs = segmentCJK(run)
 			}
 			for _, seg := range segs {
-				g3 := cjkGrams(seg, cjkGram)
-				g2 := cjkGrams(seg, 2)
-				out = append(out, g3...)
-				out = append(out, g2...)
-				// Raw fallback: a lone CJK rune has no gram, so emit it directly to
-				// keep the all-stopword fallback non-empty (e.g. 我 / 嗎).
-				if raw && len(g3) == 0 && len(g2) == 0 && len(seg) > 0 {
-					out = append(out, string(seg))
-				}
+				// A lone CJK rune is never emitted (even in raw fallback): a 1-rune
+				// substring LIKE matches almost the whole index, which is noise, not
+				// signal — an empty result is more honest than a grab-bag.
+				out = append(out, cjkGrams(seg, cjkGram)...)
+				out = append(out, cjkGrams(seg, 2)...)
 			}
 			i = j
 			continue

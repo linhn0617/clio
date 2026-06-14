@@ -2,6 +2,8 @@
 package mcp
 
 import (
+	"fmt"
+
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
@@ -45,7 +47,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("question", mcp.Required(), mcp.Description("The natural-language question to answer from history")),
 		mcp.WithString("since", mcp.Description("Only consider sessions since: 7d, 12h, 30m, or YYYY-MM-DD")),
 		mcp.WithString("project", mcp.Description("Limit to a project path prefix (default: all projects)")),
-		mcp.WithNumber("limit", mcp.Description("Max sessions in the bundle (default 6, max 10)"), mcp.DefaultNumber(defaultAskSessions), mcp.Min(1), mcp.Max(maxAskSessions)),
+		mcp.WithNumber("limit", mcp.Description(fmt.Sprintf("Max sessions in the bundle (default %d, max %d)", defaultAskSessions, maxAskSessions)), mcp.DefaultNumber(defaultAskSessions), mcp.Min(1), mcp.Max(maxAskSessions)),
 	), handleAsk(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("list_sessions",

@@ -209,7 +209,7 @@ func assembleGroup(ctx context.Context, database *db.DB, uuid string, score floa
 	}
 	sort.Ints(seqs)
 
-	eg := EvidenceGroup{SessionUUID: uuid, Score: score, Project: ""}
+	eg := EvidenceGroup{SessionUUID: uuid, Score: score}
 	for _, s := range seqs {
 		m := merged[s]
 		eg.Excerpts = append(eg.Excerpts, Excerpt{

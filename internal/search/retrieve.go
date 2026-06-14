@@ -139,22 +139,20 @@ func Retrieve(ctx context.Context, database *db.DB, opt Options) ([]Candidate, e
 }
 
 // buildAnyMatchQuery turns terms into an operator-safe FTS5 MATCH expression that
-// matches ANY term: each term is a quoted phrase (embedded " doubled), joined by
-// " OR ". The any-term counterpart to buildMatchQuery's AND join.
+// matches ANY term: quoted phrases joined by " OR ". The any-term counterpart to
+// buildMatchQuery's AND join (both share quotedTerms for escaping).
 func buildAnyMatchQuery(terms []string) string {
-	parts := make([]string, 0, len(terms))
-	for _, t := range terms {
-		parts = append(parts, `"`+strings.ReplaceAll(t, `"`, `""`)+`"`)
-	}
-	return strings.Join(parts, " OR ")
+	return strings.Join(quotedTerms(terms), " OR ")
 }
 
 // anyMatchQuery runs an FTS OR match over the long terms, selecting m.seq for
 // windowing.
 func anyMatchQuery(ctx context.Context, database *db.DB, opt Options, long []string) (*sql.Rows, error) {
 	filt, fargs := commonFilters(opt)
+	// substr (not snippet()): ask windows the real content via GetWindow and never
+	// reads Candidate.Snippet, so the per-row snippet() cost is pure waste here.
 	q := `SELECT m.session_uuid, COALESCE(s.project_path,''), m.seq, COALESCE(m.ts,0), m.role,
-		snippet(messages_fts,0,'[',']','…',10), bm25(messages_fts)
+		substr(m.content,1,160), bm25(messages_fts)
 		FROM messages_fts
 		JOIN messages m ON m.id = messages_fts.rowid
 		LEFT JOIN sessions s ON s.uuid = m.session_uuid
@@ -180,15 +178,21 @@ func anyLikeQuery(ctx context.Context, database *db.DB, opt Options, short []str
 		pat = append(pat, "%"+db.EscapeLike(t)+"%")
 	}
 	matchCount := strings.Join(conds, " + ")
+	orClause := strings.Join(conds, " OR ")
+	// The OR predicate is in the inner WHERE so SQLite discards non-matching rows
+	// during the scan (instead of computing the match count for every row and
+	// filtering after); mc remains only as the relevance score / sort key.
 	q := `SELECT session_uuid, project_path, seq, ts, role, snippet, -mc FROM (
 		SELECT m.session_uuid AS session_uuid, COALESCE(s.project_path,'') AS project_path,
 			m.seq AS seq, COALESCE(m.ts,0) AS ts, m.role AS role,
 			substr(m.content,1,160) AS snippet, (` + matchCount + `) AS mc
 		FROM messages m
 		LEFT JOIN sessions s ON s.uuid = m.session_uuid
-		WHERE 1=1` + filt + `
-	) WHERE mc > 0 ORDER BY mc DESC, ts DESC LIMIT ?`
-	args := append([]any{}, pat...)
+		WHERE (` + orClause + `)` + filt + `
+	) ORDER BY mc DESC, ts DESC LIMIT ?`
+	args := make([]any, 0, len(pat)*2+len(fargs)+1)
+	args = append(args, pat...) // matchCount in SELECT
+	args = append(args, pat...) // orClause in WHERE
 	args = append(args, fargs...)
 	args = append(args, opt.Limit*overscan)
 	return database.QueryContext(ctx, q, args...)

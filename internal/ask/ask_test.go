@@ -162,6 +162,43 @@ func TestAskRanksFullerCoverageHigher(t *testing.T) {
 	}
 }
 
+func TestTruncate(t *testing.T) {
+	if got := truncate("hello", 10); got != "hello" {
+		t.Fatalf("under cap unchanged: got %q", got)
+	}
+	if got := truncate("hello world", 5); got != "hello…" {
+		t.Fatalf("ascii cut: got %q", got)
+	}
+	// CJK must cut on a rune boundary (no mojibake): 6 runes capped to 3.
+	if got := truncate("資料庫遷移流", 3); got != "資料庫…" {
+		t.Fatalf("CJK rune-boundary cut: got %q", got)
+	}
+}
+
+// Overlapping windows from multiple hits in one session merge into a single
+// ordered excerpt list with no duplicate seqs.
+func TestAskMergesOverlappingWindows(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p", "t")
+	for i := range 5 {
+		addMsg(t, d, "s1", i, "user", "authentication detail here")
+	}
+	ans, err := Ask(context.Background(), d, Options{Question: "authentication", Window: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ans.Groups) != 1 {
+		t.Fatalf("want 1 group, got %d", len(ans.Groups))
+	}
+	seen := map[int]bool{}
+	for _, e := range ans.Groups[0].Excerpts {
+		if seen[e.Seq] {
+			t.Fatalf("duplicate excerpt seq %d in %+v", e.Seq, ans.Groups[0].Excerpts)
+		}
+		seen[e.Seq] = true
+	}
+}
+
 func TestAskNoMatchIsEmpty(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p", "t")

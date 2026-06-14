@@ -2,8 +2,18 @@ package ask
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
+
+// A very long (e.g. pasted) question must not produce an unbounded term set: the
+// FTS OR expression has a hard depth limit, so extractTerms caps the term count.
+func TestExtractTermsCapsCount(t *testing.T) {
+	long := strings.Repeat("資料庫遷移驗證流程設計效能調校", 80) // long unspaced CJK paste
+	if got := extractTerms(long); len(got) > maxTerms {
+		t.Fatalf("expected at most %d terms, got %d", maxTerms, len(got))
+	}
+}
 
 func TestExtractTermsStripsStopwords(t *testing.T) {
 	// Question words and function words drop out; content terms survive
@@ -100,8 +110,16 @@ func TestExtractTermsCJKAllStopwordFallback(t *testing.T) {
 	if got := extractTerms("我們 怎麼"); len(got) == 0 {
 		t.Fatalf("spaced all-stopword CJK question must fall back to non-empty terms, got %v", got)
 	}
-	// Single-rune CJK stopwords (no bigram available) must still fall back.
-	if got := extractTerms("我 嗎"); len(got) == 0 {
-		t.Fatalf("single-rune CJK stopword question must fall back to non-empty terms, got %v", got)
+}
+
+// A question of only single-rune CJK runes yields no term: a lone common rune
+// (在/了/是) as a substring LIKE matches almost the whole index, so emitting it
+// would return a garbage grab-bag — worse than a clean empty result.
+func TestExtractTermsDropsLoneCJKRune(t *testing.T) {
+	if got := extractTerms("在"); len(got) != 0 {
+		t.Fatalf("a lone CJK rune must not produce a term, got %v", got)
+	}
+	if got := extractTerms("我 嗎"); len(got) != 0 {
+		t.Fatalf("only single-rune CJK stopwords must yield no term, got %v", got)
 	}
 }
