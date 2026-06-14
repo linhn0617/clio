@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -19,6 +21,23 @@ func TestAskMissingIndexIsEmptyNotError(t *testing.T) {
 	cmd.SetErr(io.Discard)
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("ask with no index should exit 0, got error: %v", err)
+	}
+}
+
+// A non-ENOENT failure resolving the index (here: a regular file where the data
+// dir should be) must surface as an error, not be reported as empty history.
+func TestAskStatErrorSurfaces(t *testing.T) {
+	notADir := filepath.Join(t.TempDir(), "notadir")
+	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_DATA_HOME", notADir) // db path resolves under a regular file
+	cmd := newAskCmd()
+	cmd.SetArgs([]string{"a question"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("ask should surface a non-ENOENT stat error, not report empty history")
 	}
 }
 

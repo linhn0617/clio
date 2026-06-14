@@ -62,7 +62,8 @@ type Excerpt struct {
 // space, rank sessions by best hit score, and cap to the budget. Retrieval-only —
 // no generation, no network.
 func Ask(ctx context.Context, database *db.DB, opt Options) (Answer, error) {
-	ans := Answer{Question: opt.Question}
+	// Non-nil Groups so an empty result serializes as [] (a stable array), not null.
+	ans := Answer{Question: opt.Question, Groups: []EvidenceGroup{}}
 	if opt.MaxSessions <= 0 {
 		opt.MaxSessions = defaultMaxSessions
 	}

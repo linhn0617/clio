@@ -2,8 +2,10 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"strings"
 
@@ -41,8 +43,8 @@ func newAskCmd() *cobra.Command {
 			}
 
 			// A missing index is a clean empty result, not an error (e.g. a fresh
-			// install that has not indexed yet).
-			ans := ask.Answer{Question: question}
+			// install that has not indexed yet); any other stat failure surfaces.
+			ans := ask.Answer{Question: question, Groups: []ask.EvidenceGroup{}}
 			dbPath, err := config.DBPath()
 			if err != nil {
 				return err
@@ -65,6 +67,8 @@ func newAskCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+			} else if !errors.Is(statErr, fs.ErrNotExist) {
+				return statErr
 			}
 			if asJSON {
 				enc := json.NewEncoder(os.Stdout)

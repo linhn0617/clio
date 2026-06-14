@@ -123,6 +123,26 @@ func TestAskRanksFTSSessionAboveLikeOnly(t *testing.T) {
 	}
 }
 
+// Empty results must serialize groups as [] (a stable array), not null, matching
+// the MCP tool's empty response.
+func TestAnswerJSONEmptyGroupsIsArray(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p", "t")
+	addMsg(t, d, "s1", 0, "user", "completely unrelated content")
+
+	ans, err := Ask(context.Background(), d, Options{Question: "nonexistent zzqq term"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(ans)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"groups":[]`) {
+		t.Fatalf("empty groups must marshal as [], got %s", b)
+	}
+}
+
 func TestAskNoMatchIsEmpty(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p", "t")
