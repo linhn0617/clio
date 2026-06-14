@@ -1,13 +1,16 @@
 package tui
 
 import (
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/linhn0617/clio/internal/db"
+	"github.com/linhn0617/clio/internal/sessions"
 )
 
 func testDB(t *testing.T) *db.DB {
@@ -110,5 +113,106 @@ func TestSearchViewRunSearchQueries(t *testing.T) {
 	}
 	if r.err != nil || len(r.results) != 1 || r.results[0].sessionUUID != "s1" {
 		t.Fatalf("runSearch result wrong: %+v err=%v", r.results, r.err)
+	}
+}
+
+// Moving the selection schedules a preview load for the newly selected session.
+func TestSearchViewSelectionSchedulesPreview(t *testing.T) {
+	v := searchView{db: testDB(t), results: []searchHit{{sessionUUID: "s1"}, {sessionUUID: "s2"}}}
+	_, cmd := sUpdate(t, v, key(tea.KeyDown))
+	if cmd == nil {
+		t.Fatal("moving the selection should schedule a preview load")
+	}
+	// With no results there is nothing to preview.
+	if _, c := sUpdate(t, searchView{db: testDB(t)}, key(tea.KeyDown)); c != nil {
+		t.Fatal("no results should not schedule a preview load")
+	}
+}
+
+// The preview load command reads the selected session's messages.
+func TestSearchViewLoadPreviewQueries(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	addMsg(t, d, "s1", 0, "user", "hello world")
+	addMsg(t, d, "s1", 1, "assistant", "hi there")
+	v := searchView{db: d, results: []searchHit{{sessionUUID: "s1"}}}
+	msg := v.loadPreview()()
+	pm, ok := msg.(previewLoadedMsg)
+	if !ok {
+		t.Fatalf("loadPreview should emit previewLoadedMsg, got %T", msg)
+	}
+	if pm.err != nil || pm.sessionUUID != "s1" || len(pm.msgs) != 2 {
+		t.Fatalf("preview wrong: %+v err=%v", pm.msgs, pm.err)
+	}
+}
+
+// Preview results for the selected session populate the pane; stale results for
+// a different session are ignored.
+func TestSearchViewPreviewResults(t *testing.T) {
+	v := searchView{results: []searchHit{{sessionUUID: "s1"}}}
+	v, _ = sUpdate(t, v, previewLoadedMsg{sessionUUID: "s1", msgs: []sessions.Message{{Role: "user", Content: "hi"}}})
+	if len(v.previewMsgs) != 1 {
+		t.Fatalf("preview not populated: %+v", v.previewMsgs)
+	}
+	v2, _ := sUpdate(t, v, previewLoadedMsg{sessionUUID: "other", msgs: nil})
+	if len(v2.previewMsgs) != 1 {
+		t.Fatal("stale preview (different selected session) should be ignored")
+	}
+}
+
+// firstPreviewMatch finds the first message whose content matches a query term,
+// case-insensitively; -1 when none match.
+func TestFirstPreviewMatch(t *testing.T) {
+	msgs := []sessions.Message{
+		{Role: "user", Content: "let's discuss the schema"},
+		{Role: "assistant", Content: "the authentication module handles login"},
+	}
+	if got := firstPreviewMatch(msgs, "authentication"); got != 1 {
+		t.Fatalf("firstPreviewMatch = %d, want 1", got)
+	}
+	if got := firstPreviewMatch(msgs, "LOGIN"); got != 1 {
+		t.Fatalf("case-insensitive match = %d, want 1", got)
+	}
+	if got := firstPreviewMatch(msgs, "nonexistent"); got != -1 {
+		t.Fatalf("no match should be -1, got %d", got)
+	}
+}
+
+// View renders both panes of the master-detail layout: the results list and the
+// session preview.
+func TestSearchViewRendersMasterDetail(t *testing.T) {
+	v := searchView{
+		width: 100, height: 30, query: "auth",
+		results:     []searchHit{{sessionUUID: "s1", project: "/proj", role: "user", snippet: "the [auth] module"}},
+		previewMsgs: []sessions.Message{{Role: "assistant", Content: "the auth module design notes"}},
+	}
+	out := v.View()
+	if !strings.Contains(out, "module") {
+		t.Fatalf("view should show the result snippet (left pane): %q", out)
+	}
+	if !strings.Contains(out, "design notes") {
+		t.Fatalf("view should show the preview content (right pane): %q", out)
+	}
+}
+
+// The matched preview message is marked so the hit stands out in context.
+func TestSearchViewPreviewMarksMatch(t *testing.T) {
+	v := searchView{
+		width: 100, height: 30, query: "login",
+		previewMsgs: []sessions.Message{
+			{Role: "user", Content: "hello"},
+			{Role: "assistant", Content: "the login flow"},
+		},
+	}
+	if out := v.View(); !strings.Contains(out, previewMatchMarker) {
+		t.Fatalf("matched preview line should carry the match marker: %q", out)
+	}
+}
+
+// The status line surfaces errors instead of crashing the view.
+func TestSearchViewStatusShowsError(t *testing.T) {
+	v := searchView{width: 80, height: 24, err: errors.New("boom")}
+	if !strings.Contains(v.View(), "boom") {
+		t.Fatalf("status line should surface the error: %q", v.View())
 	}
 }
