@@ -6,7 +6,7 @@ English | [繁體中文](./README_zh-TW.md)
 
 clio indexes Claude Code's session files (`~/.claude/projects/*.jsonl`) into a local SQLite + FTS5 database and exposes them through two interfaces:
 
-- **CLI** — `clio search`, `clio list`, `clio show` for searching and reading past conversations across all projects
+- **CLI** — `clio search` / `clio ask` / `clio list` / `clio show` to search, answer questions over, and read past conversations across all projects
 - **MCP server** — lets Claude Code query its own history in-session ("what did we discuss last week?", "how did we fix that bug?")
 
 It is local-first, read-only against your `.claude` data, and never writes to your original session files.
@@ -61,13 +61,17 @@ Claude calls clio over MCP to answer. While Claude Code runs, clio's MCP server 
 
 ```
 clio search "驗證 流程"          # full-text search (CJK + code)
-clio search "bug" --since 7d --project myapp --json
-clio list --since 7d            # browse recent sessions
+clio ask "how did we fix that auth bug"   # cited evidence bundle for a question (no generation)
+clio list --since 7d --touched auth.ts    # browse recent sessions, filter by activity
 clio show <session-id>          # print a full conversation (markdown|json|raw)
+clio activity --by file --since 7d         # files touched / commands run / tools used
+clio recall                                # recent-activity digest for the current project
 clio doctor                     # health check
 ```
 
 To remove the integration later: `clio uninstall-mcp`.
+
+Want each new session to open with a recent-activity digest? Opt in with `clio install-hook` (undo with `clio uninstall-hook`).
 
 ## How indexing stays current
 
@@ -83,8 +87,9 @@ When registered via `clio install-mcp`, Claude Code can call:
 | Tool | What it does |
 |------|--------------|
 | `search` | Full-text search, **ranked** by relevance + recency (short queries fall back to a substring scan; tool output excluded by default) |
-| `list_sessions` | List sessions with date/project/turn filters |
-| `activity_summary` | Counts grouped by day or project ("what did I do last week?") |
+| `ask` | Answer a question from history: a cited bundle of the most relevant excerpts, windowed in their turns and grouped by session, for Claude to synthesize from |
+| `list_sessions` | List sessions by date/project/turn count, or by file touched / tool used / command run |
+| `activity_summary` | Counts by day or project, or your most-used files / commands / tools / patterns / URLs ("what did I touch last week?") |
 | `read_session` | Read one session in full, paginated |
 
 ## Privacy
