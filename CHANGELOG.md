@@ -5,6 +5,27 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-06-14
+
+Ask a question, get a cited answer from your own history. `clio ask` retrieves the
+conversation excerpts most relevant to a question — each windowed in its
+surrounding turns and grouped by session — for you (or Claude over MCP) to
+synthesize from. clio generates nothing and makes no network call; retrieval stays
+local.
+
+### Added
+
+- `clio ask "<question>"`: a retrieval-only, cited evidence bundle over indexed
+  history. It extracts content terms (bilingual; an unspaced CJK question expands
+  to trigrams for the FTS index plus bigrams for the substring fallback, split on
+  stopwords), retrieves any-term matches with full-term (FTS) hits ranked ahead of
+  substring-only (LIKE) hits, groups them by session, and windows each hit in its
+  surrounding user/assistant turns. Flags: `--project` (default all projects),
+  `--since`, `--limit`, `--window`, `--json`. Reads the index like `search`
+  (incremental catch-up; defers to a running MCP server).
+- MCP: an `ask` tool returning the same bundle as structured JSON, so Claude
+  synthesizes the answer from grounded excerpts and cites session ids. Read-only.
+
 ## [0.5.0] - 2026-06-13
 
 Ambient recall: an opt-in SessionStart hook that opens each new Claude Code
@@ -146,6 +167,7 @@ Initial release.
 - Secret redaction at ingest time (API keys, tokens, private keys, `.env`-style
   lines), in both the searchable text and the stored raw event.
 
+[0.6.0]: https://github.com/linhn0617/clio/releases/tag/v0.6.0
 [0.5.0]: https://github.com/linhn0617/clio/releases/tag/v0.5.0
 [0.4.0]: https://github.com/linhn0617/clio/releases/tag/v0.4.0
 [0.3.0]: https://github.com/linhn0617/clio/releases/tag/v0.3.0
