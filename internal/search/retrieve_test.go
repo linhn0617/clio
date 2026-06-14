@@ -137,6 +137,30 @@ func TestRetrieveCapsPerSession(t *testing.T) {
 	}
 }
 
+// TestRetrieveBothTierHitOutranksLongOnly guards the codex round-6 P2: in a mixed
+// query, a message matching both a long (FTS) term and a short term should rank
+// above one matching only the long term — the extra short match must not be lost
+// when the both-tier hit is deduped to its FTS row.
+func TestRetrieveBothTierHitOutranksLongOnly(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	now := time.Now().Unix()
+	addMsg(t, d, "s1", 0, "user", "authentication only here", now)   // long term only
+	addMsg(t, d, "s1", 1, "user", "authentication and go here", now) // long + short "go"
+
+	cands, err := Retrieve(context.Background(), d, Options{Query: "authentication go", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos := map[int]int{}
+	for i, c := range cands {
+		pos[c.Seq] = i
+	}
+	if pos[1] >= pos[0] {
+		t.Fatalf("both-tier hit (seq1) should rank above long-only (seq0): %+v", cands)
+	}
+}
+
 // TestRetrievePopulatesSeq verifies candidates carry the in-session seq used for
 // windowing.
 func TestRetrievePopulatesSeq(t *testing.T) {

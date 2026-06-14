@@ -11,6 +11,7 @@ import (
 
 	"github.com/linhn0617/clio/internal/ask"
 	"github.com/linhn0617/clio/internal/config"
+	"github.com/linhn0617/clio/internal/db"
 )
 
 func newAskCmd() *cobra.Command {
@@ -47,7 +48,9 @@ func newAskCmd() *cobra.Command {
 				return err
 			}
 			if _, statErr := os.Stat(dbPath); statErr == nil {
-				database, err := openForQuery()
+				// Read-only: ask never ingests or mutates (works on a read-only FS,
+				// no write contention with a running MCP server).
+				database, err := db.OpenReadOnly(dbPath)
 				if err != nil {
 					return err
 				}
