@@ -57,6 +57,26 @@ func TestRetrieveIncludesShortTermsInMixedQuery(t *testing.T) {
 	}
 }
 
+// TestRetrieveShortTermRanksByMatchCount guards the codex P2: short-term (LIKE)
+// hits must be ranked by how many query terms they match, not purely by recency —
+// an older message matching both terms outranks a newer one matching only one.
+func TestRetrieveShortTermRanksByMatchCount(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	old := time.Now().Add(-100 * 24 * time.Hour).Unix()
+	now := time.Now().Unix()
+	addMsg(t, d, "s1", 0, "user", "ab cd here", old)   // matches both "ab" and "cd"
+	addMsg(t, d, "s1", 1, "user", "ab only here", now) // matches "ab" only, but newer
+
+	cands, err := Retrieve(context.Background(), d, Options{Query: "ab cd", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) < 2 || cands[0].Seq != 0 {
+		t.Fatalf("two-match message should rank first despite being older, got %+v", cands)
+	}
+}
+
 // TestRetrievePopulatesSeq verifies candidates carry the in-session seq used for
 // windowing.
 func TestRetrievePopulatesSeq(t *testing.T) {

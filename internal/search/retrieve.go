@@ -124,22 +124,29 @@ func anyMatchQuery(ctx context.Context, database *db.DB, opt Options, long []str
 	return database.QueryContext(ctx, q, args...)
 }
 
-// anyLikeQuery runs an OR of substring LIKEs over the short terms (the all-short
-// fallback, e.g. a question of only 1-2 rune CJK terms), selecting m.seq.
+// anyLikeQuery matches any short term via substring LIKE and scores each hit by
+// how many of the short terms it contains (not recency alone), so a message
+// matching more of the question ranks higher. The per-term booleans are summed in
+// an inner query; the score is emitted as a negative count so it slots into
+// adjustedScore's bm25 flip (more matches -> more negative -> higher relevance).
 func anyLikeQuery(ctx context.Context, database *db.DB, opt Options, short []string) (*sql.Rows, error) {
 	filt, fargs := commonFilters(opt)
-	var conds []string
-	var args []any
+	conds := make([]string, 0, len(short))
+	var pat []any
 	for _, t := range short {
-		conds = append(conds, `m.content LIKE ? ESCAPE '\'`)
-		args = append(args, "%"+db.EscapeLike(t)+"%")
+		conds = append(conds, `(m.content LIKE ? ESCAPE '\')`)
+		pat = append(pat, "%"+db.EscapeLike(t)+"%")
 	}
-	q := `SELECT m.session_uuid, COALESCE(s.project_path,''), m.seq, COALESCE(m.ts,0), m.role,
-		substr(m.content,1,160), 0.0
+	matchCount := strings.Join(conds, " + ")
+	q := `SELECT session_uuid, project_path, seq, ts, role, snippet, -mc FROM (
+		SELECT m.session_uuid AS session_uuid, COALESCE(s.project_path,'') AS project_path,
+			m.seq AS seq, COALESCE(m.ts,0) AS ts, m.role AS role,
+			substr(m.content,1,160) AS snippet, (` + matchCount + `) AS mc
 		FROM messages m
 		LEFT JOIN sessions s ON s.uuid = m.session_uuid
-		WHERE (` + strings.Join(conds, " OR ") + `)` + filt + `
-		ORDER BY m.ts DESC LIMIT ?`
+		WHERE 1=1` + filt + `
+	) WHERE mc > 0 ORDER BY mc DESC, ts DESC LIMIT ?`
+	args := append([]any{}, pat...)
 	args = append(args, fargs...)
 	args = append(args, opt.Limit*overscan)
 	return database.QueryContext(ctx, q, args...)

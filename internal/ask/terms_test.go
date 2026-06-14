@@ -56,3 +56,13 @@ func TestExtractTermsCJKQuestionReachesContent(t *testing.T) {
 		t.Fatalf("expected content trigrams of 身份驗證 in %v", got)
 	}
 }
+
+// A 2-rune CJK keyword embedded in a longer unspaced run must also be emitted as a
+// bigram, so it reaches the LIKE fallback (trigrams alone miss it when a session
+// uses the word without the question's exact 3-char boundary).
+func TestExtractTermsEmitsCJKBigrams(t *testing.T) {
+	got := extractTerms("我們怎麼修復驗證")
+	if !slices.Contains(got, "驗證") {
+		t.Fatalf("expected bigram 驗證 (LIKE-reachable) in %v", got)
+	}
+}

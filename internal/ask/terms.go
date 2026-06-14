@@ -50,13 +50,12 @@ func expandTerm(t string) []string {
 				j++
 			}
 			run := runes[i:j]
-			if len(run) >= cjkGram {
-				for k := 0; k+cjkGram <= len(run); k++ {
-					out = append(out, string(run[k:k+cjkGram]))
-				}
-			} else {
-				out = append(out, string(run))
-			}
+			// Trigrams drive the FTS index (relevance + ranking); bigrams reach the
+			// LIKE fallback so a 2-rune keyword embedded in the run is still matched
+			// even when the session uses it on a different 3-char boundary. A lone
+			// CJK char is dropped — a 1-rune LIKE matches almost everything.
+			out = append(out, cjkGrams(run, cjkGram)...)
+			out = append(out, cjkGrams(run, 2)...)
 			i = j
 			continue
 		}
@@ -68,6 +67,19 @@ func expandTerm(t string) []string {
 			out = append(out, seg)
 		}
 		i = j
+	}
+	return out
+}
+
+// cjkGrams returns the overlapping n-grams of run, or nil when run is shorter
+// than n.
+func cjkGrams(run []rune, n int) []string {
+	if len(run) < n {
+		return nil
+	}
+	out := make([]string, 0, len(run)-n+1)
+	for k := 0; k+n <= len(run); k++ {
+		out = append(out, string(run[k:k+n]))
 	}
 	return out
 }
