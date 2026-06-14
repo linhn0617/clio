@@ -143,6 +143,25 @@ func TestAnswerJSONEmptyGroupsIsArray(t *testing.T) {
 	}
 }
 
+// A session covering more of a mixed question (an FTS term plus separate short
+// terms) ranks above one matching only the FTS term at the same strength.
+func TestAskRanksFullerCoverageHigher(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "poor", "/p", "poor")
+	addSession(t, d, "rich", "/p", "rich")
+	addMsg(t, d, "poor", 0, "user", "authentication overview")
+	addMsg(t, d, "rich", 0, "user", "authentication overview")
+	addMsg(t, d, "rich", 1, "user", "go ci pipeline")
+
+	ans, err := Ask(context.Background(), d, Options{Question: "authentication go ci"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ans.Groups) < 2 || ans.Groups[0].SessionUUID != "rich" {
+		t.Fatalf("session covering more of the question should rank first; got %+v", ans.Groups)
+	}
+}
+
 func TestAskNoMatchIsEmpty(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p", "t")

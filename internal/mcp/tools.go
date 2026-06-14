@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -199,7 +200,7 @@ func handleAsk(database *db.DB, beforeRead func()) func(context.Context, mcp.Cal
 			beforeRead()
 		}
 		question, err := req.RequireString("question")
-		if err != nil {
+		if err != nil || strings.TrimSpace(question) == "" {
 			return mcp.NewToolResultError("question is required"), nil
 		}
 		ans, err := ask.Ask(ctx, database, ask.Options{

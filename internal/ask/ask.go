@@ -18,6 +18,7 @@ const (
 	defaultMaxExcerptLen = 600
 	maxHitsPerSession    = 3   // bound the windows assembled per session
 	minCandidatePool     = 200 // floor on retrieved hits before session grouping
+	coverageBonus        = 0.5 // per short-term hit an FTS session also has (bounded)
 )
 
 // Options controls a retrieval bundle.
@@ -130,7 +131,12 @@ func Ask(ctx context.Context, database *db.DB, opt Options) (Answer, error) {
 	aggOf := make(map[string]float64, len(groups))
 	for uuid, g := range groups {
 		if g.hasFTS {
-			aggOf[uuid] = topKSum(g.ftsScores, maxHitsPerSession)
+			// FTS topKSum, plus a small bounded bonus for short terms the session
+			// also covers (in other turns), so a session matching more of the
+			// question out-ranks one matching only the FTS term at equal strength —
+			// without summing the two incompatible score scales.
+			bonus := float64(min(len(g.likeScores), maxHitsPerSession)) * coverageBonus
+			aggOf[uuid] = topKSum(g.ftsScores, maxHitsPerSession) + bonus
 		} else {
 			aggOf[uuid] = topKSum(g.likeScores, maxHitsPerSession)
 		}

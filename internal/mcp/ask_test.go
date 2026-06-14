@@ -12,6 +12,14 @@ func TestHandleAskRequiresQuestion(t *testing.T) {
 	}
 }
 
+func TestHandleAskRejectsEmptyQuestion(t *testing.T) {
+	d := testDB(t)
+	r := call(t, handleAsk(d, nil), map[string]any{"question": "   "})
+	if !r.IsError {
+		t.Fatal("expected an error result for a blank question")
+	}
+}
+
 func TestHandleAskReturnsCitedBundle(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p/x")
