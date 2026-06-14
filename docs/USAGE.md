@@ -72,13 +72,14 @@ After restarting, just ask in natural language — Claude calls clio over MCP:
 > "How did we fix that auth bug?" / 「之前那個 auth bug 怎麼修的？」
 > "Find where we discussed the DB migration." / 「找一下我們討論資料庫遷移的地方。」
 
-The MCP server exposes four tools / MCP server 提供四個工具：
+The MCP server exposes five tools / MCP server 提供五個工具：
 
 | Tool | English | 中文 |
 |------|---------|------|
 | `search` | Full-text search across all conversations (tool output excluded by default) | 跨所有對話全文搜尋（預設排除 tool output） |
-| `list_sessions` | List sessions with date/project/turn filters | 依日期/專案/turn 數列出 session |
-| `activity_summary` | Counts grouped by day or project | 依天或專案統計活動量 |
+| `ask` | Cited evidence bundle answering a question (windowed excerpts grouped by session) for Claude to synthesize from | 回答問題的帶引用證據包（依 session 分組的加窗片段），交給 Claude 合成 |
+| `list_sessions` | List sessions by date/project/turn, or file touched / tool used / command run | 依日期/專案/turn，或動過的檔／用過的工具／跑過的指令列出 session |
+| `activity_summary` | Counts by day/project, or most-used files/commands/tools/patterns/URLs | 依天/專案，或最常動的檔/指令/工具/pattern/URL 統計 |
 | `read_session` | Read one session in full, paginated | 分頁讀取單一 session 全文 |
 
 While Claude Code runs, clio's MCP server watches `~/.claude/projects/` and keeps
@@ -132,6 +133,29 @@ Example output / 範例輸出:
 ]
 ```
 
+### `clio ask <question>` — answer from history / 從歷史回答
+
+Retrieval-only: clio finds the most relevant excerpts (windowed in their
+surrounding turns, grouped by session, cited) and prints them — it does not
+generate an answer. Over MCP, Claude synthesizes from the bundle.
+
+只檢索：clio 找出最相關的片段（含前後 turn、依 session 分組、附引用）印出來，本身
+不生成答案；透過 MCP 時由 Claude 從證據包合成。
+
+| Flag | English | 中文 | Default |
+|------|---------|------|---------|
+| `--project` | Limit to a project path prefix | 限定專案路徑前綴 | all / 全部 |
+| `--since` | Only consider sessions since this time | 只考慮此時間後的 session | — |
+| `--limit` | Max sessions in the bundle | 最多幾個 session | `6` |
+| `--window` | Dialogue turns each side of a match | 命中前後各幾個對話 turn | `2` |
+| `--json` | Output the bundle as JSON | 以 JSON 輸出 | `false` |
+
+```bash
+clio ask "how did we fix the auth bug"
+clio ask "資料庫遷移的設計" --since 30d --window 3
+clio ask "rate limiter" --project myapp --json
+```
+
 ### `clio list` — browse sessions / 瀏覽 session
 
 | Flag | English | 中文 | Default |
@@ -173,6 +197,27 @@ clio show 2f4d1a81 --format raw              # original JSONL events / 原始事
 clio show 2f4d1a81 --no-tool-output
 ```
 
+### `clio activity` — what you worked on / 你做了什麼
+
+Summarize indexed activity. `clio search` and `clio list` also accept
+`--touched <path>`, `--tool <name>`, and `--ran <substring>` to filter by it.
+
+統整索引到的活動。`clio search` 與 `clio list` 也可用 `--touched <路徑>`、
+`--tool <名稱>`、`--ran <子字串>` 依活動過濾。
+
+| Flag | English | 中文 | Default |
+|------|---------|------|---------|
+| `--by` | Group by `file`\|`command`\|`tool`\|`pattern`\|`url` | 依類別分組 | `file` |
+| `--since` | Period start | 期間起點 | — |
+| `--project` | Filter by project path prefix | 依專案前綴過濾 | — |
+
+```bash
+clio activity --by file --since 7d        # files touched most / 最常動的檔
+clio activity --by command --since 30d    # commands run most / 最常跑的指令
+clio list --touched src/auth.ts           # sessions that edited a file / 編輯過某檔的 session
+clio search "panic" --ran "go test"       # matches from sessions that ran a command
+```
+
 ### `clio index` — (re)build the index / 建立索引
 
 | Flag | English | 中文 |
@@ -189,6 +234,9 @@ clio index --full     # rebuild from scratch / 從頭重建
 ```bash
 clio install-mcp      # index + register MCP in ~/.claude.json / 索引並註冊 MCP
 clio uninstall-mcp    # remove clio from ~/.claude.json (keeps your data) / 移除整合（不刪資料）
+clio recall           # recent-activity digest for the current project / 目前專案的近況摘要
+clio install-hook     # opt in: inject the recall digest at each session start / 啟用：每個 session 開始注入近況摘要
+clio uninstall-hook   # remove the recall SessionStart hook / 移除近況 SessionStart hook
 clio doctor           # diagnose paths, DB integrity, ingest health / 健康檢查
 clio mcp              # run the stdio MCP server (Claude Code launches this) / 跑 MCP server（通常由 Claude Code 啟動）
 ```
@@ -273,10 +321,14 @@ EN:
 
 ```bash
 clio install-mcp                                  # set up (index + register MCP)
-clio search "<query>" [--since 7d] [--project X] [--role user|assistant] [--limit N] [--json]
-clio list [--since 7d] [--project X] [--min-turns N] [--limit N] [--json]
+clio search "<query>" [--since 7d] [--project X] [--role user|assistant] [--touched P] [--tool T] [--ran S] [--limit N] [--json]
+clio ask "<question>" [--since 7d] [--project X] [--limit N] [--window N] [--json]
+clio list [--since 7d] [--project X] [--min-turns N] [--touched P] [--tool T] [--ran S] [--limit N] [--json]
 clio show <uuid-or-prefix> [--format markdown|json|raw] [--no-tool-output]
+clio activity --by file|command|tool|pattern|url [--since 7d] [--project X]
 clio index [--full]                              # (re)index manually
+clio recall                                      # recent-activity digest (current project)
 clio doctor                                      # health check
 clio uninstall-mcp                               # remove MCP integration
+clio install-hook / uninstall-hook               # opt in/out of the session-start recall digest
 ```

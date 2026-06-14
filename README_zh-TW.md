@@ -6,7 +6,7 @@
 
 clio 把 Claude Code 的 session 檔（`~/.claude/projects/*.jsonl`）索引進本機的 SQLite + FTS5 資料庫，提供兩條介面：
 
-- **CLI** —— `clio search`、`clio list`、`clio show`，跨所有專案搜尋與閱讀過去的對話
+- **CLI** —— `clio search` / `clio ask` / `clio list` / `clio show`，跨所有專案搜尋、提問、閱讀過去的對話
 - **MCP server** —— 讓 Claude Code 在 session 內反查自己的歷史（「上週我們討論了什麼？」、「那個 bug 之前怎麼修的？」）
 
 本機優先（local-first）、對 `.claude` 資料唯讀，絕不寫入你原始的 session 檔。
@@ -61,13 +61,17 @@ Claude 會透過 MCP 呼叫 clio 來回答。Claude Code 開著的時候，clio 
 
 ```
 clio search "驗證 流程"          # 全文搜尋（中文 + 程式碼）
-clio search "bug" --since 7d --project myapp --json
-clio list --since 7d            # 瀏覽最近的 session
+clio ask "那個 auth bug 怎麼修的"        # 針對問題的帶引用證據包（不生成）
+clio list --since 7d --touched auth.ts   # 瀏覽最近 session，依活動過濾
 clio show <session-id>          # 印出完整對話（markdown|json|raw）
+clio activity --by file --since 7d        # 動過的檔／跑過的指令／用過的工具
+clio recall                               # 目前專案的近況摘要
 clio doctor                     # 健康檢查
 ```
 
 之後要移除整合：`clio uninstall-mcp`。
+
+想讓每個新 session 一開始就帶近況摘要？用 `clio install-hook` 啟用（`clio uninstall-hook` 移除）。
 
 ## 索引如何保持最新
 
@@ -83,8 +87,9 @@ clio doctor                     # 健康檢查
 | Tool | 用途 |
 |------|------|
 | `search` | 全文搜尋、**依相關性與近期排序**（短查詢會退回子字串掃描；預設排除 tool output） |
-| `list_sessions` | 依日期/專案/turn 數過濾列出 session |
-| `activity_summary` | 依天或專案統計（「我上週做了什麼？」） |
+| `ask` | 從歷史回答問題：回傳最相關片段的帶引用證據包（依 session 分組、含前後 turn），交給 Claude 合成 |
+| `list_sessions` | 依日期/專案/turn 數，或依動過的檔／用過的工具／跑過的指令列出 session |
+| `activity_summary` | 依天或專案，或你最常動的檔／指令／工具／搜尋 pattern／URL 統計（「我上週碰了什麼？」） |
 | `read_session` | 分頁讀取單一 session 的完整內容 |
 
 ## 隱私
