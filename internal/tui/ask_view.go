@@ -16,6 +16,7 @@ import (
 // grouped by session, and the selected group's windowed excerpts in the preview.
 type askView struct {
 	db            *db.DB
+	ctx           context.Context
 	width, height int
 	query         string
 	gen           int // bumps on each submit; stale answers are dropped
@@ -61,10 +62,12 @@ func (v askView) Update(msg tea.Msg) (askView, tea.Cmd) {
 		case "backspace":
 			if r := []rune(v.query); len(r) > 0 {
 				v.query = string(r[:len(r)-1])
+				v.gen++ // editing supersedes any in-flight answer for the old question
 			}
 		default:
 			if msg.Type == tea.KeyRunes {
 				v.query += string(msg.Runes)
+				v.gen++ // editing supersedes any in-flight answer for the old question
 			}
 		}
 	}
@@ -74,12 +77,12 @@ func (v askView) Update(msg tea.Msg) (askView, tea.Cmd) {
 // runAsk builds the evidence bundle for the current question, tagged with
 // generation g so a stale answer can be dropped.
 func (v askView) runAsk(g int) tea.Cmd {
-	q, database := v.query, v.db
+	q, database, ctx := v.query, v.db, orBackground(v.ctx)
 	return func() tea.Msg {
 		if database == nil || strings.TrimSpace(q) == "" {
 			return askAnswerMsg{gen: g}
 		}
-		ans, err := ask.Ask(context.Background(), database, ask.Options{Question: q})
+		ans, err := ask.Ask(ctx, database, ask.Options{Question: q})
 		return askAnswerMsg{gen: g, groups: ans.Groups, err: err}
 	}
 }

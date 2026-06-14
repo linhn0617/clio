@@ -19,6 +19,7 @@ const browseListLimit = 50
 // preview of the selected session's messages.
 type browseView struct {
 	db            *db.DB
+	ctx           context.Context
 	width, height int
 	project       string // optional project-path prefix filter
 	sessions      []sessions.Session
@@ -37,12 +38,12 @@ type browseLoadedMsg struct {
 
 // load fetches the recent sessions for the list.
 func (v browseView) load() tea.Cmd {
-	database, project := v.db, v.project
+	database, project, ctx := v.db, v.project, orBackground(v.ctx)
 	if database == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		ss, err := sessions.ListSessions(context.Background(), database,
+		ss, err := sessions.ListSessions(ctx, database,
 			sessions.ListFilter{ProjectPrefix: project, Limit: browseListLimit})
 		return browseLoadedMsg{sessions: ss, err: err}
 	}
@@ -88,7 +89,7 @@ func (v browseView) selectedSession() string {
 
 // loadPreview reads the selected session's messages for the preview pane.
 func (v browseView) loadPreview() tea.Cmd {
-	return loadSessionPreview(v.db, v.selectedSession())
+	return loadSessionPreview(v.ctx, v.db, v.selectedSession())
 }
 
 // View renders the master-detail layout: the session list on the left, the

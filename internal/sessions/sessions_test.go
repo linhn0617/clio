@@ -101,6 +101,24 @@ func TestListSessionsFilterByRan(t *testing.T) {
 	}
 }
 
+// TargetKind/TargetValue match a tool_targets entry exactly — unlike Touched
+// (prefix) and Ran (substring), so an Activity drill matches its grouped value
+// and not substring-related neighbours.
+func TestListSessionsFilterByExactTarget(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p", 1)
+	addSession(t, d, "s2", "/p", 1)
+	addTarget(t, d, "s1", "command", "go test")
+	addTarget(t, d, "s2", "command", "go test ./...")
+	got, err := ListSessions(context.Background(), d, ListFilter{TargetKind: "command", TargetValue: "go test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].UUID != "s1" {
+		t.Fatalf("exact target should match only the exact command, got %+v", got)
+	}
+}
+
 func TestActivityByKind(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p", 1)

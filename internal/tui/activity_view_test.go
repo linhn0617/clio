@@ -110,21 +110,35 @@ func TestActivityViewDrillCmdFilters(t *testing.T) {
 	if !ok {
 		t.Fatalf("drillCmd should emit activityDrillMsg, got %T", msg)
 	}
-	if ad.err != nil || ad.value != "/a/b.go" || len(ad.sessions) != 1 || ad.sessions[0].UUID != "s1" {
-		t.Fatalf("drill result wrong: %+v err=%v", ad.sessions, ad.err)
+	if ad.err != nil || ad.kind != "file" || ad.value != "/a/b.go" || len(ad.sessions) != 1 || ad.sessions[0].UUID != "s1" {
+		t.Fatalf("drill result wrong: kind=%s %+v err=%v", ad.kind, ad.sessions, ad.err)
 	}
 }
 
 // Drill results for the selected entry populate the pane; stale ones are ignored.
 func TestActivityViewDrillResults(t *testing.T) {
-	v := activityView{entries: []sessions.ActivityCount{{Value: "/a/b.go"}}}
-	v, _ = aUpdate(t, v, activityDrillMsg{value: "/a/b.go", sessions: []sessions.Session{{UUID: "s1"}}})
+	v := activityView{entries: []sessions.ActivityCount{{Value: "/a/b.go"}}} // file kind
+	v, _ = aUpdate(t, v, activityDrillMsg{kind: "file", value: "/a/b.go", sessions: []sessions.Session{{UUID: "s1"}}})
 	if len(v.drill) != 1 {
 		t.Fatalf("drill not populated: %+v", v.drill)
 	}
-	v2, _ := aUpdate(t, v, activityDrillMsg{value: "other"})
+	v2, _ := aUpdate(t, v, activityDrillMsg{kind: "file", value: "other"})
 	if len(v2.drill) != 1 {
-		t.Fatal("stale drill should be ignored")
+		t.Fatal("stale drill (different value) should be ignored")
+	}
+}
+
+// A drill result for a different kind (same value) is ignored — guards the case
+// where the user switches kind to one whose selected value collides.
+func TestActivityViewDrillIgnoresWrongKind(t *testing.T) {
+	v := activityView{entries: []sessions.ActivityCount{{Value: "git"}}} // file kind, value "git"
+	v, _ = aUpdate(t, v, activityDrillMsg{kind: "command", value: "git", sessions: []sessions.Session{{UUID: "s1"}}})
+	if len(v.drill) != 0 {
+		t.Fatal("a drill result for a different kind should be ignored")
+	}
+	v, _ = aUpdate(t, v, activityDrillMsg{kind: "file", value: "git", sessions: []sessions.Session{{UUID: "s1"}}})
+	if len(v.drill) != 1 {
+		t.Fatal("a drill result for the current kind+value should apply")
 	}
 }
 

@@ -31,6 +31,7 @@ type searchHit struct {
 // preview of the selected hit's session.
 type searchView struct {
 	db            *db.DB
+	ctx           context.Context
 	width, height int
 	query         string
 	gen           int // bumps on each query change; stale ticks/results are dropped
@@ -116,12 +117,12 @@ func (v searchView) selectedSession() string {
 // runSearch queries the index for the current query and returns the hits tagged
 // with generation g (so a stale result can be dropped).
 func (v searchView) runSearch(g int) tea.Cmd {
-	q, database := v.query, v.db
+	q, database, ctx := v.query, v.db, orBackground(v.ctx)
 	return func() tea.Msg {
 		if database == nil || strings.TrimSpace(q) == "" {
 			return searchResultsMsg{gen: g}
 		}
-		res, err := search.Search(context.Background(), database, search.Options{Query: q, Limit: 50})
+		res, err := search.Search(ctx, database, search.Options{Query: q, Limit: 50})
 		if err != nil {
 			return searchResultsMsg{gen: g, err: err}
 		}
@@ -141,7 +142,7 @@ func (v searchView) runSearch(g int) tea.Cmd {
 
 // loadPreview reads the selected session's messages for the preview pane.
 func (v searchView) loadPreview() tea.Cmd {
-	return loadSessionPreview(v.db, v.selectedSession())
+	return loadSessionPreview(v.ctx, v.db, v.selectedSession())
 }
 
 // View renders the master-detail layout: the results list on the left, the

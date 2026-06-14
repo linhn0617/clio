@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,20 @@ import (
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/sessions"
 )
+
+// A cancelled context surfaces an error from the shared preview load instead of
+// running the query — so quitting the TUI never blocks on in-flight DB work.
+func TestPreviewLoadHonorsContext(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	addMsg(t, d, "s1", 0, "user", "hi")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	msg := loadSessionPreview(ctx, d, "s1")()
+	if msg.(previewLoadedMsg).err == nil {
+		t.Fatal("a cancelled context should surface an error from the preview load")
+	}
+}
 
 func testDB(t *testing.T) *db.DB {
 	t.Helper()

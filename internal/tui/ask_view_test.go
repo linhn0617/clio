@@ -47,6 +47,20 @@ func TestAskViewRunAskQueries(t *testing.T) {
 	}
 }
 
+// Editing the question after submitting bumps the generation so an in-flight
+// answer for the previous question is dropped (no evidence/header mismatch).
+func TestAskViewEditingAfterSubmitDropsStaleAnswer(t *testing.T) {
+	v := askView{db: testDB(t), query: "auth", gen: 1} // submitted at gen 1
+	v, _ = qUpdate(t, v, runes("z"))                   // keep editing before the answer returns
+	if v.gen == 1 {
+		t.Fatal("editing after submit should bump gen so the in-flight answer is dropped")
+	}
+	v, _ = qUpdate(t, v, askAnswerMsg{gen: 1, groups: []ask.EvidenceGroup{{SessionUUID: "s1"}}})
+	if len(v.groups) != 0 {
+		t.Fatalf("an answer for the pre-edit generation should be ignored, got %d groups", len(v.groups))
+	}
+}
+
 // Answers for the current generation populate the groups; stale ones are ignored.
 func TestAskViewAnswerResults(t *testing.T) {
 	v := askView{gen: 3}

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -24,10 +25,17 @@ func newTUICmd() *cobra.Command {
 			}
 			defer database.Close()
 
-			p := tea.NewProgram(tui.New(database),
-				tea.WithContext(cmd.Context()),
+			// Cancel any in-flight view queries once the UI exits, so the deferred
+			// Close doesn't block on a query still running on a large index.
+			ctx, cancel := context.WithCancel(cmd.Context())
+			defer cancel()
+
+			p := tea.NewProgram(tui.New(ctx, database),
+				tea.WithContext(ctx),
 				tea.WithAltScreen())
-			if _, err := p.Run(); err != nil && !errors.Is(err, tea.ErrProgramKilled) {
+			_, err = p.Run()
+			cancel()
+			if err != nil && !errors.Is(err, tea.ErrProgramKilled) {
 				return err
 			}
 			return nil

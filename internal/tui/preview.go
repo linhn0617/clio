@@ -27,15 +27,24 @@ type previewLoadedMsg struct {
 
 // loadSessionPreview reads a session's dialogue messages for the preview pane,
 // shared by the Search and Browse views. It returns a nil command when there is
-// nothing to load.
-func loadSessionPreview(database *db.DB, sessionUUID string) tea.Cmd {
+// nothing to load. The query runs under ctx so quitting cancels it in flight.
+func loadSessionPreview(ctx context.Context, database *db.DB, sessionUUID string) tea.Cmd {
 	if database == nil || sessionUUID == "" {
 		return nil
 	}
 	return func() tea.Msg {
-		msgs, _, err := sessions.GetMessages(context.Background(), database, sessionUUID, 0, previewMessageLimit, false)
+		msgs, _, err := sessions.GetMessages(orBackground(ctx), database, sessionUUID, 0, previewMessageLimit, false)
 		return previewLoadedMsg{sessionUUID: sessionUUID, msgs: msgs, err: err}
 	}
+}
+
+// orBackground defaults a nil context to context.Background, so views built as
+// bare struct literals (in tests) keep working without an explicit context.
+func orBackground(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 // renderPreview renders a session's messages for the right-hand pane, marking the

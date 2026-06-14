@@ -29,6 +29,7 @@ var activityKinds = []struct{ kind, label string }{
 // selected entry into the sessions that touched / ran / used it.
 type activityView struct {
 	db            *db.DB
+	ctx           context.Context
 	width, height int
 	kindIdx       int
 	entries       []sessions.ActivityCount
@@ -47,9 +48,10 @@ type activityLoadedMsg struct {
 	err     error
 }
 
-// activityDrillMsg carries the sessions for a selected entry; keyed by value so a
-// drill that finishes after the selection moved is dropped.
+// activityDrillMsg carries the sessions for a selected entry; keyed by kind and
+// value so a drill that finishes after the kind or selection changed is dropped.
 type activityDrillMsg struct {
+	kind     string
 	value    string
 	sessions []sessions.Session
 	err      error
@@ -68,35 +70,28 @@ func (v activityView) selectedValue() string {
 
 // load aggregates the top values of the current kind.
 func (v activityView) load() tea.Cmd {
-	database := v.db
+	database, ctx := v.db, orBackground(v.ctx)
 	if database == nil {
 		return nil
 	}
 	kind := v.currentKind()
 	return func() tea.Msg {
-		ac, err := sessions.ActivityByKind(context.Background(), database, kind, 0, "", activityListLimit)
+		ac, err := sessions.ActivityByKind(ctx, database, kind, 0, "", activityListLimit)
 		return activityLoadedMsg{kind: kind, entries: ac, err: err}
 	}
 }
 
 // drillCmd lists the sessions behind the selected entry, filtered by the kind.
 func (v activityView) drillCmd() tea.Cmd {
-	database, value := v.db, v.selectedValue()
+	database, value, ctx := v.db, v.selectedValue(), orBackground(v.ctx)
 	if database == nil || value == "" {
 		return nil
 	}
-	filter := sessions.ListFilter{Limit: drillSessionLimit}
-	switch v.currentKind() {
-	case "file":
-		filter.Touched = value
-	case "command":
-		filter.Ran = value
-	case "tool":
-		filter.Tool = value
-	}
+	kind := v.currentKind()
+	filter := sessions.ListFilter{Limit: drillSessionLimit, TargetKind: kind, TargetValue: value}
 	return func() tea.Msg {
-		ss, err := sessions.ListSessions(context.Background(), database, filter)
-		return activityDrillMsg{value: value, sessions: ss, err: err}
+		ss, err := sessions.ListSessions(ctx, database, filter)
+		return activityDrillMsg{kind: kind, value: value, sessions: ss, err: err}
 	}
 }
 
@@ -111,7 +106,7 @@ func (v activityView) Update(msg tea.Msg) (activityView, tea.Cmd) {
 			return v, v.drillCmd()
 		}
 	case activityDrillMsg:
-		if msg.value == v.selectedValue() {
+		if msg.kind == v.currentKind() && msg.value == v.selectedValue() {
 			v.drill, v.drillErr = msg.sessions, msg.err
 		}
 	case tea.KeyMsg:

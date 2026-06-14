@@ -40,6 +40,8 @@ type ListFilter struct {
 	Touched       string // only sessions whose tool calls touched a file under this path prefix
 	Tool          string // only sessions that used this tool (exact name)
 	Ran           string // only sessions that ran a command containing this substring
+	TargetKind    string // with TargetValue: only sessions with a tool_targets row of this exact kind
+	TargetValue   string // with TargetKind: only sessions with a tool_targets row of this exact value
 }
 
 // ListSessions returns sessions matching filter, most recent first.
@@ -73,6 +75,10 @@ func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session
 	if f.Ran != "" {
 		q += ` AND uuid IN (SELECT session_uuid FROM tool_targets WHERE kind='command' AND value LIKE ? ESCAPE '\')`
 		args = append(args, "%"+db.EscapeLike(f.Ran)+"%")
+	}
+	if f.TargetKind != "" && f.TargetValue != "" {
+		q += ` AND uuid IN (SELECT session_uuid FROM tool_targets WHERE kind = ? AND value = ?)`
+		args = append(args, f.TargetKind, f.TargetValue)
 	}
 	q += " ORDER BY ended_at DESC LIMIT ?"
 	args = append(args, f.Limit)

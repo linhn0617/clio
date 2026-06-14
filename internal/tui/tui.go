@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"context"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -36,14 +37,15 @@ type Model struct {
 	ask           askView
 }
 
-// New builds the root model over an open index.
-func New(database *db.DB) Model {
+// New builds the root model over an open index. ctx is threaded into every
+// sub-view so their database queries are cancelled when the program exits.
+func New(ctx context.Context, database *db.DB) Model {
 	return Model{
 		db:       database,
-		search:   searchView{db: database},
-		browse:   browseView{db: database},
-		activity: activityView{db: database},
-		ask:      askView{db: database},
+		search:   searchView{db: database, ctx: ctx},
+		browse:   browseView{db: database, ctx: ctx},
+		activity: activityView{db: database, ctx: ctx},
+		ask:      askView{db: database, ctx: ctx},
 	}
 }
 
