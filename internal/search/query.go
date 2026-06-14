@@ -17,6 +17,7 @@ type Options struct {
 	Touched           string // restrict to sessions whose tool calls touched this path prefix
 	Tool              string // restrict to sessions that used this tool (exact name)
 	Ran               string // restrict to sessions that ran a command containing this substring
+	MaxPerSession     int    // cap candidates per session in Retrieve (0 = no cap)
 }
 
 // Result is one matched message.

@@ -87,6 +87,7 @@ func Ask(ctx context.Context, database *db.DB, opt Options) (Answer, error) {
 		Since:         opt.Since,
 		ProjectPrefix: opt.ProjectPrefix,
 		Limit:         pool,
+		MaxPerSession: maxHitsPerSession, // a session only needs this many hits to window + rank
 	})
 	if err != nil {
 		return ans, err

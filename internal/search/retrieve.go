@@ -102,6 +102,20 @@ func Retrieve(ctx context.Context, database *db.DB, opt Options) ([]Candidate, e
 		}
 		return out[i].Seq < out[j].Seq
 	})
+	// Cap per session (post-rank) so one session repeating the terms across many
+	// turns can't fill the pool and starve other relevant sessions out of grouping.
+	if opt.MaxPerSession > 0 {
+		perSession := make(map[string]int)
+		kept := out[:0]
+		for _, c := range out {
+			if perSession[c.SessionUUID] >= opt.MaxPerSession {
+				continue
+			}
+			perSession[c.SessionUUID]++
+			kept = append(kept, c)
+		}
+		out = kept
+	}
 	if len(out) > opt.Limit {
 		out = out[:opt.Limit]
 	}

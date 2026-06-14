@@ -80,3 +80,24 @@ func TestExtractTermsDropsCJKStopwordGrams(t *testing.T) {
 		t.Fatalf("content grams missing after stopword split: %v", got)
 	}
 }
+
+// Only multi-rune stopwords delimit a CJK run. A single-rune stopword (在/有/是)
+// is often mid-word, so splitting on it would drop grams spanning that character
+// (在線驗證 must still produce 在線 / 在線驗).
+func TestExtractTermsKeepsSingleRuneStopwordInWord(t *testing.T) {
+	got := extractTerms("在線驗證")
+	if !slices.Contains(got, "在線") || !slices.Contains(got, "在線驗") {
+		t.Fatalf("grams spanning 在 should survive (在 must not split the run): %v", got)
+	}
+}
+
+// The all-stopword fallback must reach retrieval for CJK too: a pure question-word
+// prompt still yields searchable grams rather than an empty term set.
+func TestExtractTermsCJKAllStopwordFallback(t *testing.T) {
+	if got := extractTerms("我們怎麼"); len(got) == 0 {
+		t.Fatalf("all-stopword CJK question must fall back to non-empty terms, got %v", got)
+	}
+	if got := extractTerms("我們 怎麼"); len(got) == 0 {
+		t.Fatalf("spaced all-stopword CJK question must fall back to non-empty terms, got %v", got)
+	}
+}

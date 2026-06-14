@@ -21,23 +21,28 @@ func extractTerms(question string) []string {
 	content := make([]string, 0, len(raw))
 	for _, t := range raw {
 		if !stopwords[t] {
-			content = append(content, expandTerm(t)...)
+			content = append(content, expand(t, false)...)
 		}
 	}
 	if len(content) == 0 {
+		// All-stopword question: fall back to the raw tokens, grammed without
+		// stopword removal, so retrieval is never run on an empty set (true for CJK
+		// too — re-stripping stopwords here would leave nothing).
 		for _, t := range raw {
-			content = append(content, expandTerm(t)...)
+			content = append(content, expand(t, true)...)
 		}
 	}
 	return dedupe(content)
 }
 
-// expandTerm passes a non-CJK token through unchanged, but splits a token that
-// contains CJK into its CJK and non-CJK runs: a CJK run of >= cjkGram runes
-// becomes overlapping cjkGram-grams (so partial mentions still match the trigram
-// index), a shorter CJK run is kept whole (the LIKE fallback handles it), and a
-// non-CJK run is trimmed and kept unless it is a stopword.
-func expandTerm(t string) []string {
+// expand passes a non-CJK token through unchanged, and splits a CJK-bearing token
+// into its CJK and non-CJK runs: a CJK run becomes overlapping trigrams (so a
+// partial mention still matches the trigram index) plus bigrams (so a 2-rune
+// keyword reaches the LIKE fallback); a non-CJK run is trimmed and kept. In
+// content mode a CJK run is first split on its stopwords (我們 / 怎麼) and non-CJK
+// stopword segments are dropped; in raw mode (the all-stopword fallback) nothing
+// is stripped. A lone CJK char is dropped — a 1-rune LIKE matches almost anything.
+func expand(t string, raw bool) []string {
 	if !hasCJK(t) {
 		return []string{t}
 	}
@@ -50,14 +55,11 @@ func expandTerm(t string) []string {
 				j++
 			}
 			run := runes[i:j]
-			// Split the run on CJK stopwords first (我們 / 怎麼 / …) so common
-			// question words don't become grams that crowd the candidate pool, then
-			// gram each content segment. Trigrams drive the FTS index (relevance +
-			// ranking); bigrams reach the LIKE fallback so a 2-rune keyword embedded
-			// in the run is still matched even when a session uses it on a different
-			// 3-char boundary. A lone CJK char is dropped — a 1-rune LIKE matches
-			// almost everything.
-			for _, seg := range segmentCJK(run) {
+			segs := [][]rune{run}
+			if !raw {
+				segs = segmentCJK(run)
+			}
+			for _, seg := range segs {
 				out = append(out, cjkGrams(seg, cjkGram)...)
 				out = append(out, cjkGrams(seg, 2)...)
 			}
@@ -68,7 +70,7 @@ func expandTerm(t string) []string {
 		for j < len(runes) && !isCJK(runes[j]) {
 			j++
 		}
-		if seg := strings.Trim(string(runes[i:j]), punctCutset); seg != "" && !stopwords[seg] {
+		if seg := strings.Trim(string(runes[i:j]), punctCutset); seg != "" && (raw || !stopwords[seg]) {
 			out = append(out, seg)
 		}
 		i = j
@@ -76,12 +78,13 @@ func expandTerm(t string) []string {
 	return out
 }
 
-// cjkStopwords is the CJK subset of stopwords, used to split unspaced CJK runs
-// into content segments before gramming.
+// cjkStopwords is the multi-rune CJK subset of stopwords, used to split unspaced
+// CJK runs into content segments. Single-rune stopwords (在 / 有 / 是) are excluded:
+// they are too often mid-word to split on safely.
 var cjkStopwords = func() map[string]bool {
 	m := map[string]bool{}
 	for w := range stopwords {
-		if hasCJK(w) {
+		if r := []rune(w); len(r) >= 2 && isCJK(r[0]) {
 			m[w] = true
 		}
 	}

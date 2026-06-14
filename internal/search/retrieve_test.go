@@ -108,6 +108,35 @@ func TestRetrieveFTSTierRanksBeforeLikeOnly(t *testing.T) {
 	}
 }
 
+// TestRetrieveCapsPerSession guards the codex P2: a per-session cap keeps one
+// session that repeats the query terms across many turns from dominating (and
+// starving) the candidate pool handed to grouping.
+func TestRetrieveCapsPerSession(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "dominant", "/p")
+	addSession(t, d, "other", "/p")
+	now := time.Now().Unix()
+	for i := range 20 {
+		addMsg(t, d, "dominant", i, "user", "authentication detail", now-int64(i))
+	}
+	addMsg(t, d, "other", 0, "user", "authentication summary", now-1000)
+
+	cands, err := Retrieve(context.Background(), d, Options{Query: "authentication", Limit: 50, MaxPerSession: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, c := range cands {
+		counts[c.SessionUUID]++
+	}
+	if counts["dominant"] > 3 {
+		t.Fatalf("dominant session should be capped at 3, got %d", counts["dominant"])
+	}
+	if counts["other"] != 1 {
+		t.Fatalf("other session must survive the cap, got %d", counts["other"])
+	}
+}
+
 // TestRetrievePopulatesSeq verifies candidates carry the in-session seq used for
 // windowing.
 func TestRetrievePopulatesSeq(t *testing.T) {
