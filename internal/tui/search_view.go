@@ -147,8 +147,10 @@ func (v searchView) loadPreview() tea.Cmd {
 // View renders the master-detail layout: the results list on the left, the
 // session preview on the right, and a status line beneath.
 func (v searchView) View() string {
-	return masterDetail(v.width, v.height, v.renderList,
+	header := "› " + v.query
+	body := masterDetail(v.width, v.height-1, v.renderList,
 		renderPreview(v.previewMsgs, v.previewErr, v.query), v.statusLine())
+	return header + "\n" + body
 }
 
 func (v searchView) renderList(w, h int) string {
