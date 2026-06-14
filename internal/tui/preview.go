@@ -82,3 +82,11 @@ func firstPreviewMatch(msgs []sessions.Message, query string) int {
 func oneLine(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, "\r", " "), "\n", " ")
 }
+
+// shortID abbreviates a session UUID for list rows.
+func shortID(uuid string) string {
+	if r := []rune(uuid); len(r) > 8 {
+		return string(r[:8])
+	}
+	return uuid
+}

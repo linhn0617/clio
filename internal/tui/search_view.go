@@ -7,7 +7,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
 	"github.com/linhn0617/clio/internal/db"
@@ -148,30 +147,8 @@ func (v searchView) loadPreview() tea.Cmd {
 // View renders the master-detail layout: the results list on the left, the
 // session preview on the right, and a status line beneath.
 func (v searchView) View() string {
-	w, h := v.width, v.height
-	if w <= 0 {
-		w = 80
-	}
-	if h <= 0 {
-		h = 24
-	}
-	bodyH := max(h-1, 1) // reserve the status line
-	leftW := w / 3
-	leftW = max(leftW, 24)
-	leftW = min(leftW, w-2)
-	leftW = max(leftW, 1)
-	rightW := max(w-leftW-1, 1)
-
-	box := func(width int) lipgloss.Style {
-		return lipgloss.NewStyle().Width(width).Height(bodyH).MaxHeight(bodyH)
-	}
-	divider := strings.TrimRight(strings.Repeat("│\n", bodyH), "\n")
-	body := lipgloss.JoinHorizontal(lipgloss.Top,
-		box(leftW).Render(v.renderList(leftW, bodyH)),
-		divider,
-		box(rightW).Render(renderPreview(v.previewMsgs, v.previewErr, v.query)),
-	)
-	return body + "\n" + v.renderStatus(w)
+	return masterDetail(v.width, v.height, v.renderList,
+		renderPreview(v.previewMsgs, v.previewErr, v.query), v.statusLine())
 }
 
 func (v searchView) renderList(w, h int) string {
@@ -195,14 +172,13 @@ func (v searchView) renderList(w, h int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (v searchView) renderStatus(w int) string {
+func (v searchView) statusLine() string {
 	switch {
 	case v.err != nil:
-		return runewidth.Truncate("⚠ "+v.err.Error(), w, "…")
+		return "⚠ " + v.err.Error()
 	case v.previewErr != nil:
-		return runewidth.Truncate("⚠ preview: "+v.previewErr.Error(), w, "…")
+		return "⚠ preview: " + v.previewErr.Error()
 	default:
-		s := fmt.Sprintf("%d results · ↑/↓ navigate · tab switch view · esc quit", len(v.results))
-		return runewidth.Truncate(s, w, "…")
+		return fmt.Sprintf("%d results · ↑/↓ navigate · tab switch view · esc quit", len(v.results))
 	}
 }
