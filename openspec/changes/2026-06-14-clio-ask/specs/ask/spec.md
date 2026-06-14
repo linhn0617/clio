@@ -2,7 +2,7 @@
 
 ### Requirement: Retrieval-only evidence bundle for a question
 
-`clio ask` SHALL return a read-only, retrieval-only *evidence bundle* answering a
+`clio ask` SHALL return a retrieval-only *evidence bundle* answering a
 natural-language question from indexed history, performing no text generation and
 no network call. It SHALL extract content terms from the question, retrieve
 messages matching any term, group them by session, attach to each hit a window of

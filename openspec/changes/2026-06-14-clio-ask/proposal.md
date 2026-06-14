@@ -9,7 +9,7 @@ itself over multiple tool calls.
 
 ## What Changes
 
-- **Added** `clio ask "<question>"`: a read-only, retrieval-only command that
+- **Added** `clio ask "<question>"`: a retrieval-only command (no generation) that
   returns a cited *evidence bundle* over indexed history — the conversation
   excerpts most relevant to the question, each with a window of surrounding
   user/assistant turns, grouped by session and ranked. clio performs no text

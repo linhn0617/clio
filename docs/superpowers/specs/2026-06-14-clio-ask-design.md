@@ -81,7 +81,9 @@ Citation = short session id + title + project + date, so the user can
 - Empty question → CLI usage error / MCP error result.
 - Missing DB / empty index / no matches → a clean empty answer ("no relevant
   history found"), not an error.
-- Read-only connection (`db.OpenReadOnly`); `context` threaded throughout.
+- Incremental catch-up like `search` (`openForQuery`, which defers to a live MCP
+  server by opening read-only); `context` threaded throughout. A missing index is
+  an empty result; other stat failures surface.
 
 ## Testing (TDD, red→green)
 

@@ -7,7 +7,8 @@ session with citations and windowed excerpts. It SHALL accept `--project`
 (default: all projects), `--since`, `--limit` (max sessions), `--window <n>`
 (turns each side of a hit), and `--json`. An empty question SHALL be a usage error;
 a missing or empty index SHALL print an empty result and exit 0. The command SHALL
-open the index read-only.
+bring the index up to date with an incremental catch-up like `clio search`,
+deferring to a live MCP server (opening read-only) when one is running.
 
 #### Scenario: Ask prints a grouped, cited bundle
 

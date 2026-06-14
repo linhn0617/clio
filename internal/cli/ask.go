@@ -13,7 +13,6 @@ import (
 
 	"github.com/linhn0617/clio/internal/ask"
 	"github.com/linhn0617/clio/internal/config"
-	"github.com/linhn0617/clio/internal/db"
 )
 
 func newAskCmd() *cobra.Command {
@@ -50,9 +49,10 @@ func newAskCmd() *cobra.Command {
 				return err
 			}
 			if _, statErr := os.Stat(dbPath); statErr == nil {
-				// Read-only: ask never ingests or mutates (works on a read-only FS,
-				// no write contention with a running MCP server).
-				database, err := db.OpenReadOnly(dbPath)
+				// Like search/list/show: a quick incremental catch-up so the answer
+				// reflects the latest sessions; openForQuery defers to a live MCP
+				// server (opens read-only) to avoid write contention.
+				database, err := openForQuery()
 				if err != nil {
 					return err
 				}

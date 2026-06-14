@@ -18,7 +18,8 @@
 
 - [x] 2.1 `clio ask` command (TDD): `--project` (default all), `--since`,
   `--limit`, `--window`, `--json`; readable grouped bundle; empty question →
-  usage error; empty/missing index → clean empty answer; read-only connection.
+  usage error; empty/missing index → clean empty answer; incremental catch-up like
+  `search` (defers to a live MCP server).
 - [x] 2.2 `ask` MCP tool (TDD): params question/project/since/limit; structured
   JSON bundle; read-only annotation; registered in the server.
 
