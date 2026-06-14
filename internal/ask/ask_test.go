@@ -2,12 +2,32 @@ package ask
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/linhn0617/clio/internal/db"
 )
+
+// The bundle is a public JSON contract (clio ask --json); keys are snake_case.
+func TestAnswerJSONUsesSnakeCase(t *testing.T) {
+	a := Answer{
+		Question: "q",
+		Groups:   []EvidenceGroup{{SessionUUID: "s", Excerpts: []Excerpt{{IsHit: true}}}},
+	}
+	b, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(b)
+	for _, key := range []string{`"question"`, `"groups"`, `"session_uuid"`, `"excerpts"`, `"is_hit"`} {
+		if !strings.Contains(out, key) {
+			t.Fatalf("missing key %s in %s", key, out)
+		}
+	}
+}
 
 func testDB(t *testing.T) *db.DB {
 	t.Helper()

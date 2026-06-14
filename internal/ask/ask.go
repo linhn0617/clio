@@ -33,27 +33,27 @@ type Options struct {
 // windowed, cited excerpts for the caller to synthesize from. clio performs no
 // generation.
 type Answer struct {
-	Question string
-	Groups   []EvidenceGroup
+	Question string          `json:"question"`
+	Groups   []EvidenceGroup `json:"groups"`
 }
 
 // EvidenceGroup is one session's contribution, with a citation.
 type EvidenceGroup struct {
-	SessionUUID string
-	Title       string
-	Project     string
-	EndedAt     int64
-	Score       float64
-	Excerpts    []Excerpt
+	SessionUUID string    `json:"session_uuid"`
+	Title       string    `json:"title"`
+	Project     string    `json:"project"`
+	EndedAt     int64     `json:"ended_at"`
+	Score       float64   `json:"score"`
+	Excerpts    []Excerpt `json:"excerpts"`
 }
 
 // Excerpt is one message in a window; IsHit marks the ones that matched the query.
 type Excerpt struct {
-	Seq   int
-	TS    int64
-	Role  string
-	Text  string
-	IsHit bool
+	Seq   int    `json:"seq"`
+	TS    int64  `json:"ts"`
+	Role  string `json:"role"`
+	Text  string `json:"text"`
+	IsHit bool   `json:"is_hit"`
 }
 
 // Ask builds the evidence bundle for a natural-language question: extract content
