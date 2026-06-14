@@ -1,0 +1,156 @@
+package tui
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/linhn0617/clio/internal/db"
+	"github.com/linhn0617/clio/internal/sessions"
+)
+
+func addTarget(t *testing.T, d *db.DB, sess, kind, value string) {
+	t.Helper()
+	if _, err := d.Exec(`INSERT INTO tool_targets(message_id, session_uuid, ts, kind, value) VALUES (0,?,?,?,?)`,
+		sess, time.Now().Unix(), kind, value); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func aUpdate(t *testing.T, v activityView, msg tea.Msg) (activityView, tea.Cmd) {
+	t.Helper()
+	return v.Update(msg)
+}
+
+// load aggregates the top values of the current kind (files by default).
+func TestActivityViewLoad(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	addSession(t, d, "s2", "/p")
+	addTarget(t, d, "s1", "file", "/a/b.go")
+	addTarget(t, d, "s2", "file", "/a/b.go")
+	addTarget(t, d, "s1", "file", "/c.go")
+	v := activityView{db: d}
+	msg := v.load()()
+	al, ok := msg.(activityLoadedMsg)
+	if !ok {
+		t.Fatalf("load should emit activityLoadedMsg, got %T", msg)
+	}
+	if al.err != nil || al.kind != "file" || len(al.entries) != 2 {
+		t.Fatalf("load result wrong: kind=%s entries=%+v err=%v", al.kind, al.entries, al.err)
+	}
+	if al.entries[0].Value != "/a/b.go" || al.entries[0].Count != 2 {
+		t.Fatalf("top entry should be /a/b.go x2, got %+v", al.entries[0])
+	}
+}
+
+// Loaded entries for the current kind populate the list and schedule a drill;
+// a load for a different kind is ignored.
+func TestActivityViewLoadedPopulates(t *testing.T) {
+	v := activityView{db: testDB(t)}
+	v, cmd := aUpdate(t, v, activityLoadedMsg{kind: "file", entries: []sessions.ActivityCount{{Value: "/a", Count: 2}}})
+	if !v.loaded || len(v.entries) != 1 || v.selected != 0 {
+		t.Fatalf("entries not populated: %+v", v)
+	}
+	if cmd == nil {
+		t.Fatal("loading entries should schedule a drill of the first")
+	}
+	v2, _ := aUpdate(t, v, activityLoadedMsg{kind: "command", entries: nil})
+	if len(v2.entries) != 1 {
+		t.Fatal("a load for a non-current kind should be ignored")
+	}
+}
+
+// Left/right cycles the kind and reloads.
+func TestActivityViewKindSwitch(t *testing.T) {
+	v := activityView{db: testDB(t)}
+	if v.currentKind() != "file" {
+		t.Fatalf("default kind should be file, got %q", v.currentKind())
+	}
+	v, cmd := aUpdate(t, v, key(tea.KeyRight))
+	if v.currentKind() != "command" {
+		t.Fatalf("right should advance to command, got %q", v.currentKind())
+	}
+	if v.loaded {
+		t.Fatal("switching kind should reset the loaded flag")
+	}
+	if cmd == nil {
+		t.Fatal("switching kind should reload entries")
+	}
+	v, _ = aUpdate(t, v, key(tea.KeyLeft))
+	if v.currentKind() != "file" {
+		t.Fatalf("left should return to file, got %q", v.currentKind())
+	}
+}
+
+// j/k navigate the entry list (clamped) and schedule a drill.
+func TestActivityViewNavigation(t *testing.T) {
+	v := activityView{db: testDB(t), entries: []sessions.ActivityCount{{Value: "a"}, {Value: "b"}, {Value: "c"}}}
+	v, cmd := aUpdate(t, v, runes("j"))
+	if v.selected != 1 || cmd == nil {
+		t.Fatalf("'j' should move down and drill, selected=%d cmd=%v", v.selected, cmd)
+	}
+	v, _ = aUpdate(t, v, runes("j"))
+	v, _ = aUpdate(t, v, runes("j")) // clamp
+	if v.selected != 2 {
+		t.Fatalf("selection should clamp at last, got %d", v.selected)
+	}
+}
+
+// The drill command lists the sessions that touched the selected file.
+func TestActivityViewDrillCmdFilters(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	addTarget(t, d, "s1", "file", "/a/b.go")
+	v := activityView{db: d, entries: []sessions.ActivityCount{{Value: "/a/b.go", Count: 1}}}
+	msg := v.drillCmd()()
+	ad, ok := msg.(activityDrillMsg)
+	if !ok {
+		t.Fatalf("drillCmd should emit activityDrillMsg, got %T", msg)
+	}
+	if ad.err != nil || ad.value != "/a/b.go" || len(ad.sessions) != 1 || ad.sessions[0].UUID != "s1" {
+		t.Fatalf("drill result wrong: %+v err=%v", ad.sessions, ad.err)
+	}
+}
+
+// Drill results for the selected entry populate the pane; stale ones are ignored.
+func TestActivityViewDrillResults(t *testing.T) {
+	v := activityView{entries: []sessions.ActivityCount{{Value: "/a/b.go"}}}
+	v, _ = aUpdate(t, v, activityDrillMsg{value: "/a/b.go", sessions: []sessions.Session{{UUID: "s1"}}})
+	if len(v.drill) != 1 {
+		t.Fatalf("drill not populated: %+v", v.drill)
+	}
+	v2, _ := aUpdate(t, v, activityDrillMsg{value: "other"})
+	if len(v2.drill) != 1 {
+		t.Fatal("stale drill should be ignored")
+	}
+}
+
+// View shows the activity entries, the drilled sessions, and the current kind.
+func TestActivityViewRenders(t *testing.T) {
+	v := activityView{
+		width: 100, height: 30, loaded: true,
+		entries: []sessions.ActivityCount{{Value: "/a/b.go", Count: 3}},
+		drill:   []sessions.Session{{UUID: "abcd1234", Title: "Edit b.go"}},
+	}
+	out := v.View()
+	if !strings.Contains(out, "/a/b.go") {
+		t.Fatalf("view should show the activity value: %q", out)
+	}
+	if !strings.Contains(out, "Edit b.go") {
+		t.Fatalf("view should show the drilled session: %q", out)
+	}
+	if !strings.Contains(out, "files") {
+		t.Fatalf("status should name the current kind: %q", out)
+	}
+}
+
+// A loaded but empty kind shows an empty state.
+func TestActivityViewEmptyState(t *testing.T) {
+	v := activityView{width: 80, height: 24, loaded: true}
+	if !strings.Contains(v.View(), "No activity") {
+		t.Fatalf("loaded-but-empty activity should show an empty state: %q", v.View())
+	}
+}
