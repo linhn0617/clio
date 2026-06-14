@@ -27,5 +27,6 @@
 
 - [x] 3.1 `go build/vet/test ./...` green (incl. `-race` + windows cross-build);
   `openspec validate --strict`.
-- [ ] 3.2 Third-party (codex) review of the real implementation diff; fix
-  findings; re-review to a clean gate.
+- [x] 3.2 Third-party (codex) review of the real implementation diff; fix
+  findings; re-review to a clean gate (10 rounds: CJK recall, FTS/LIKE tiering,
+  ranking, JSON shape, error handling, empty-question, catch-up; round 10 clean).
