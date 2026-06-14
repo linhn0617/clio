@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/linhn0617/clio/internal/sessions"
 )
 
 func step(t *testing.T, m Model, msg tea.Msg) Model {
@@ -15,6 +17,16 @@ func step(t *testing.T, m Model, msg tea.Msg) Model {
 
 func key(s tea.KeyType) tea.KeyMsg { return tea.KeyMsg{Type: s} }
 func runes(s string) tea.KeyMsg    { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
+
+// isQuit reports whether a command resolves to tea.Quit. Only call it on commands
+// expected to be a quit (tea.Quit resolves instantly).
+func isQuit(cmd tea.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	_, ok := cmd().(tea.QuitMsg)
+	return ok
+}
 
 func TestRootTabNavigation(t *testing.T) {
 	m := New(nil)
@@ -29,17 +41,12 @@ func TestRootTabNavigation(t *testing.T) {
 	if m.active != tabSearch {
 		t.Fatalf("Shift-Tab should return to Search, got %d", m.active)
 	}
-	// Tab wraps around at the end.
+	// Tab wraps around at the end, regardless of input focus.
 	for range int(tabCount) {
 		m = step(t, m, key(tea.KeyTab))
 	}
 	if m.active != tabSearch {
 		t.Fatalf("Tab should wrap back to Search, got %d", m.active)
-	}
-	// Number keys jump directly.
-	m = step(t, m, runes("3"))
-	if m.active != tabActivity {
-		t.Fatalf("'3' should select Activity, got %d", m.active)
 	}
 }
 
@@ -54,14 +61,87 @@ func TestRootViewMarksActiveTab(t *testing.T) {
 	}
 }
 
-func TestRootQuit(t *testing.T) {
-	for _, msg := range []tea.Msg{runes("q"), key(tea.KeyCtrlC)} {
-		_, cmd := New(nil).Update(msg)
-		if cmd == nil {
-			t.Fatalf("%v should return a command", msg)
+// Ctrl-C and Esc quit from any tab, focused or not.
+func TestRootGlobalQuit(t *testing.T) {
+	tabs := []Model{New(nil), step(t, New(nil), key(tea.KeyTab))} // Search, Browse
+	for _, m := range tabs {
+		for _, k := range []tea.Msg{key(tea.KeyCtrlC), key(tea.KeyEsc)} {
+			if _, cmd := m.Update(k); !isQuit(cmd) {
+				t.Fatalf("%v should quit on tab %d", k, m.active)
+			}
 		}
-		if _, ok := cmd().(tea.QuitMsg); !ok {
-			t.Fatalf("%v should produce tea.QuitMsg, got %T", msg, cmd())
-		}
+	}
+}
+
+// 'q' quits only on a list tab; on an input tab it is query text.
+func TestRootFocusAwareQuit(t *testing.T) {
+	// Search (input focused): 'q' is query text, not a quit.
+	m := step(t, New(nil), runes("q"))
+	if m.active != tabSearch || m.search.query != "q" {
+		t.Fatalf("'q' on Search should be query text; active=%d query=%q", m.active, m.search.query)
+	}
+	// Browse (no input): 'q' quits.
+	mb := step(t, New(nil), key(tea.KeyTab))
+	if _, cmd := mb.Update(runes("q")); !isQuit(cmd) {
+		t.Fatal("'q' on the Browse tab should quit")
+	}
+}
+
+// Number keys jump tabs only when no input is focused.
+func TestRootDigitsFocusAware(t *testing.T) {
+	// Browse (no input): '3' jumps to Activity.
+	mb := step(t, step(t, New(nil), key(tea.KeyTab)), runes("3"))
+	if mb.active != tabActivity {
+		t.Fatalf("'3' on a list tab should select Activity, got %d", mb.active)
+	}
+	// Search (input focused): '3' is query text, tab unchanged.
+	ms := step(t, New(nil), runes("3"))
+	if ms.active != tabSearch || ms.search.query != "3" {
+		t.Fatalf("'3' on Search should be query text; active=%d query=%q", ms.active, ms.search.query)
+	}
+}
+
+// Non-global keys reach the active sub-view.
+func TestRootRoutesKeysToActiveView(t *testing.T) {
+	m := step(t, New(nil), runes("auth"))
+	if m.search.query != "auth" {
+		t.Fatalf("typing should reach the search view: %q", m.search.query)
+	}
+	mb := New(nil)
+	mb.browse.sessions = []sessions.Session{{UUID: "s1"}, {UUID: "s2"}}
+	mb.active = tabBrowse
+	mb = step(t, mb, runes("j"))
+	if mb.browse.selected != 1 {
+		t.Fatalf("j on Browse should move selection, got %d", mb.browse.selected)
+	}
+}
+
+// Async/data messages route to their view regardless of the active tab.
+func TestRootRoutesDataToAllViews(t *testing.T) {
+	m := New(nil) // active Search
+	m = step(t, m, browseLoadedMsg{sessions: []sessions.Session{{UUID: "s1"}}})
+	if len(m.browse.sessions) != 1 {
+		t.Fatalf("data messages should route to their view regardless of active tab: %+v", m.browse.sessions)
+	}
+}
+
+// The window size is recorded and forwarded to sub-views minus the tab-bar row.
+func TestRootForwardsWindowSize(t *testing.T) {
+	m := step(t, New(nil), tea.WindowSizeMsg{Width: 120, Height: 40})
+	if m.width != 120 || m.height != 40 {
+		t.Fatalf("root should record size: %dx%d", m.width, m.height)
+	}
+	if m.search.height != 39 {
+		t.Fatalf("sub-views should be sized below the tab bar, got %d", m.search.height)
+	}
+}
+
+// The root view includes the active sub-view's rendering.
+func TestRootViewIncludesActiveView(t *testing.T) {
+	m := New(nil)
+	m.active = tabBrowse
+	m.browse.loaded = true // empty index → "No sessions."
+	if !strings.Contains(m.View(), "No sessions") {
+		t.Fatalf("root view should include the active sub-view: %q", m.View())
 	}
 }
