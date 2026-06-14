@@ -2,6 +2,8 @@
 package mcp
 
 import (
+	"fmt"
+
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
@@ -16,10 +18,10 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		"clio", version,
 		server.WithToolCapabilities(false),
 		server.WithRecovery(),
-		server.WithInstructions("clio exposes your Claude Code conversation history. Use `search` to find past discussions, `read_session` to read one in full, `list_sessions` to browse, and `activity_summary` for what you worked on over a period."),
+		server.WithInstructions("clio exposes your Claude Code conversation history. Use `ask` to get a cited bundle of past excerpts answering a question (then synthesize the answer yourself), `search` to find past discussions, `read_session` to read one in full, `list_sessions` to browse, and `activity_summary` for what you worked on over a period."),
 	)
 
-	// All four tools query the local session index — read-only, non-destructive,
+	// All five tools query the local session index — read-only, non-destructive,
 	// non-open-world. Without these annotations, MCP clients default to the
 	// least-safe assumption (destructive + open-world) and surface scary tags.
 	s.AddTool(mcp.NewTool("search",
@@ -35,6 +37,18 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithNumber("limit", mcp.Description("Max results (default 10, max 50)"), mcp.DefaultNumber(defaultSearchLimit), mcp.Min(1), mcp.Max(maxSearchLimit)),
 		mcp.WithBoolean("include_tool_output", mcp.Description("Include tool output in results"), mcp.DefaultBool(false)),
 	), handleSearch(database, beforeRead))
+
+	s.AddTool(mcp.NewTool("ask",
+		mcp.WithDescription("Answer a question from past conversations. Returns a cited evidence bundle — the most relevant excerpts, each with a window of surrounding turns, grouped by session. clio does not generate an answer; synthesize it yourself from the excerpts and cite the session ids."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
+		mcp.WithString("question", mcp.Required(), mcp.Description("The natural-language question to answer from history")),
+		mcp.WithString("since", mcp.Description("Only consider sessions since: 7d, 12h, 30m, or YYYY-MM-DD")),
+		mcp.WithString("project", mcp.Description("Limit to a project path prefix (default: all projects)")),
+		mcp.WithNumber("limit", mcp.Description(fmt.Sprintf("Max sessions in the bundle (default %d, max %d)", defaultAskSessions, maxAskSessions)), mcp.DefaultNumber(defaultAskSessions), mcp.Min(1), mcp.Max(maxAskSessions)),
+	), handleAsk(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("list_sessions",
 		mcp.WithDescription("List past sessions, most recent first, with optional filters."),

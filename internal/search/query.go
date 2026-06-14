@@ -17,6 +17,7 @@ type Options struct {
 	Touched           string // restrict to sessions whose tool calls touched this path prefix
 	Tool              string // restrict to sessions that used this tool (exact name)
 	Ran               string // restrict to sessions that ran a command containing this substring
+	MaxPerSession     int    // cap candidates per session in Retrieve (0 = no cap)
 }
 
 // Result is one matched message.
@@ -67,12 +68,19 @@ func partitionTerms(ts []string) (long, short []string) {
 	return
 }
 
-// buildMatchQuery turns terms into an operator-safe FTS5 MATCH expression: each
-// term is a quoted phrase (embedded " doubled), joined by spaces (AND).
-func buildMatchQuery(terms []string) string {
+// quotedTerms wraps each term as an operator-safe FTS5 phrase (embedded " doubled),
+// neutralizing FTS operators. Shared by the AND (buildMatchQuery) and OR
+// (buildAnyMatchQuery) builders so the escaping can't drift between them.
+func quotedTerms(terms []string) []string {
 	parts := make([]string, 0, len(terms))
 	for _, t := range terms {
 		parts = append(parts, `"`+strings.ReplaceAll(t, `"`, `""`)+`"`)
 	}
-	return strings.Join(parts, " ")
+	return parts
+}
+
+// buildMatchQuery turns terms into an operator-safe FTS5 MATCH expression: each
+// term is a quoted phrase, joined by spaces (AND).
+func buildMatchQuery(terms []string) string {
+	return strings.Join(quotedTerms(terms), " ")
 }
