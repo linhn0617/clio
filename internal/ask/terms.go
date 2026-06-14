@@ -3,7 +3,10 @@
 // call: the cited excerpts are returned for the caller to synthesize from.
 package ask
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // cjkGram is the CJK expansion width; it matches the FTS trigram tokenizer so an
 // unspaced Chinese question still hits the index. It is also coupled to
@@ -12,11 +15,16 @@ import "strings"
 // shift which CJK grams are searchable.
 const cjkGram = 3
 
-// maxTerms caps the extracted term count. A long pasted question (especially an
-// unspaced CJK paragraph, which expands into one gram per character) would
-// otherwise build an FTS OR expression past SQLite's hard depth limit (1000) and
-// a wide per-row LIKE scan; the first maxTerms grams are a sufficient basis.
-const maxTerms = 64
+// A long pasted question (especially an unspaced CJK paragraph, which expands into
+// one gram per character) would otherwise build an FTS OR expression past SQLite's
+// hard depth limit (1000) and a wide per-row LIKE scan. The long (FTS) and short
+// (LIKE) tiers are capped separately so truncation never starves one — in
+// particular 2-rune CJK keywords stay reachable via the LIKE tier.
+const (
+	maxLongTerms  = 48 // trigrams -> FTS OR; well under SQLite's depth limit
+	maxShortTerms = 16 // bigrams / short -> LIKE width
+	maxTerms      = maxLongTerms + maxShortTerms
+)
 
 // extractTerms reduces a natural-language question to the content terms used for
 // retrieval: lowercased, surrounding punctuation trimmed, stopwords removed, and
@@ -41,11 +49,24 @@ func extractTerms(question string) []string {
 			content = append(content, expand(t, true)...)
 		}
 	}
-	out := dedupe(content)
-	if len(out) > maxTerms {
-		out = out[:maxTerms]
+	return capTerms(dedupe(content))
+}
+
+// capTerms bounds the term set, capping the long (>=3-rune, FTS) and short (<3,
+// LIKE) tiers separately so a long paste can't over-deepen the FTS OR or over-widen
+// the LIKE scan, and truncation never drops a whole tier.
+func capTerms(terms []string) []string {
+	var long, short []string
+	for _, t := range terms {
+		if utf8.RuneCountInString(t) >= 3 {
+			if len(long) < maxLongTerms {
+				long = append(long, t)
+			}
+		} else if len(short) < maxShortTerms {
+			short = append(short, t)
+		}
 	}
-	return out
+	return append(long, short...)
 }
 
 // expand passes a non-CJK token through unchanged, and splits a CJK-bearing token

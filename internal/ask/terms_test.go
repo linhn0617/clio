@@ -4,14 +4,40 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
+
+// distinctCJK builds a run of n distinct CJK runes (so de-dup doesn't collapse the
+// gram set — that's what actually exercises the term cap).
+func distinctCJK(n int) string {
+	var b strings.Builder
+	for i := range n {
+		b.WriteRune(rune(0x4E00 + i))
+	}
+	return b.String()
+}
 
 // A very long (e.g. pasted) question must not produce an unbounded term set: the
 // FTS OR expression has a hard depth limit, so extractTerms caps the term count.
 func TestExtractTermsCapsCount(t *testing.T) {
-	long := strings.Repeat("資料庫遷移驗證流程設計效能調校", 80) // long unspaced CJK paste
-	if got := extractTerms(long); len(got) > maxTerms {
+	if got := extractTerms(distinctCJK(200)); len(got) > maxTerms {
 		t.Fatalf("expected at most %d terms, got %d", maxTerms, len(got))
+	}
+}
+
+// The cap must keep both tiers: even a long run (64+ trigrams) must retain some
+// bigrams so 2-rune CJK keywords still reach the LIKE fallback.
+func TestExtractTermsCapKeepsBigrams(t *testing.T) {
+	got := extractTerms(distinctCJK(200))
+	hasBigram := false
+	for _, term := range got {
+		if utf8.RuneCountInString(term) == 2 {
+			hasBigram = true
+			break
+		}
+	}
+	if !hasBigram {
+		t.Fatalf("cap dropped all bigrams; 2-rune keywords would be unreachable: %v", got)
 	}
 }
 
