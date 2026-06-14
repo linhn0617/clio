@@ -5,22 +5,86 @@ package ask
 
 import "strings"
 
+// cjkGram is the CJK expansion width; it matches the FTS trigram tokenizer so an
+// unspaced Chinese question still hits the index.
+const cjkGram = 3
+
 // extractTerms reduces a natural-language question to the content terms used for
 // retrieval: lowercased, surrounding punctuation trimmed, stopwords removed, and
-// de-duplicated in first-seen order. When the question is nothing but stopwords it
-// falls back to all terms, so retrieval is never run on an empty set.
+// de-duplicated in first-seen order. Unspaced CJK runs are expanded into
+// overlapping trigrams (Chinese is written without spaces, so a whole sentence is
+// one whitespace token; matching it as one phrase would only find near-exact
+// substrings). When the question is nothing but stopwords it falls back to all
+// terms, so retrieval is never run on an empty set.
 func extractTerms(question string) []string {
 	raw := splitTerms(question)
 	content := make([]string, 0, len(raw))
 	for _, t := range raw {
 		if !stopwords[t] {
-			content = append(content, t)
+			content = append(content, expandTerm(t)...)
 		}
 	}
 	if len(content) == 0 {
-		return dedupe(raw)
+		for _, t := range raw {
+			content = append(content, expandTerm(t)...)
+		}
 	}
 	return dedupe(content)
+}
+
+// expandTerm passes a non-CJK token through unchanged, but splits a token that
+// contains CJK into its CJK and non-CJK runs: a CJK run of >= cjkGram runes
+// becomes overlapping cjkGram-grams (so partial mentions still match the trigram
+// index), a shorter CJK run is kept whole (the LIKE fallback handles it), and a
+// non-CJK run is trimmed and kept unless it is a stopword.
+func expandTerm(t string) []string {
+	if !hasCJK(t) {
+		return []string{t}
+	}
+	var out []string
+	runes := []rune(t)
+	for i := 0; i < len(runes); {
+		if isCJK(runes[i]) {
+			j := i
+			for j < len(runes) && isCJK(runes[j]) {
+				j++
+			}
+			run := runes[i:j]
+			if len(run) >= cjkGram {
+				for k := 0; k+cjkGram <= len(run); k++ {
+					out = append(out, string(run[k:k+cjkGram]))
+				}
+			} else {
+				out = append(out, string(run))
+			}
+			i = j
+			continue
+		}
+		j := i
+		for j < len(runes) && !isCJK(runes[j]) {
+			j++
+		}
+		if seg := strings.Trim(string(runes[i:j]), punctCutset); seg != "" && !stopwords[seg] {
+			out = append(out, seg)
+		}
+		i = j
+	}
+	return out
+}
+
+// isCJK reports whether r is a CJK ideograph (Unified + Extension A), the scripts
+// clio's index is exercised with. Kana/Hangul are out of scope for v1.
+func isCJK(r rune) bool {
+	return (r >= 0x4E00 && r <= 0x9FFF) || (r >= 0x3400 && r <= 0x4DBF)
+}
+
+func hasCJK(s string) bool {
+	for _, r := range s {
+		if isCJK(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // punctCutset is trimmed from the ends of each token (ASCII + common full-width

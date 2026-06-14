@@ -25,8 +25,10 @@ type Candidate struct {
 // hits ranked by adjusted score (bm25 + recency/role). A message matching ANY term
 // qualifies — unlike Search, which ANDs all terms — preserving recall for the
 // many-term queries a natural-language question produces. Long terms (>=3 runes)
-// drive an FTS OR match; an all-short query falls back to an OR of substring LIKEs.
-// Mixed queries retrieve on the long terms (short terms refine ranking, not recall).
+// drive an FTS OR match and short terms an OR of substring LIKEs; both run and
+// their hits merge (dedup by session+seq, keeping the higher score), so a short
+// discriminator (a 2-rune CJK word, "go", "v2") still contributes to recall in a
+// mixed query rather than being dropped.
 func Retrieve(ctx context.Context, database *db.DB, opt Options) ([]Candidate, error) {
 	if opt.Limit <= 0 {
 		opt.Limit = 60
@@ -37,34 +39,57 @@ func Retrieve(ctx context.Context, database *db.DB, opt Options) ([]Candidate, e
 	}
 	long, short := partitionTerms(ts)
 
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if len(long) > 0 {
-		rows, err = anyMatchQuery(ctx, database, opt, long)
-	} else {
-		rows, err = anyLikeQuery(ctx, database, opt, short)
+	type key struct {
+		sess string
+		seq  int
 	}
-	if err != nil {
-		return nil, err
+	byKey := map[key]Candidate{}
+	scan := func(rows *sql.Rows, err error) error {
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var c Candidate
+			var bm float64
+			if err := rows.Scan(&c.SessionUUID, &c.ProjectPath, &c.Seq, &c.TS, &c.Role, &c.Snippet, &bm); err != nil {
+				return err
+			}
+			c.Score = adjustedScore(bm, c.Role, c.TS)
+			k := key{c.SessionUUID, c.Seq}
+			if prev, ok := byKey[k]; !ok || c.Score > prev.Score {
+				byKey[k] = c
+			}
+		}
+		return rows.Err()
 	}
-	defer rows.Close()
 
-	var out []Candidate
-	for rows.Next() {
-		var c Candidate
-		var bm float64
-		if err := rows.Scan(&c.SessionUUID, &c.ProjectPath, &c.Seq, &c.TS, &c.Role, &c.Snippet, &bm); err != nil {
+	if len(long) > 0 {
+		if err := scan(anyMatchQuery(ctx, database, opt, long)); err != nil {
 			return nil, err
 		}
-		c.Score = adjustedScore(bm, c.Role, c.TS)
+	}
+	if len(short) > 0 {
+		if err := scan(anyLikeQuery(ctx, database, opt, short)); err != nil {
+			return nil, err
+		}
+	}
+
+	out := make([]Candidate, 0, len(byKey))
+	for _, c := range byKey {
 		out = append(out, c)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	// Deterministic order: score desc, then session/seq so ties don't depend on
+	// map iteration order.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Score != out[j].Score {
+			return out[i].Score > out[j].Score
+		}
+		if out[i].SessionUUID != out[j].SessionUUID {
+			return out[i].SessionUUID < out[j].SessionUUID
+		}
+		return out[i].Seq < out[j].Seq
+	})
 	if len(out) > opt.Limit {
 		out = out[:opt.Limit]
 	}

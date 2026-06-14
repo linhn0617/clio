@@ -34,6 +34,29 @@ func TestRetrieveAnyTermMatchesEitherTerm(t *testing.T) {
 	}
 }
 
+// TestRetrieveIncludesShortTermsInMixedQuery guards the codex P2: a query mixing a
+// long term with a short discriminator must still retrieve a message that matches
+// only the short term — not collapse to the long-term-only candidate set.
+func TestRetrieveIncludesShortTermsInMixedQuery(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	now := time.Now().Unix()
+	addMsg(t, d, "s1", 0, "assistant", "the authentication layer is solid", now) // long "authentication"
+	addMsg(t, d, "s1", 1, "assistant", "we use go for the worker", now)          // short "go" only
+
+	cands, err := Retrieve(context.Background(), d, Options{Query: "authentication go", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seqs []int
+	for _, c := range cands {
+		seqs = append(seqs, c.Seq)
+	}
+	if len(cands) != 2 {
+		t.Fatalf("mixed long+short should retrieve both messages, got %d: seqs %v", len(cands), seqs)
+	}
+}
+
 // TestRetrievePopulatesSeq verifies candidates carry the in-session seq used for
 // windowing.
 func TestRetrievePopulatesSeq(t *testing.T) {

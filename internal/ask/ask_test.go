@@ -56,6 +56,18 @@ func addMsg(t *testing.T, d *db.DB, sess string, seq int, role, content string) 
 	}
 }
 
+// Session ranking rewards combined hit strength, not just the single best line:
+// three solid hits out-rank one slightly-stronger hit, but extra hits beyond K
+// don't inflate the score.
+func TestTopKSumRewardsMultipleHits(t *testing.T) {
+	if multi, single := topKSum([]float64{1, 1, 1}, 3), topKSum([]float64{2}, 3); !(multi > single) {
+		t.Fatalf("multi-hit session (%v) should out-rank single-hit (%v)", multi, single)
+	}
+	if got := topKSum([]float64{5, 1, 1, 1, 1}, 2); got != 6 {
+		t.Fatalf("top-2 of [5,1,1,1,1] = %v, want 6", got)
+	}
+}
+
 func TestAskGroupsWindowsAndCites(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/proj", "Auth bug fix")

@@ -16,7 +16,8 @@ const (
 	defaultMaxSessions   = 6
 	defaultWindow        = 2
 	defaultMaxExcerptLen = 600
-	maxHitsPerSession    = 3 // bound the windows assembled per session
+	maxHitsPerSession    = 3   // bound the windows assembled per session
+	minCandidatePool     = 200 // floor on retrieved hits before session grouping
 )
 
 // Options controls a retrieval bundle.
@@ -77,11 +78,15 @@ func Ask(ctx context.Context, database *db.DB, opt Options) (Answer, error) {
 		return ans, nil
 	}
 
+	// A generous candidate pool (not tightly MaxSessions-scaled): grouping collapses
+	// these to sessions, and a pool that is too small lets one session repeating the
+	// query terms across many turns starve other relevant sessions out of the result.
+	pool := max(opt.MaxSessions*40, minCandidatePool)
 	cands, err := search.Retrieve(ctx, database, search.Options{
 		Query:         strings.Join(terms, " "),
 		Since:         opt.Since,
 		ProjectPrefix: opt.ProjectPrefix,
-		Limit:         opt.MaxSessions * 8, // overscan; grouping collapses to sessions
+		Limit:         pool,
 	})
 	if err != nil {
 		return ans, err
@@ -90,10 +95,10 @@ func Ask(ctx context.Context, database *db.DB, opt Options) (Answer, error) {
 		return ans, nil
 	}
 
-	// Group candidates by session, tracking each session's best hit score and the
-	// seqs that matched (in score order, since cands are pre-ranked).
+	// Group candidates by session, tracking each hit's score and seq (cands are
+	// pre-ranked by score).
 	type group struct {
-		best    float64
+		scores  []float64
 		hitSeqs []int
 	}
 	groups := map[string]*group{}
@@ -101,24 +106,33 @@ func Ask(ctx context.Context, database *db.DB, opt Options) (Answer, error) {
 	for _, c := range cands {
 		g := groups[c.SessionUUID]
 		if g == nil {
-			g = &group{best: c.Score}
+			g = &group{}
 			groups[c.SessionUUID] = g
 			order = append(order, c.SessionUUID)
 		}
-		if c.Score > g.best {
-			g.best = c.Score
-		}
+		g.scores = append(g.scores, c.Score)
 		g.hitSeqs = append(g.hitSeqs, c.Seq)
 	}
 
-	sort.SliceStable(order, func(i, j int) bool { return groups[order[i]].best > groups[order[j]].best })
+	// Rank sessions by combined hit strength (sum of the top hits), so a session
+	// with several relevant turns out-ranks one with a single slightly-stronger
+	// line. Deterministic tiebreak on uuid.
+	aggOf := make(map[string]float64, len(groups))
+	for uuid, g := range groups {
+		aggOf[uuid] = topKSum(g.scores, maxHitsPerSession)
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		if aggOf[order[i]] != aggOf[order[j]] {
+			return aggOf[order[i]] > aggOf[order[j]]
+		}
+		return order[i] < order[j]
+	})
 	if len(order) > opt.MaxSessions {
 		order = order[:opt.MaxSessions]
 	}
 
 	for _, uuid := range order {
-		g := groups[uuid]
-		eg, err := assembleGroup(ctx, database, uuid, g.best, g.hitSeqs, opt)
+		eg, err := assembleGroup(ctx, database, uuid, aggOf[uuid], groups[uuid].hitSeqs, opt)
 		if err != nil {
 			return ans, err
 		}
@@ -127,6 +141,18 @@ func Ask(ctx context.Context, database *db.DB, opt Options) (Answer, error) {
 		}
 	}
 	return ans, nil
+}
+
+// topKSum sums the k largest scores — a session's combined hit strength, bounded
+// so a verbose session can't inflate its rank with many weak hits.
+func topKSum(scores []float64, k int) float64 {
+	s := append([]float64(nil), scores...)
+	sort.Sort(sort.Reverse(sort.Float64Slice(s)))
+	sum := 0.0
+	for i := 0; i < len(s) && i < k; i++ {
+		sum += s[i]
+	}
+	return sum
 }
 
 // assembleGroup windows each hit (up to maxHitsPerSession), merges overlapping
