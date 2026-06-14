@@ -2,11 +2,25 @@ package cli
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/linhn0617/clio/internal/ask"
 )
+
+// On a machine that has not indexed yet, `clio ask` returns a clean empty result
+// and exits 0 — it must not error out the way a missing index does elsewhere.
+func TestAskMissingIndexIsEmptyNotError(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir()) // no clio db under here
+	cmd := newAskCmd()
+	cmd.SetArgs([]string{"anything at all"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("ask with no index should exit 0, got error: %v", err)
+	}
+}
 
 func TestWriteAnswerMarksHitsAndCites(t *testing.T) {
 	var buf bytes.Buffer

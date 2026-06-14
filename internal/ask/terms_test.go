@@ -100,4 +100,8 @@ func TestExtractTermsCJKAllStopwordFallback(t *testing.T) {
 	if got := extractTerms("我們 怎麼"); len(got) == 0 {
 		t.Fatalf("spaced all-stopword CJK question must fall back to non-empty terms, got %v", got)
 	}
+	// Single-rune CJK stopwords (no bigram available) must still fall back.
+	if got := extractTerms("我 嗎"); len(got) == 0 {
+		t.Fatalf("single-rune CJK stopword question must fall back to non-empty terms, got %v", got)
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/linhn0617/clio/internal/ask"
+	"github.com/linhn0617/clio/internal/config"
 )
 
 func newAskCmd() *cobra.Command {
@@ -37,21 +38,30 @@ func newAskCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			database, err := openForQuery()
+
+			// A missing index is a clean empty result, not an error (e.g. a fresh
+			// install that has not indexed yet).
+			ans := ask.Answer{Question: question}
+			dbPath, err := config.DBPath()
 			if err != nil {
 				return err
 			}
-			defer database.Close()
-
-			ans, err := ask.Ask(cmd.Context(), database, ask.Options{
-				Question:      question,
-				ProjectPrefix: project,
-				Since:         sinceTS,
-				MaxSessions:   limit,
-				Window:        window,
-			})
-			if err != nil {
-				return err
+			if _, statErr := os.Stat(dbPath); statErr == nil {
+				database, err := openForQuery()
+				if err != nil {
+					return err
+				}
+				defer database.Close()
+				ans, err = ask.Ask(cmd.Context(), database, ask.Options{
+					Question:      question,
+					ProjectPrefix: project,
+					Since:         sinceTS,
+					MaxSessions:   limit,
+					Window:        window,
+				})
+				if err != nil {
+					return err
+				}
 			}
 			if asJSON {
 				enc := json.NewEncoder(os.Stdout)

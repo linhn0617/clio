@@ -60,8 +60,15 @@ func expand(t string, raw bool) []string {
 				segs = segmentCJK(run)
 			}
 			for _, seg := range segs {
-				out = append(out, cjkGrams(seg, cjkGram)...)
-				out = append(out, cjkGrams(seg, 2)...)
+				g3 := cjkGrams(seg, cjkGram)
+				g2 := cjkGrams(seg, 2)
+				out = append(out, g3...)
+				out = append(out, g2...)
+				// Raw fallback: a lone CJK rune has no gram, so emit it directly to
+				// keep the all-stopword fallback non-empty (e.g. 我 / 嗎).
+				if raw && len(g3) == 0 && len(g2) == 0 && len(seg) > 0 {
+					out = append(out, string(seg))
+				}
 			}
 			i = j
 			continue
