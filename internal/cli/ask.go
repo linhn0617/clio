@@ -1,0 +1,94 @@
+package cli
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/linhn0617/clio/internal/ask"
+)
+
+func newAskCmd() *cobra.Command {
+	var (
+		since   string
+		project string
+		limit   int
+		window  int
+		asJSON  bool
+	)
+	cmd := &cobra.Command{
+		Use:   "ask <question>",
+		Short: "Answer a question from history — a cited, windowed evidence bundle (no generation)",
+		Long: "Retrieve the conversation excerpts most relevant to a question, each with a window of " +
+			"surrounding turns, grouped by session and cited. clio generates no answer and makes no " +
+			"network call; over MCP, Claude synthesizes from the bundle. By default it searches all " +
+			"projects.",
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			question := strings.TrimSpace(strings.Join(args, " "))
+			if question == "" {
+				return fmt.Errorf("a question is required")
+			}
+			sinceTS, err := parseSince(since)
+			if err != nil {
+				return err
+			}
+			database, err := openForQuery()
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+
+			ans, err := ask.Ask(cmd.Context(), database, ask.Options{
+				Question:      question,
+				ProjectPrefix: project,
+				Since:         sinceTS,
+				MaxSessions:   limit,
+				Window:        window,
+			})
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(ans)
+			}
+			writeAnswer(os.Stdout, ans)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&since, "since", "", "Only consider sessions since this time (e.g. 7d, 2026-05-01)")
+	cmd.Flags().StringVar(&project, "project", "", "Limit to a project path prefix (default: all projects)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "Maximum sessions in the bundle (default 6)")
+	cmd.Flags().IntVar(&window, "window", 0, "Dialogue turns to include each side of a match (default 2)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Output the bundle as JSON")
+	return cmd
+}
+
+// writeAnswer renders the evidence bundle as a readable, grouped digest: a
+// citation header per session, then its windowed excerpts with matched lines
+// marked. No prose answer is produced — that is the caller's to synthesize.
+func writeAnswer(w io.Writer, ans ask.Answer) {
+	if len(ans.Groups) == 0 {
+		fmt.Fprintln(w, "no relevant history found")
+		return
+	}
+	fmt.Fprintf(w, "clio ask — %q\n", ans.Question)
+	for _, g := range ans.Groups {
+		fmt.Fprintf(w, "\n[%s] %s  ·  %s  ·  %s\n",
+			shortID(g.SessionUUID), oneLine(g.Title, 60), trimProject(g.Project), formatTS(g.EndedAt))
+		for _, e := range g.Excerpts {
+			marker := "    "
+			if e.IsHit {
+				marker = "  » "
+			}
+			fmt.Fprintf(w, "%s[%s] %s\n", marker, e.Role, oneLine(e.Text, 200))
+		}
+	}
+	fmt.Fprintln(w, "\nNo answer is generated; synthesize from the excerpts above, or open one with `clio show <id>`.")
+}

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/linhn0617/clio/internal/db"
 )
@@ -171,6 +172,60 @@ func GetMessages(ctx context.Context, database *db.DB, sessionUUID string, offse
 		out = out[:limit]
 	}
 	return out, hasMore, nil
+}
+
+// GetWindow returns a conversational window around a retrieval hit: up to `before`
+// dialogue messages preceding the hit at hitSeq, the hit itself, and up to `after`
+// following ones, ordered by seq. The window is taken in user/assistant turn space
+// (when includeToolOutput is false), so tool_use/tool_result events between a
+// question and its answer neither consume the window nor appear in it.
+func GetWindow(ctx context.Context, database *db.DB, sessionUUID string, hitSeq, before, after int, includeToolOutput bool) ([]Message, error) {
+	if before < 0 {
+		before = 0
+	}
+	if after < 0 {
+		after = 0
+	}
+	roleClause := ""
+	if !includeToolOutput {
+		roleClause = " AND role IN ('user','assistant')"
+	}
+	const cols = `seq, COALESCE(ts,0), role, content, raw_json`
+
+	// The hit and preceding turns, newest-first, reversed to ascending.
+	pre, err := windowRows(ctx, database,
+		`SELECT `+cols+` FROM messages WHERE session_uuid = ?`+roleClause+` AND seq <= ? ORDER BY seq DESC LIMIT ?`,
+		sessionUUID, hitSeq, before+1)
+	if err != nil {
+		return nil, err
+	}
+	slices.Reverse(pre)
+
+	// Following turns, ascending.
+	post, err := windowRows(ctx, database,
+		`SELECT `+cols+` FROM messages WHERE session_uuid = ?`+roleClause+` AND seq > ? ORDER BY seq ASC LIMIT ?`,
+		sessionUUID, hitSeq, after)
+	if err != nil {
+		return nil, err
+	}
+	return append(pre, post...), nil
+}
+
+func windowRows(ctx context.Context, database *db.DB, query string, args ...any) ([]Message, error) {
+	rows, err := database.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.Seq, &m.TS, &m.Role, &m.Content, &m.RawJSON); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 // ActivityCount is one grouped activity value with its occurrence count.

@@ -1,0 +1,196 @@
+package ask
+
+import (
+	"context"
+	"sort"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/linhn0617/clio/internal/db"
+	"github.com/linhn0617/clio/internal/search"
+	"github.com/linhn0617/clio/internal/sessions"
+)
+
+// Defaults applied when an Option is left zero.
+const (
+	defaultMaxSessions   = 6
+	defaultWindow        = 2
+	defaultMaxExcerptLen = 600
+	maxHitsPerSession    = 3 // bound the windows assembled per session
+)
+
+// Options controls a retrieval bundle.
+type Options struct {
+	Question      string
+	ProjectPrefix string // "" = all projects
+	Since         int64  // unix seconds; 0 = no lower bound
+	MaxSessions   int    // cap on grouped sessions (default 6)
+	Window        int    // dialogue turns each side of a hit (default 2)
+	MaxExcerptLen int    // per-excerpt rune cap (default 600)
+}
+
+// Answer is the evidence bundle for a question: ranked sessions, each with
+// windowed, cited excerpts for the caller to synthesize from. clio performs no
+// generation.
+type Answer struct {
+	Question string
+	Groups   []EvidenceGroup
+}
+
+// EvidenceGroup is one session's contribution, with a citation.
+type EvidenceGroup struct {
+	SessionUUID string
+	Title       string
+	Project     string
+	EndedAt     int64
+	Score       float64
+	Excerpts    []Excerpt
+}
+
+// Excerpt is one message in a window; IsHit marks the ones that matched the query.
+type Excerpt struct {
+	Seq   int
+	TS    int64
+	Role  string
+	Text  string
+	IsHit bool
+}
+
+// Ask builds the evidence bundle for a natural-language question: extract content
+// terms, retrieve any-term matches, group by session, window each hit in dialogue
+// space, rank sessions by best hit score, and cap to the budget. Retrieval-only —
+// no generation, no network.
+func Ask(ctx context.Context, database *db.DB, opt Options) (Answer, error) {
+	ans := Answer{Question: opt.Question}
+	if opt.MaxSessions <= 0 {
+		opt.MaxSessions = defaultMaxSessions
+	}
+	if opt.Window <= 0 {
+		opt.Window = defaultWindow
+	}
+	if opt.MaxExcerptLen <= 0 {
+		opt.MaxExcerptLen = defaultMaxExcerptLen
+	}
+
+	terms := extractTerms(opt.Question)
+	if len(terms) == 0 {
+		return ans, nil
+	}
+
+	cands, err := search.Retrieve(ctx, database, search.Options{
+		Query:         strings.Join(terms, " "),
+		Since:         opt.Since,
+		ProjectPrefix: opt.ProjectPrefix,
+		Limit:         opt.MaxSessions * 8, // overscan; grouping collapses to sessions
+	})
+	if err != nil {
+		return ans, err
+	}
+	if len(cands) == 0 {
+		return ans, nil
+	}
+
+	// Group candidates by session, tracking each session's best hit score and the
+	// seqs that matched (in score order, since cands are pre-ranked).
+	type group struct {
+		best    float64
+		hitSeqs []int
+	}
+	groups := map[string]*group{}
+	var order []string
+	for _, c := range cands {
+		g := groups[c.SessionUUID]
+		if g == nil {
+			g = &group{best: c.Score}
+			groups[c.SessionUUID] = g
+			order = append(order, c.SessionUUID)
+		}
+		if c.Score > g.best {
+			g.best = c.Score
+		}
+		g.hitSeqs = append(g.hitSeqs, c.Seq)
+	}
+
+	sort.SliceStable(order, func(i, j int) bool { return groups[order[i]].best > groups[order[j]].best })
+	if len(order) > opt.MaxSessions {
+		order = order[:opt.MaxSessions]
+	}
+
+	for _, uuid := range order {
+		g := groups[uuid]
+		eg, err := assembleGroup(ctx, database, uuid, g.best, g.hitSeqs, opt)
+		if err != nil {
+			return ans, err
+		}
+		if len(eg.Excerpts) > 0 {
+			ans.Groups = append(ans.Groups, eg)
+		}
+	}
+	return ans, nil
+}
+
+// assembleGroup windows each hit (up to maxHitsPerSession), merges overlapping
+// windows into one ordered excerpt list, marks the hits, and attaches the session
+// citation.
+func assembleGroup(ctx context.Context, database *db.DB, uuid string, score float64, hitSeqs []int, opt Options) (EvidenceGroup, error) {
+	hitSet := make(map[int]bool, len(hitSeqs))
+	for _, s := range hitSeqs {
+		hitSet[s] = true
+	}
+
+	merged := map[int]sessions.Message{}
+	used := 0
+	for _, hs := range hitSeqs {
+		if used >= maxHitsPerSession {
+			break
+		}
+		used++
+		win, err := sessions.GetWindow(ctx, database, uuid, hs, opt.Window, opt.Window, false)
+		if err != nil {
+			return EvidenceGroup{}, err
+		}
+		for _, m := range win {
+			merged[m.Seq] = m
+		}
+	}
+
+	seqs := make([]int, 0, len(merged))
+	for s := range merged {
+		seqs = append(seqs, s)
+	}
+	sort.Ints(seqs)
+
+	eg := EvidenceGroup{SessionUUID: uuid, Score: score, Project: ""}
+	for _, s := range seqs {
+		m := merged[s]
+		eg.Excerpts = append(eg.Excerpts, Excerpt{
+			Seq:   m.Seq,
+			TS:    m.TS,
+			Role:  m.Role,
+			Text:  truncate(m.Content, opt.MaxExcerptLen),
+			IsHit: hitSet[s],
+		})
+	}
+
+	// Citation metadata: exact-uuid resolve returns title/project/ended_at.
+	if meta, err := sessions.ResolvePrefix(ctx, database, uuid); err == nil {
+		eg.Title = meta.Title
+		eg.Project = meta.ProjectPath
+		eg.EndedAt = meta.EndedAt
+	}
+	return eg, nil
+}
+
+// truncate caps s to n runes (UTF-8 safe), appending an ellipsis when cut.
+func truncate(s string, n int) string {
+	if n <= 0 || utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	i, count := 0, 0
+	for i < len(s) && count < n {
+		_, w := utf8.DecodeRuneInString(s[i:])
+		i += w
+		count++
+	}
+	return s[:i] + "…"
+}

@@ -1,0 +1,52 @@
+package search
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+// TestRetrieveAnyTermMatchesEitherTerm is the core recall guarantee for `ask`:
+// a message matching ANY query term is a candidate, even when no single message
+// contains all terms — exactly the case Search (all-terms AND) misses.
+func TestRetrieveAnyTermMatchesEitherTerm(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	now := time.Now().Unix()
+	addMsg(t, d, "s1", 0, "assistant", "we fixed the authentication race", now)  // "authentication"
+	addMsg(t, d, "s1", 1, "assistant", "the database migration was tricky", now) // "migration"
+
+	cands, err := Retrieve(context.Background(), d, Options{Query: "authentication migration", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 2 {
+		t.Fatalf("OR retrieve expected 2 candidates, got %d: %+v", len(cands), cands)
+	}
+
+	// Sanity: the all-terms AND search finds neither message.
+	res, err := Search(context.Background(), d, Options{Query: "authentication migration", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 0 {
+		t.Fatalf("AND search should find no single message with both terms, got %d", len(res))
+	}
+}
+
+// TestRetrievePopulatesSeq verifies candidates carry the in-session seq used for
+// windowing.
+func TestRetrievePopulatesSeq(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	now := time.Now().Unix()
+	addMsg(t, d, "s1", 5, "assistant", "unique zzzmarker here", now)
+
+	cands, err := Retrieve(context.Background(), d, Options{Query: "zzzmarker", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 1 || cands[0].Seq != 5 {
+		t.Fatalf("expected one candidate with seq=5, got %+v", cands)
+	}
+}

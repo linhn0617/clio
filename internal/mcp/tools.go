@@ -6,6 +6,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/linhn0617/clio/internal/ask"
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/search"
 	"github.com/linhn0617/clio/internal/sessions"
@@ -17,6 +18,8 @@ const (
 	maxSearchLimit     = 50
 	defaultReadLimit   = 50
 	maxReadLimit       = 200
+	defaultAskSessions = 6
+	maxAskSessions     = 10
 )
 
 // parseSince is the MCP-side wrapper: same parsing as the CLI, but a bad value
@@ -186,6 +189,54 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 			"messages": out,
 			"offset":   offset,
 			"has_more": hasMore,
+		})
+	}
+}
+
+func handleAsk(database *db.DB, beforeRead func()) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if beforeRead != nil {
+			beforeRead()
+		}
+		question, err := req.RequireString("question")
+		if err != nil {
+			return mcp.NewToolResultError("question is required"), nil
+		}
+		ans, err := ask.Ask(ctx, database, ask.Options{
+			Question:      question,
+			ProjectPrefix: req.GetString("project", ""),
+			Since:         parseSince(req.GetString("since", "")),
+			MaxSessions:   clamp(req.GetInt("limit", defaultAskSessions), defaultAskSessions, maxAskSessions),
+		})
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		type excerpt struct {
+			Seq   int    `json:"seq"`
+			TS    string `json:"timestamp"`
+			Role  string `json:"role"`
+			Text  string `json:"text"`
+			IsHit bool   `json:"is_hit"`
+		}
+		type group struct {
+			SessionUUID string    `json:"session_uuid"`
+			Title       string    `json:"title"`
+			Project     string    `json:"project"`
+			EndedAt     string    `json:"ended_at"`
+			Excerpts    []excerpt `json:"excerpts"`
+		}
+		groups := make([]group, 0, len(ans.Groups))
+		for _, g := range ans.Groups {
+			ex := make([]excerpt, 0, len(g.Excerpts))
+			for _, e := range g.Excerpts {
+				ex = append(ex, excerpt{e.Seq, tsString(e.TS), e.Role, e.Text, e.IsHit})
+			}
+			groups = append(groups, group{g.SessionUUID, g.Title, g.Project, tsString(g.EndedAt), ex})
+		}
+		return mcp.NewToolResultJSON(map[string]any{
+			"question": ans.Question,
+			"groups":   groups,
+			"count":    len(groups),
 		})
 	}
 }
