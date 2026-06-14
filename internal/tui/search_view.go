@@ -19,14 +19,6 @@ import (
 // run on every character.
 const searchDebounce = 200 * time.Millisecond
 
-// previewMessageLimit bounds how many messages the preview pane loads for the
-// selected session.
-const previewMessageLimit = 500
-
-// previewMatchMarker prefixes the preview message that matched the query, so the
-// hit stands out even on terminals without color.
-const previewMatchMarker = "▸ "
-
 // searchHit is one result row the search view renders (a thin view of search.Result).
 type searchHit struct {
 	sessionUUID string
@@ -56,15 +48,6 @@ type searchResultsMsg struct {
 	gen     int
 	results []searchHit
 	err     error
-}
-
-// previewLoadedMsg carries the messages loaded for a session's preview. It is
-// keyed by sessionUUID so a load that finishes after the selection moved on is
-// dropped.
-type previewLoadedMsg struct {
-	sessionUUID string
-	msgs        []sessions.Message
-	err         error
 }
 
 // scheduleSearch bumps the generation and starts the debounce timer; only the
@@ -157,35 +140,9 @@ func (v searchView) runSearch(g int) tea.Cmd {
 	}
 }
 
-// loadPreview reads the selected session's messages for the preview pane. It
-// returns nil when there is nothing to preview.
+// loadPreview reads the selected session's messages for the preview pane.
 func (v searchView) loadPreview() tea.Cmd {
-	sess, database := v.selectedSession(), v.db
-	if database == nil || sess == "" {
-		return nil
-	}
-	return func() tea.Msg {
-		msgs, _, err := sessions.GetMessages(context.Background(), database, sess, 0, previewMessageLimit, false)
-		return previewLoadedMsg{sessionUUID: sess, msgs: msgs, err: err}
-	}
-}
-
-// firstPreviewMatch returns the index of the first message whose content contains
-// a query term (case-insensitive), or -1 when none match.
-func firstPreviewMatch(msgs []sessions.Message, query string) int {
-	terms := strings.Fields(strings.ToLower(query))
-	if len(terms) == 0 {
-		return -1
-	}
-	for i, m := range msgs {
-		lc := strings.ToLower(m.Content)
-		for _, t := range terms {
-			if strings.Contains(lc, t) {
-				return i
-			}
-		}
-	}
-	return -1
+	return loadSessionPreview(v.db, v.selectedSession())
 }
 
 // View renders the master-detail layout: the results list on the left, the
@@ -212,7 +169,7 @@ func (v searchView) View() string {
 	body := lipgloss.JoinHorizontal(lipgloss.Top,
 		box(leftW).Render(v.renderList(leftW, bodyH)),
 		divider,
-		box(rightW).Render(v.renderPreview()),
+		box(rightW).Render(renderPreview(v.previewMsgs, v.previewErr, v.query)),
 	)
 	return body + "\n" + v.renderStatus(w)
 }
@@ -238,26 +195,6 @@ func (v searchView) renderList(w, h int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (v searchView) renderPreview() string {
-	if v.previewErr != nil {
-		return "preview error: " + v.previewErr.Error()
-	}
-	if len(v.previewMsgs) == 0 {
-		return ""
-	}
-	match := firstPreviewMatch(v.previewMsgs, v.query)
-	var b strings.Builder
-	for i, m := range v.previewMsgs {
-		marker := "  "
-		if i == match {
-			marker = previewMatchMarker
-		}
-		b.WriteString(marker + m.Role + "\n")
-		b.WriteString(m.Content + "\n\n")
-	}
-	return b.String()
-}
-
 func (v searchView) renderStatus(w int) string {
 	switch {
 	case v.err != nil:
@@ -268,9 +205,4 @@ func (v searchView) renderStatus(w int) string {
 		s := fmt.Sprintf("%d results · ↑/↓ navigate · tab switch view · esc quit", len(v.results))
 		return runewidth.Truncate(s, w, "…")
 	}
-}
-
-// oneLine collapses a snippet onto a single line for the results list.
-func oneLine(s string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(s, "\r", " "), "\n", " ")
 }
