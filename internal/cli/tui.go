@@ -16,7 +16,9 @@ func newTUICmd() *cobra.Command {
 		Short: "Browse and search history in an interactive dashboard",
 		Long: "Launch a full-screen dashboard over your indexed history: live search, recent " +
 			"sessions, an activity overview, and question-answering, each with a session preview " +
-			"pane. Read-only; switch tabs with Tab or 1-4 and quit with q or Ctrl-C.",
+			"pane. Read-only. Switch tabs with Tab/Shift-Tab and quit with Esc or Ctrl-C from any " +
+			"tab; on the Browse and Activity tabs you can also jump with 1-4 and quit with q (on " +
+			"Search and Ask those keys are query text).",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			database, err := openForQuery()
