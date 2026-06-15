@@ -113,6 +113,23 @@ func TestSearchFTS3Char(t *testing.T) {
 	}
 }
 
+// Search results carry the in-session seq of the matched message, so callers
+// (e.g. the TUI preview) can window around the actual hit.
+func TestSearchPopulatesSeq(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	now := time.Now().Unix()
+	addMsg(t, d, "s1", 0, "user", "unrelated preamble", now)
+	addMsg(t, d, "s1", 7, "assistant", "the authentication design", now)
+	res, err := Search(context.Background(), d, Options{Query: "authentication", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || res[0].Seq != 7 {
+		t.Fatalf("expected the hit to carry seq 7, got %+v", res)
+	}
+}
+
 func TestSearchCJKShortFallback(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p/one")

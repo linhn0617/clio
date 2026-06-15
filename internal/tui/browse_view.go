@@ -103,7 +103,7 @@ func (v browseView) selectPreview() (browseView, tea.Cmd) {
 // selected session's preview on the right, and a status line beneath.
 func (v browseView) View() string {
 	return masterDetail(v.width, v.height, v.renderList,
-		renderPreview(v.previewMsgs, v.previewErr, ""), v.statusLine())
+		renderPreview(v.previewMsgs, v.previewErr, -1), v.statusLine())
 }
 
 func (v browseView) renderList(w, h int) string {

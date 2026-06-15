@@ -187,14 +187,25 @@ func TestSearchViewLoadPreviewQueries(t *testing.T) {
 	addSession(t, d, "s1", "/p")
 	addMsg(t, d, "s1", 0, "user", "hello world")
 	addMsg(t, d, "s1", 1, "assistant", "hi there")
-	v := searchView{db: d, results: []searchHit{{sessionUUID: "s1"}}}
+	addMsg(t, d, "s1", 2, "user", "more talk")
+	v := searchView{db: d, results: []searchHit{{sessionUUID: "s1", seq: 1}}}
 	msg := v.loadPreview()()
 	pm, ok := msg.(previewLoadedMsg)
 	if !ok {
 		t.Fatalf("loadPreview should emit previewLoadedMsg, got %T", msg)
 	}
-	if pm.err != nil || pm.sessionUUID != "s1" || len(pm.msgs) != 2 {
+	if pm.err != nil || pm.sessionUUID != "s1" {
 		t.Fatalf("preview wrong: %+v err=%v", pm.msgs, pm.err)
+	}
+	// The preview window is anchored on the selected hit's seq.
+	found := false
+	for _, m := range pm.msgs {
+		if m.Seq == 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("preview window should include the hit seq 1: %+v", pm.msgs)
 	}
 }
 
@@ -209,24 +220,6 @@ func TestSearchViewPreviewResults(t *testing.T) {
 	v2, _ := sUpdate(t, v, previewLoadedMsg{sessionUUID: "other", msgs: nil})
 	if len(v2.previewMsgs) != 1 {
 		t.Fatal("stale preview (different selected session) should be ignored")
-	}
-}
-
-// firstPreviewMatch finds the first message whose content matches a query term,
-// case-insensitively; -1 when none match.
-func TestFirstPreviewMatch(t *testing.T) {
-	msgs := []sessions.Message{
-		{Role: "user", Content: "let's discuss the schema"},
-		{Role: "assistant", Content: "the authentication module handles login"},
-	}
-	if got := firstPreviewMatch(msgs, "authentication"); got != 1 {
-		t.Fatalf("firstPreviewMatch = %d, want 1", got)
-	}
-	if got := firstPreviewMatch(msgs, "LOGIN"); got != 1 {
-		t.Fatalf("case-insensitive match = %d, want 1", got)
-	}
-	if got := firstPreviewMatch(msgs, "nonexistent"); got != -1 {
-		t.Fatalf("no match should be -1, got %d", got)
 	}
 }
 
@@ -247,17 +240,23 @@ func TestSearchViewRendersMasterDetail(t *testing.T) {
 	}
 }
 
-// The matched preview message is marked so the hit stands out in context.
-func TestSearchViewPreviewMarksMatch(t *testing.T) {
+// The selected hit's message (by seq) is marked in the preview window, so the
+// user sees which turn they selected — even with several hits in one session.
+func TestSearchViewPreviewMarksHit(t *testing.T) {
 	v := searchView{
-		width: 100, height: 30, query: "login",
+		width: 100, height: 30,
+		results: []searchHit{{sessionUUID: "s1", seq: 7}},
 		previewMsgs: []sessions.Message{
-			{Role: "user", Content: "hello"},
-			{Role: "assistant", Content: "the login flow"},
+			{Seq: 6, Role: "user", Content: "before the hit"},
+			{Seq: 7, Role: "assistant", Content: "the hit line"},
+			{Seq: 8, Role: "user", Content: "after the hit"},
 		},
 	}
-	if out := v.View(); !strings.Contains(out, previewMatchMarker) {
-		t.Fatalf("matched preview line should carry the match marker: %q", out)
+	out := v.View()
+	// One marker for the selected list row, one for the hit message in the
+	// preview: if seq-marking broke, only the list row would be marked.
+	if n := strings.Count(out, previewMatchMarker); n < 2 {
+		t.Fatalf("the selected hit should be marked in the preview (markers=%d): %q", n, out)
 	}
 }
 

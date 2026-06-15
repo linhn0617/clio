@@ -10,8 +10,16 @@ import (
 	"github.com/linhn0617/clio/internal/sessions"
 )
 
-// previewMessageLimit bounds how many messages the preview pane loads for a session.
+// previewMessageLimit bounds how many messages the (whole-session) preview loads.
 const previewMessageLimit = 500
+
+// previewHitBefore/After bound the dialogue window the Search preview loads around
+// a hit: a little leading context so the hit sits near the top of the pane, and a
+// generous trailing window the pane truncates as needed.
+const (
+	previewHitBefore = 3
+	previewHitAfter  = 60
+)
 
 // previewMatchMarker prefixes the selected list row and the matched preview
 // message, so both stand out even on terminals without color.
@@ -25,15 +33,29 @@ type previewLoadedMsg struct {
 	err         error
 }
 
-// loadSessionPreview reads a session's dialogue messages for the preview pane,
-// shared by the Search and Browse views. It returns a nil command when there is
-// nothing to load. The query runs under ctx so quitting cancels it in flight.
+// loadSessionPreview reads a session's dialogue messages from the start, for the
+// Browse preview (which previews a whole session, not a specific hit). It returns
+// a nil command when there is nothing to load; the query runs under ctx so
+// quitting cancels it in flight.
 func loadSessionPreview(ctx context.Context, database *db.DB, sessionUUID string) tea.Cmd {
 	if database == nil || sessionUUID == "" {
 		return nil
 	}
 	return func() tea.Msg {
 		msgs, _, err := sessions.GetMessages(orBackground(ctx), database, sessionUUID, 0, previewMessageLimit, false)
+		return previewLoadedMsg{sessionUUID: sessionUUID, msgs: msgs, err: err}
+	}
+}
+
+// loadHitPreview reads a dialogue window centred on a search hit (by in-session
+// seq), so the Search preview shows the selected hit in context even when it is
+// deep in a long session or one of several hits in the same session.
+func loadHitPreview(ctx context.Context, database *db.DB, sessionUUID string, hitSeq int) tea.Cmd {
+	if database == nil || sessionUUID == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		msgs, err := sessions.GetWindow(orBackground(ctx), database, sessionUUID, hitSeq, previewHitBefore, previewHitAfter, false)
 		return previewLoadedMsg{sessionUUID: sessionUUID, msgs: msgs, err: err}
 	}
 }
@@ -48,43 +70,25 @@ func orBackground(ctx context.Context) context.Context {
 }
 
 // renderPreview renders a session's messages for the right-hand pane, marking the
-// first line that matched the query (when query is non-empty).
-func renderPreview(msgs []sessions.Message, loadErr error, query string) string {
+// message whose in-session seq is markSeq (the selected hit). Pass markSeq < 0 to
+// mark nothing (e.g. the Browse preview, which has no specific hit).
+func renderPreview(msgs []sessions.Message, loadErr error, markSeq int) string {
 	if loadErr != nil {
 		return "preview error: " + loadErr.Error()
 	}
 	if len(msgs) == 0 {
 		return ""
 	}
-	match := firstPreviewMatch(msgs, query)
 	var b strings.Builder
-	for i, m := range msgs {
+	for _, m := range msgs {
 		marker := "  "
-		if i == match {
+		if m.Seq == markSeq {
 			marker = previewMatchMarker
 		}
 		b.WriteString(marker + m.Role + "\n")
 		b.WriteString(m.Content + "\n\n")
 	}
 	return b.String()
-}
-
-// firstPreviewMatch returns the index of the first message whose content contains
-// a query term (case-insensitive), or -1 when none match.
-func firstPreviewMatch(msgs []sessions.Message, query string) int {
-	terms := strings.Fields(strings.ToLower(query))
-	if len(terms) == 0 {
-		return -1
-	}
-	for i, m := range msgs {
-		lc := strings.ToLower(m.Content)
-		for _, t := range terms {
-			if strings.Contains(lc, t) {
-				return i
-			}
-		}
-	}
-	return -1
 }
 
 // oneLine collapses text onto a single line for list rows.

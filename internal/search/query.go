@@ -23,6 +23,7 @@ type Options struct {
 // Result is one matched message.
 type Result struct {
 	MessageID   int64
+	Seq         int
 	SessionUUID string
 	ProjectPath string
 	Role        string

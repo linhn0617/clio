@@ -21,6 +21,7 @@ const searchDebounce = 200 * time.Millisecond
 // searchHit is one result row the search view renders (a thin view of search.Result).
 type searchHit struct {
 	sessionUUID string
+	seq         int
 	project     string
 	role        string
 	ts          int64
@@ -136,6 +137,7 @@ func (v searchView) runSearch(g int) tea.Cmd {
 		for i, r := range res {
 			hits[i] = searchHit{
 				sessionUUID: r.SessionUUID,
+				seq:         r.Seq,
 				project:     r.ProjectPath,
 				role:        r.Role,
 				ts:          r.TS,
@@ -146,12 +148,25 @@ func (v searchView) runSearch(g int) tea.Cmd {
 	}
 }
 
-// loadPreview reads the selected session's messages for the preview pane.
+// loadPreview reads a dialogue window around the selected hit for the preview pane.
 func (v searchView) loadPreview() tea.Cmd {
-	return loadSessionPreview(v.ctx, v.db, v.selectedSession())
+	if v.selected < 0 || v.selected >= len(v.results) {
+		return nil
+	}
+	h := v.results[v.selected]
+	return loadHitPreview(v.ctx, v.db, h.sessionUUID, h.seq)
 }
 
-// selectPreview drops the previous session's preview before loading the new
+// selectedHitSeq is the in-session seq of the selected hit, marked in the preview;
+// -1 when there is no selection.
+func (v searchView) selectedHitSeq() int {
+	if v.selected >= 0 && v.selected < len(v.results) {
+		return v.results[v.selected].seq
+	}
+	return -1
+}
+
+// selectPreview drops the previous hit's preview before loading the new
 // selection's, so the preview pane never shows the wrong conversation.
 func (v searchView) selectPreview() (searchView, tea.Cmd) {
 	v.previewMsgs, v.previewErr = nil, nil
@@ -163,7 +178,7 @@ func (v searchView) selectPreview() (searchView, tea.Cmd) {
 func (v searchView) View() string {
 	header := "› " + v.query
 	body := masterDetail(v.width, v.height-1, v.renderList,
-		renderPreview(v.previewMsgs, v.previewErr, v.query), v.statusLine())
+		renderPreview(v.previewMsgs, v.previewErr, v.selectedHitSeq()), v.statusLine())
 	return header + "\n" + body
 }
 
