@@ -34,7 +34,8 @@ type searchView struct {
 	ctx           context.Context
 	width, height int
 	query         string
-	gen           int // bumps on each query change; stale ticks/results are dropped
+	gen           int  // bumps on each query change; stale ticks/results are dropped
+	searching     bool // a debounced query is pending; the list shows "Searching…"
 	results       []searchHit
 	selected      int
 	err           error
@@ -54,6 +55,10 @@ type searchResultsMsg struct {
 // matching searchDebounceMsg will fire the query, so earlier keystrokes are dropped.
 func (v searchView) scheduleSearch() (searchView, tea.Cmd) {
 	v.gen++
+	// The query changed: drop the previous query's hits and preview now so the UI
+	// never shows or navigates results that no longer match the visible query.
+	v.results, v.previewMsgs, v.previewErr, v.selected = nil, nil, nil, 0
+	v.searching = true
 	g := v.gen
 	return v, tea.Tick(searchDebounce, func(time.Time) tea.Msg { return searchDebounceMsg{gen: g} })
 }
@@ -70,6 +75,7 @@ func (v searchView) Update(msg tea.Msg) (searchView, tea.Cmd) {
 		if msg.gen == v.gen { // ignore results from a superseded query
 			v.results, v.err, v.selected = msg.results, msg.err, 0
 			v.previewMsgs, v.previewErr = nil, nil
+			v.searching = false
 			return v, v.loadPreview()
 		}
 	case previewLoadedMsg:
@@ -156,10 +162,14 @@ func (v searchView) View() string {
 
 func (v searchView) renderList(w, h int) string {
 	if len(v.results) == 0 {
-		if strings.TrimSpace(v.query) == "" {
+		switch {
+		case v.searching:
+			return "Searching…"
+		case strings.TrimSpace(v.query) == "":
 			return "Type to search…"
+		default:
+			return "No matches."
 		}
-		return "No matches."
 	}
 	var lines []string
 	for i, r := range v.results {

@@ -68,6 +68,14 @@ func (v activityView) selectedValue() string {
 	return ""
 }
 
+// switchKind drops the previous kind's rows, drill, and selection so the list
+// never shows stale data under the new kind's label, then reloads.
+func (v activityView) switchKind() (activityView, tea.Cmd) {
+	v.entries, v.drill, v.drillErr = nil, nil, nil
+	v.selected, v.loaded = 0, false
+	return v, v.load()
+}
+
 // load aggregates the top values of the current kind.
 func (v activityView) load() tea.Cmd {
 	database, ctx := v.db, orBackground(v.ctx)
@@ -123,12 +131,10 @@ func (v activityView) Update(msg tea.Msg) (activityView, tea.Cmd) {
 			}
 		case "left", "h":
 			v.kindIdx = (v.kindIdx - 1 + len(activityKinds)) % len(activityKinds)
-			v.loaded = false
-			return v, v.load()
+			return v.switchKind()
 		case "right", "l":
 			v.kindIdx = (v.kindIdx + 1) % len(activityKinds)
-			v.loaded = false
-			return v, v.load()
+			return v.switchKind()
 		}
 	}
 	return v, nil

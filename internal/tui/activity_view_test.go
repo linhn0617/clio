@@ -85,6 +85,22 @@ func TestActivityViewKindSwitch(t *testing.T) {
 	}
 }
 
+// Switching kind clears the previous kind's rows, drill, and selection so the
+// list never shows stale rows under the new kind's label.
+func TestActivityViewKindSwitchClearsStaleRows(t *testing.T) {
+	v := activityView{
+		db:       testDB(t),
+		entries:  []sessions.ActivityCount{{Value: "/a"}, {Value: "/b"}},
+		selected: 1,
+		drill:    []sessions.Session{{UUID: "s1"}},
+		loaded:   true,
+	}
+	v, _ = aUpdate(t, v, key(tea.KeyRight))
+	if len(v.entries) != 0 || len(v.drill) != 0 || v.selected != 0 || v.loaded {
+		t.Fatalf("switching kind should clear stale rows/drill/selection: %+v", v)
+	}
+}
+
 // j/k navigate the entry list (clamped) and schedule a drill.
 func TestActivityViewNavigation(t *testing.T) {
 	v := activityView{db: testDB(t), entries: []sessions.ActivityCount{{Value: "a"}, {Value: "b"}, {Value: "c"}}}

@@ -80,6 +80,30 @@ func TestSearchViewDebounceGeneration(t *testing.T) {
 	}
 }
 
+// Changing the query clears the previous query's results and preview immediately
+// and marks the view as searching, so stale hits are never shown or navigable.
+func TestSearchViewQueryChangeClearsStaleResults(t *testing.T) {
+	v := searchView{
+		db:          testDB(t),
+		query:       "auth",
+		results:     []searchHit{{sessionUUID: "s1"}, {sessionUUID: "s2"}},
+		previewMsgs: []sessions.Message{{Content: "x"}},
+		selected:    1,
+	}
+	v, _ = sUpdate(t, v, runes("x"))
+	if len(v.results) != 0 || len(v.previewMsgs) != 0 || v.selected != 0 {
+		t.Fatalf("changing the query should clear stale results/preview/selection: %+v", v)
+	}
+	if !v.searching {
+		t.Fatal("a pending search should mark the view as searching")
+	}
+	// Results arriving for the current generation clear the searching flag.
+	v, _ = sUpdate(t, v, searchResultsMsg{gen: v.gen, results: []searchHit{{sessionUUID: "s3"}}})
+	if v.searching {
+		t.Fatal("results arriving should clear the searching flag")
+	}
+}
+
 // Results for the current generation populate the list; stale results are ignored.
 func TestSearchViewResults(t *testing.T) {
 	v := searchView{gen: 5}
