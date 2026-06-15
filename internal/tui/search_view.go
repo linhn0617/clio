@@ -58,8 +58,10 @@ type searchResultsMsg struct {
 func (v searchView) scheduleSearch() (searchView, tea.Cmd) {
 	v.gen++
 	// The query changed: drop the previous query's hits and preview now so the UI
-	// never shows or navigates results that no longer match the visible query.
+	// never shows or navigates results that no longer match the visible query, and
+	// bump previewGen so an in-flight preview from the old selection is dropped.
 	v.results, v.previewMsgs, v.previewErr, v.selected = nil, nil, nil, 0
+	v.previewGen++
 	v.searching = true
 	g := v.gen
 	return v, tea.Tick(searchDebounce, func(time.Time) tea.Msg { return searchDebounceMsg{gen: g} })

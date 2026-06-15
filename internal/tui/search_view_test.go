@@ -119,6 +119,18 @@ func TestSearchViewResults(t *testing.T) {
 	}
 }
 
+// Editing the query invalidates an in-flight preview from the previous
+// selection, so a late response can't repopulate the pane mid-search.
+func TestSearchViewQueryChangeInvalidatesPreview(t *testing.T) {
+	v := searchView{db: testDB(t), results: []searchHit{{sessionUUID: "s1"}}, previewGen: 3}
+	staleGen := v.previewGen
+	v, _ = sUpdate(t, v, runes("x")) // edit query -> scheduleSearch
+	v, _ = sUpdate(t, v, previewLoadedMsg{owner: tabSearch, gen: staleGen, msgs: []sessions.Message{{Content: "old"}}})
+	if len(v.previewMsgs) != 0 {
+		t.Fatal("an in-flight preview from before the query change should be ignored")
+	}
+}
+
 // Moving the selection clears the previous session's preview before loading the
 // new one, so the preview pane never shows the wrong conversation.
 func TestSearchViewSelectionClearsStalePreview(t *testing.T) {
