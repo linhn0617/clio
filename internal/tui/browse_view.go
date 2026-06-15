@@ -26,6 +26,7 @@ type browseView struct {
 	selected      int
 	loaded        bool
 	err           error
+	previewGen    int // bumps on each preview load; stale preview responses are dropped
 	previewMsgs   []sessions.Message
 	previewErr    error
 }
@@ -56,9 +57,9 @@ func (v browseView) Update(msg tea.Msg) (browseView, tea.Cmd) {
 	case browseLoadedMsg:
 		v.sessions, v.err, v.selected, v.loaded = msg.sessions, msg.err, 0, true
 		v.previewMsgs, v.previewErr = nil, nil
-		return v, v.loadPreview()
+		return v.loadPreview()
 	case previewLoadedMsg:
-		if msg.sessionUUID == v.selectedSession() { // ignore a load the selection moved past
+		if msg.owner == tabBrowse && msg.gen == v.previewGen { // ours, and not superseded
 			v.previewMsgs, v.previewErr = msg.msgs, msg.err
 		}
 	case tea.KeyMsg:
@@ -87,16 +88,19 @@ func (v browseView) selectedSession() string {
 	return ""
 }
 
-// loadPreview reads the selected session's messages for the preview pane.
-func (v browseView) loadPreview() tea.Cmd {
-	return loadSessionPreview(v.ctx, v.db, v.selectedSession())
+// loadPreview reads the selected session's messages for the preview pane. It
+// bumps the preview generation so a slower response for an earlier selection is
+// dropped, and returns the updated view alongside the command.
+func (v browseView) loadPreview() (browseView, tea.Cmd) {
+	v.previewGen++
+	return v, loadSessionPreview(v.ctx, v.db, v.selectedSession(), tabBrowse, v.previewGen)
 }
 
 // selectPreview drops the previous session's preview before loading the new
 // selection's, so the preview pane never shows the wrong conversation.
 func (v browseView) selectPreview() (browseView, tea.Cmd) {
 	v.previewMsgs, v.previewErr = nil, nil
-	return v, v.loadPreview()
+	return v.loadPreview()
 }
 
 // View renders the master-detail layout: the session list on the left, the

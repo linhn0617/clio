@@ -78,16 +78,19 @@ func TestBrowseViewSelectionClearsStalePreview(t *testing.T) {
 	}
 }
 
-// Preview results for the selected session populate the pane; stale ones ignored.
+// Preview results for the current generation populate the pane; a stale
+// generation, or a preview owned by another view, is ignored.
 func TestBrowseViewPreviewResults(t *testing.T) {
-	v := browseView{sessions: []sessions.Session{{UUID: "s1"}}}
-	v, _ = bUpdate(t, v, previewLoadedMsg{sessionUUID: "s1", msgs: []sessions.Message{{Role: "user", Content: "hi"}}})
+	v := browseView{sessions: []sessions.Session{{UUID: "s1"}}, previewGen: 2}
+	v, _ = bUpdate(t, v, previewLoadedMsg{owner: tabBrowse, gen: 2, msgs: []sessions.Message{{Role: "user", Content: "hi"}}})
 	if len(v.previewMsgs) != 1 {
 		t.Fatalf("preview not populated: %+v", v.previewMsgs)
 	}
-	v2, _ := bUpdate(t, v, previewLoadedMsg{sessionUUID: "other"})
-	if len(v2.previewMsgs) != 1 {
-		t.Fatal("stale preview should be ignored")
+	if v2, _ := bUpdate(t, v, previewLoadedMsg{owner: tabBrowse, gen: 1}); len(v2.previewMsgs) != 1 {
+		t.Fatal("a stale preview generation should be ignored")
+	}
+	if v3, _ := bUpdate(t, v, previewLoadedMsg{owner: tabSearch, gen: 2}); len(v3.previewMsgs) != 1 {
+		t.Fatal("a preview owned by another view should be ignored")
 	}
 }
 

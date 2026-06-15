@@ -40,6 +40,7 @@ type searchView struct {
 	results       []searchHit
 	selected      int
 	err           error
+	previewGen    int // bumps on each preview load; stale preview responses are dropped
 	previewMsgs   []sessions.Message
 	previewErr    error
 }
@@ -77,10 +78,10 @@ func (v searchView) Update(msg tea.Msg) (searchView, tea.Cmd) {
 			v.results, v.err, v.selected = msg.results, msg.err, 0
 			v.previewMsgs, v.previewErr = nil, nil
 			v.searching = false
-			return v, v.loadPreview()
+			return v.loadPreview()
 		}
 	case previewLoadedMsg:
-		if msg.sessionUUID == v.selectedSession() { // ignore a load the selection moved past
+		if msg.owner == tabSearch && msg.gen == v.previewGen { // ours, and not superseded
 			v.previewMsgs, v.previewErr = msg.msgs, msg.err
 		}
 	case tea.KeyMsg:
@@ -148,13 +149,16 @@ func (v searchView) runSearch(g int) tea.Cmd {
 	}
 }
 
-// loadPreview reads a dialogue window around the selected hit for the preview pane.
-func (v searchView) loadPreview() tea.Cmd {
+// loadPreview reads a dialogue window around the selected hit for the preview
+// pane. It bumps the preview generation so a slower response for an earlier hit
+// is dropped, and returns the updated view alongside the command.
+func (v searchView) loadPreview() (searchView, tea.Cmd) {
+	v.previewGen++
 	if v.selected < 0 || v.selected >= len(v.results) {
-		return nil
+		return v, nil
 	}
 	h := v.results[v.selected]
-	return loadHitPreview(v.ctx, v.db, h.sessionUUID, h.seq)
+	return v, loadHitPreview(v.ctx, v.db, h.sessionUUID, h.seq, tabSearch, v.previewGen)
 }
 
 // selectedHitSeq is the in-session seq of the selected hit, marked in the preview;
@@ -170,7 +174,7 @@ func (v searchView) selectedHitSeq() int {
 // selection's, so the preview pane never shows the wrong conversation.
 func (v searchView) selectPreview() (searchView, tea.Cmd) {
 	v.previewMsgs, v.previewErr = nil, nil
-	return v, v.loadPreview()
+	return v.loadPreview()
 }
 
 // View renders the master-detail layout: the results list on the left, the

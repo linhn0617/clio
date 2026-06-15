@@ -25,38 +25,41 @@ const (
 // message, so both stand out even on terminals without color.
 const previewMatchMarker = "▸ "
 
-// previewLoadedMsg carries the messages loaded for a session preview, keyed by
-// sessionUUID so a load the selection has moved past is dropped.
+// previewLoadedMsg carries the messages loaded for a preview pane. routeAll fans
+// every message out to all views, and Search and Browse share this type, so it is
+// keyed by owner (the requesting view) and gen (that view's preview generation):
+// a view applies a load only if it owns it and no newer load has superseded it.
 type previewLoadedMsg struct {
-	sessionUUID string
-	msgs        []sessions.Message
-	err         error
+	owner tab
+	gen   int
+	msgs  []sessions.Message
+	err   error
 }
 
 // loadSessionPreview reads a session's dialogue messages from the start, for the
 // Browse preview (which previews a whole session, not a specific hit). It returns
 // a nil command when there is nothing to load; the query runs under ctx so
 // quitting cancels it in flight.
-func loadSessionPreview(ctx context.Context, database *db.DB, sessionUUID string) tea.Cmd {
+func loadSessionPreview(ctx context.Context, database *db.DB, sessionUUID string, owner tab, gen int) tea.Cmd {
 	if database == nil || sessionUUID == "" {
 		return nil
 	}
 	return func() tea.Msg {
 		msgs, _, err := sessions.GetMessages(orBackground(ctx), database, sessionUUID, 0, previewMessageLimit, false)
-		return previewLoadedMsg{sessionUUID: sessionUUID, msgs: msgs, err: err}
+		return previewLoadedMsg{owner: owner, gen: gen, msgs: msgs, err: err}
 	}
 }
 
 // loadHitPreview reads a dialogue window centred on a search hit (by in-session
 // seq), so the Search preview shows the selected hit in context even when it is
 // deep in a long session or one of several hits in the same session.
-func loadHitPreview(ctx context.Context, database *db.DB, sessionUUID string, hitSeq int) tea.Cmd {
+func loadHitPreview(ctx context.Context, database *db.DB, sessionUUID string, hitSeq int, owner tab, gen int) tea.Cmd {
 	if database == nil || sessionUUID == "" {
 		return nil
 	}
 	return func() tea.Msg {
 		msgs, err := sessions.GetWindow(orBackground(ctx), database, sessionUUID, hitSeq, previewHitBefore, previewHitAfter, false)
-		return previewLoadedMsg{sessionUUID: sessionUUID, msgs: msgs, err: err}
+		return previewLoadedMsg{owner: owner, gen: gen, msgs: msgs, err: err}
 	}
 }
 

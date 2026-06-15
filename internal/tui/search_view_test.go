@@ -22,7 +22,7 @@ func TestPreviewLoadHonorsContext(t *testing.T) {
 	addMsg(t, d, "s1", 0, "user", "hi")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	msg := loadSessionPreview(ctx, d, "s1")()
+	msg := loadSessionPreview(ctx, d, "s1", tabBrowse, 1)()
 	if msg.(previewLoadedMsg).err == nil {
 		t.Fatal("a cancelled context should surface an error from the preview load")
 	}
@@ -189,13 +189,13 @@ func TestSearchViewLoadPreviewQueries(t *testing.T) {
 	addMsg(t, d, "s1", 1, "assistant", "hi there")
 	addMsg(t, d, "s1", 2, "user", "more talk")
 	v := searchView{db: d, results: []searchHit{{sessionUUID: "s1", seq: 1}}}
-	msg := v.loadPreview()()
-	pm, ok := msg.(previewLoadedMsg)
+	_, cmd := v.loadPreview()
+	pm, ok := cmd().(previewLoadedMsg)
 	if !ok {
-		t.Fatalf("loadPreview should emit previewLoadedMsg, got %T", msg)
+		t.Fatalf("loadPreview should emit previewLoadedMsg, got %T", cmd())
 	}
-	if pm.err != nil || pm.sessionUUID != "s1" {
-		t.Fatalf("preview wrong: %+v err=%v", pm.msgs, pm.err)
+	if pm.err != nil || pm.owner != tabSearch {
+		t.Fatalf("preview wrong: owner=%d %+v err=%v", pm.owner, pm.msgs, pm.err)
 	}
 	// The preview window is anchored on the selected hit's seq.
 	found := false
@@ -209,17 +209,19 @@ func TestSearchViewLoadPreviewQueries(t *testing.T) {
 	}
 }
 
-// Preview results for the selected session populate the pane; stale results for
-// a different session are ignored.
+// Preview results for the current generation populate the pane; a stale
+// generation, or a preview owned by another view, is ignored.
 func TestSearchViewPreviewResults(t *testing.T) {
-	v := searchView{results: []searchHit{{sessionUUID: "s1"}}}
-	v, _ = sUpdate(t, v, previewLoadedMsg{sessionUUID: "s1", msgs: []sessions.Message{{Role: "user", Content: "hi"}}})
+	v := searchView{results: []searchHit{{sessionUUID: "s1"}}, previewGen: 5}
+	v, _ = sUpdate(t, v, previewLoadedMsg{owner: tabSearch, gen: 5, msgs: []sessions.Message{{Role: "user", Content: "hi"}}})
 	if len(v.previewMsgs) != 1 {
 		t.Fatalf("preview not populated: %+v", v.previewMsgs)
 	}
-	v2, _ := sUpdate(t, v, previewLoadedMsg{sessionUUID: "other", msgs: nil})
-	if len(v2.previewMsgs) != 1 {
-		t.Fatal("stale preview (different selected session) should be ignored")
+	if v2, _ := sUpdate(t, v, previewLoadedMsg{owner: tabSearch, gen: 4, msgs: nil}); len(v2.previewMsgs) != 1 {
+		t.Fatal("a stale preview generation should be ignored")
+	}
+	if v3, _ := sUpdate(t, v, previewLoadedMsg{owner: tabBrowse, gen: 5, msgs: nil}); len(v3.previewMsgs) != 1 {
+		t.Fatal("a preview owned by another view should be ignored")
 	}
 }
 
