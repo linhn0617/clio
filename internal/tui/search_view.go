@@ -18,6 +18,9 @@ import (
 // run on every character.
 const searchDebounce = 200 * time.Millisecond
 
+// searchResultLimit caps how many ranked hits the search view requests.
+const searchResultLimit = 50
+
 // searchHit is one result row the search view renders (a thin view of search.Result).
 type searchHit struct {
 	sessionUUID string
@@ -115,15 +118,6 @@ func (v searchView) Update(msg tea.Msg) (searchView, tea.Cmd) {
 	return v, nil
 }
 
-// selectedSession is the session UUID of the current selection, or "" when there
-// is no selection.
-func (v searchView) selectedSession() string {
-	if v.selected >= 0 && v.selected < len(v.results) {
-		return v.results[v.selected].sessionUUID
-	}
-	return ""
-}
-
 // runSearch queries the index for the current query and returns the hits tagged
 // with generation g (so a stale result can be dropped).
 func (v searchView) runSearch(g int) tea.Cmd {
@@ -132,7 +126,7 @@ func (v searchView) runSearch(g int) tea.Cmd {
 		if database == nil || strings.TrimSpace(q) == "" {
 			return searchResultsMsg{gen: g}
 		}
-		res, err := search.Search(ctx, database, search.Options{Query: q, Limit: 50})
+		res, err := search.Search(ctx, database, search.Options{Query: q, Limit: searchResultLimit})
 		if err != nil {
 			return searchResultsMsg{gen: g, err: err}
 		}
