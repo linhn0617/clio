@@ -76,6 +76,13 @@ func (v activityView) switchKind() (activityView, tea.Cmd) {
 	return v, v.load()
 }
 
+// selectDrill drops the previous entry's drill before loading the new
+// selection's, so the detail pane never shows sessions for a different value.
+func (v activityView) selectDrill() (activityView, tea.Cmd) {
+	v.drill, v.drillErr = nil, nil
+	return v, v.drillCmd()
+}
+
 // load aggregates the top values of the current kind.
 func (v activityView) load() tea.Cmd {
 	database, ctx := v.db, orBackground(v.ctx)
@@ -122,12 +129,12 @@ func (v activityView) Update(msg tea.Msg) (activityView, tea.Cmd) {
 		case "up", "k":
 			if v.selected > 0 {
 				v.selected--
-				return v, v.drillCmd()
+				return v.selectDrill()
 			}
 		case "down", "j":
 			if v.selected < len(v.entries)-1 {
 				v.selected++
-				return v, v.drillCmd()
+				return v.selectDrill()
 			}
 		case "left", "h":
 			v.kindIdx = (v.kindIdx - 1 + len(activityKinds)) % len(activityKinds)

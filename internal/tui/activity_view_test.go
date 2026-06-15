@@ -115,6 +115,19 @@ func TestActivityViewNavigation(t *testing.T) {
 	}
 }
 
+// Moving the selection clears the previous entry's drill before loading the new
+// one, so the detail pane never shows sessions for a different value.
+func TestActivityViewSelectionClearsStaleDrill(t *testing.T) {
+	v := activityView{
+		entries: []sessions.ActivityCount{{Value: "a"}, {Value: "b"}},
+		drill:   []sessions.Session{{UUID: "s1"}},
+	}
+	v, _ = aUpdate(t, v, runes("j"))
+	if len(v.drill) != 0 {
+		t.Fatal("changing selection should clear the stale drill before the new load")
+	}
+}
+
 // The drill command lists the sessions that touched the selected file.
 func TestActivityViewDrillCmdFilters(t *testing.T) {
 	d := testDB(t)

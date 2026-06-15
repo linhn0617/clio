@@ -67,12 +67,12 @@ func (v browseView) Update(msg tea.Msg) (browseView, tea.Cmd) {
 		case "up", "k":
 			if v.selected > 0 {
 				v.selected--
-				return v, v.loadPreview()
+				return v.selectPreview()
 			}
 		case "down", "j":
 			if v.selected < len(v.sessions)-1 {
 				v.selected++
-				return v, v.loadPreview()
+				return v.selectPreview()
 			}
 		}
 	}
@@ -90,6 +90,13 @@ func (v browseView) selectedSession() string {
 // loadPreview reads the selected session's messages for the preview pane.
 func (v browseView) loadPreview() tea.Cmd {
 	return loadSessionPreview(v.ctx, v.db, v.selectedSession())
+}
+
+// selectPreview drops the previous session's preview before loading the new
+// selection's, so the preview pane never shows the wrong conversation.
+func (v browseView) selectPreview() (browseView, tea.Cmd) {
+	v.previewMsgs, v.previewErr = nil, nil
+	return v, v.loadPreview()
 }
 
 // View renders the master-detail layout: the session list on the left, the

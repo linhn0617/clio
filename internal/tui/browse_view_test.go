@@ -65,6 +65,19 @@ func TestBrowseViewNavigation(t *testing.T) {
 	}
 }
 
+// Moving the selection clears the previous session's preview before loading the
+// new one, so the preview pane never shows the wrong conversation.
+func TestBrowseViewSelectionClearsStalePreview(t *testing.T) {
+	v := browseView{
+		sessions:    []sessions.Session{{UUID: "s1"}, {UUID: "s2"}},
+		previewMsgs: []sessions.Message{{Content: "old session"}},
+	}
+	v, _ = bUpdate(t, v, runes("j"))
+	if len(v.previewMsgs) != 0 {
+		t.Fatal("changing selection should clear the stale preview before the new load")
+	}
+}
+
 // Preview results for the selected session populate the pane; stale ones ignored.
 func TestBrowseViewPreviewResults(t *testing.T) {
 	v := browseView{sessions: []sessions.Session{{UUID: "s1"}}}

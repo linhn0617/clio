@@ -65,7 +65,7 @@ func TestAskViewEditingAfterSubmitDropsStaleAnswer(t *testing.T) {
 func TestAskViewAnswerResults(t *testing.T) {
 	v := askView{gen: 3}
 	v, _ = qUpdate(t, v, askAnswerMsg{gen: 3, groups: []ask.EvidenceGroup{{SessionUUID: "s1"}, {SessionUUID: "s2"}}})
-	if len(v.groups) != 2 || v.selected != 0 || !v.asked {
+	if len(v.groups) != 2 || v.selected != 0 || v.loading {
 		t.Fatalf("groups not populated: %+v", v)
 	}
 	v2, _ := qUpdate(t, v, askAnswerMsg{gen: 2, groups: nil})
@@ -94,7 +94,7 @@ func TestAskViewSelection(t *testing.T) {
 // View shows the group list, the selected group's excerpts, and marks the hit.
 func TestAskViewRendersEvidence(t *testing.T) {
 	v := askView{
-		width: 100, height: 30, asked: true, query: "auth",
+		width: 100, height: 30, answered: "auth", query: "auth",
 		groups: []ask.EvidenceGroup{{
 			SessionUUID: "abcd1234ef", Title: "Auth design",
 			Excerpts: []ask.Excerpt{
@@ -127,8 +127,44 @@ func TestAskViewShowsQuery(t *testing.T) {
 
 // Asking with no matching evidence shows an empty state.
 func TestAskViewEmptyState(t *testing.T) {
-	v := askView{width: 80, height: 24, asked: true, query: "nothing"}
+	v := askView{width: 80, height: 24, answered: "nothing", query: "nothing"}
 	if !strings.Contains(v.View(), "No evidence") {
 		t.Fatalf("asked-but-empty should show an empty state: %q", v.View())
+	}
+}
+
+// Submitting a new question clears the previous answer immediately and shows a
+// loading state, so old evidence isn't shown under the new question.
+func TestAskViewNewQuestionClearsStaleAnswer(t *testing.T) {
+	v := askView{
+		db: testDB(t), query: "auth", answered: "auth",
+		groups: []ask.EvidenceGroup{{SessionUUID: "s1"}},
+	}
+	v, _ = qUpdate(t, v, runes("2")) // query -> "auth2"
+	v, cmd := qUpdate(t, v, key(tea.KeyEnter))
+	if len(v.groups) != 0 || !v.loading {
+		t.Fatalf("submitting a new question should clear the old answer and show loading: groups=%d loading=%v", len(v.groups), v.loading)
+	}
+	if cmd == nil {
+		t.Fatal("submitting should dispatch a new ask")
+	}
+}
+
+// Editing the question (without resubmitting) hides the stale answer, so the
+// panes never show evidence for a question the user has moved past.
+func TestAskViewEditedQueryHidesStaleAnswer(t *testing.T) {
+	v := askView{
+		width: 80, height: 24, query: "auth", answered: "auth",
+		groups: []ask.EvidenceGroup{{
+			SessionUUID: "abcd", Title: "Auth design",
+			Excerpts: []ask.Excerpt{{Role: "user", Text: "hi"}},
+		}},
+	}
+	if !strings.Contains(v.View(), "Auth design") {
+		t.Fatalf("should show the answer while the query matches: %q", v.View())
+	}
+	v, _ = qUpdate(t, v, runes("x")) // query -> "authx", diverges from answered
+	if strings.Contains(v.View(), "Auth design") {
+		t.Fatalf("after editing the query, the stale answer should be hidden: %q", v.View())
 	}
 }

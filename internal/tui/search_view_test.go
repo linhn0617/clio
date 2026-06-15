@@ -119,6 +119,19 @@ func TestSearchViewResults(t *testing.T) {
 	}
 }
 
+// Moving the selection clears the previous session's preview before loading the
+// new one, so the preview pane never shows the wrong conversation.
+func TestSearchViewSelectionClearsStalePreview(t *testing.T) {
+	v := searchView{
+		results:     []searchHit{{sessionUUID: "s1"}, {sessionUUID: "s2"}},
+		previewMsgs: []sessions.Message{{Content: "old session"}},
+	}
+	v, _ = sUpdate(t, v, key(tea.KeyDown))
+	if len(v.previewMsgs) != 0 {
+		t.Fatal("changing selection should clear the stale preview before the new load")
+	}
+}
+
 // Up/Down move the selection, clamped to the result range.
 func TestSearchViewSelection(t *testing.T) {
 	v := searchView{gen: 1, results: []searchHit{{}, {}, {}}}

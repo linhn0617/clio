@@ -89,12 +89,12 @@ func (v searchView) Update(msg tea.Msg) (searchView, tea.Cmd) {
 		case "up":
 			if v.selected > 0 {
 				v.selected--
-				return v, v.loadPreview()
+				return v.selectPreview()
 			}
 		case "down":
 			if v.selected < len(v.results)-1 {
 				v.selected++
-				return v, v.loadPreview()
+				return v.selectPreview()
 			}
 		case "backspace":
 			if r := []rune(v.query); len(r) > 0 {
@@ -149,6 +149,13 @@ func (v searchView) runSearch(g int) tea.Cmd {
 // loadPreview reads the selected session's messages for the preview pane.
 func (v searchView) loadPreview() tea.Cmd {
 	return loadSessionPreview(v.ctx, v.db, v.selectedSession())
+}
+
+// selectPreview drops the previous session's preview before loading the new
+// selection's, so the preview pane never shows the wrong conversation.
+func (v searchView) selectPreview() (searchView, tea.Cmd) {
+	v.previewMsgs, v.previewErr = nil, nil
+	return v, v.loadPreview()
 }
 
 // View renders the master-detail layout: the results list on the left, the
