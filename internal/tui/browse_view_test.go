@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -8,6 +9,22 @@ import (
 
 	"github.com/linhn0617/clio/internal/sessions"
 )
+
+// renderList scrolls so the selected row stays visible past the pane height.
+func TestBrowseViewListScrollsToSelection(t *testing.T) {
+	var ss []sessions.Session
+	for i := range 30 {
+		ss = append(ss, sessions.Session{UUID: fmt.Sprintf("s%02d", i), Title: fmt.Sprintf("session%02d", i)})
+	}
+	v := browseView{sessions: ss, selected: 25}
+	out := v.renderList(80, 8)
+	if !strings.Contains(out, "session25") {
+		t.Fatalf("the selected row should be visible past the pane height: %q", out)
+	}
+	if strings.Contains(out, "session00") {
+		t.Fatalf("rows above the scroll window should not render: %q", out)
+	}
+}
 
 func bUpdate(t *testing.T, v browseView, msg tea.Msg) (browseView, tea.Cmd) {
 	t.Helper()

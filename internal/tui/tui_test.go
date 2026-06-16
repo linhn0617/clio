@@ -14,6 +14,29 @@ import (
 // newTest builds a root model for tests with a background context.
 func newTest(database *db.DB) Model { return New(context.Background(), database) }
 
+// visibleWindow keeps the selected row inside a pane of height h, clamped to ends.
+func TestVisibleWindow(t *testing.T) {
+	if s, e := visibleWindow(0, 5, 10); s != 0 || e != 5 {
+		t.Fatalf("fits-in-pane should show all: got [%d,%d)", s, e)
+	}
+	s, e := visibleWindow(25, 30, 10)
+	if !(s <= 25 && 25 < e) || e-s != 10 {
+		t.Fatalf("selected 25 should be inside a size-10 window: got [%d,%d)", s, e)
+	}
+	if s, _ := visibleWindow(29, 30, 10); s != 20 {
+		t.Fatalf("end clamp: start=%d want 20", s)
+	}
+	if s, _ := visibleWindow(0, 30, 10); s != 0 {
+		t.Fatalf("start clamp: start=%d want 0", s)
+	}
+	if s, e := visibleWindow(0, 0, 10); s != 0 || e != 0 {
+		t.Fatalf("empty list: got [%d,%d)", s, e)
+	}
+	if s, e := visibleWindow(3, 30, 0); s != 0 || e != 0 {
+		t.Fatalf("zero height: got [%d,%d)", s, e)
+	}
+}
+
 // New threads the context into every sub-view so their queries are cancellable.
 func TestNewThreadsContext(t *testing.T) {
 	ctx := context.Background()

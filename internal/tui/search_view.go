@@ -194,10 +194,9 @@ func (v searchView) renderList(w, h int) string {
 		}
 	}
 	var lines []string
-	for i, r := range v.results {
-		if i >= h {
-			break
-		}
+	start, end := visibleWindow(v.selected, len(v.results), h)
+	for i := start; i < end; i++ {
+		r := v.results[i]
 		marker := "  "
 		if i == v.selected {
 			marker = previewMatchMarker

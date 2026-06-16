@@ -161,10 +161,9 @@ func (v activityView) renderList(w, h int) string {
 		return "Loading…"
 	}
 	var lines []string
-	for i, e := range v.entries {
-		if i >= h {
-			break
-		}
+	start, end := visibleWindow(v.selected, len(v.entries), h)
+	for i := start; i < end; i++ {
+		e := v.entries[i]
 		marker := "  "
 		if i == v.selected {
 			marker = previewMatchMarker

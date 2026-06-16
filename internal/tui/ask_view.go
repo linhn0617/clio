@@ -118,10 +118,9 @@ func (v askView) renderList(w, h int) string {
 		return "No evidence found."
 	}
 	var lines []string
-	for i, g := range v.groups {
-		if i >= h {
-			break
-		}
+	start, end := visibleWindow(v.selected, len(v.groups), h)
+	for i := start; i < end; i++ {
+		g := v.groups[i]
 		marker := "  "
 		if i == v.selected {
 			marker = previewMatchMarker

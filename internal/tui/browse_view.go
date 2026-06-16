@@ -118,10 +118,9 @@ func (v browseView) renderList(w, h int) string {
 		return "Loading…"
 	}
 	var lines []string
-	for i, s := range v.sessions {
-		if i >= h {
-			break
-		}
+	start, end := visibleWindow(v.selected, len(v.sessions), h)
+	for i := start; i < end; i++ {
+		s := v.sessions[i]
 		marker := "  "
 		if i == v.selected {
 			marker = previewMatchMarker
