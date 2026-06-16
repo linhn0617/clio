@@ -145,14 +145,25 @@ func ResolvePrefix(ctx context.Context, database *db.DB, prefix string) (Session
 	}
 }
 
+// rawColumn selects raw_json only when the caller needs it; otherwise an empty
+// string in its place, so high-frequency readers (e.g. the TUI preview) don't
+// pull the largest column off disk for content they never render.
+func rawColumn(includeRaw bool) string {
+	if includeRaw {
+		return "raw_json"
+	}
+	return "''"
+}
+
 // GetMessages returns a session's messages ordered by seq, paginated.
 // When includeToolOutput is false, tool_use/tool_result/thinking are omitted.
+// When includeRaw is false, raw_json is not read (Message.RawJSON stays empty).
 // Returns the page and whether more rows exist past offset+limit.
-func GetMessages(ctx context.Context, database *db.DB, sessionUUID string, offset, limit int, includeToolOutput bool) ([]Message, bool, error) {
+func GetMessages(ctx context.Context, database *db.DB, sessionUUID string, offset, limit int, includeToolOutput, includeRaw bool) ([]Message, bool, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	q := `SELECT seq, COALESCE(ts,0), role, content, raw_json FROM messages WHERE session_uuid = ?`
+	q := `SELECT seq, COALESCE(ts,0), role, content, ` + rawColumn(includeRaw) + ` FROM messages WHERE session_uuid = ?`
 	if !includeToolOutput {
 		q += " AND role IN ('user','assistant')"
 	}
@@ -185,7 +196,7 @@ func GetMessages(ctx context.Context, database *db.DB, sessionUUID string, offse
 // following ones, ordered by seq. The window is taken in user/assistant turn space
 // (when includeToolOutput is false), so tool_use/tool_result events between a
 // question and its answer neither consume the window nor appear in it.
-func GetWindow(ctx context.Context, database *db.DB, sessionUUID string, hitSeq, before, after int, includeToolOutput bool) ([]Message, error) {
+func GetWindow(ctx context.Context, database *db.DB, sessionUUID string, hitSeq, before, after int, includeToolOutput, includeRaw bool) ([]Message, error) {
 	if before < 0 {
 		before = 0
 	}
@@ -196,7 +207,7 @@ func GetWindow(ctx context.Context, database *db.DB, sessionUUID string, hitSeq,
 	if !includeToolOutput {
 		roleClause = " AND role IN ('user','assistant')"
 	}
-	const cols = `seq, COALESCE(ts,0), role, content, raw_json`
+	cols := `seq, COALESCE(ts,0), role, content, ` + rawColumn(includeRaw)
 
 	// The hit and preceding turns, newest-first, reversed to ascending.
 	pre, err := windowRows(ctx, database,

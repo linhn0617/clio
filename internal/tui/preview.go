@@ -10,8 +10,9 @@ import (
 	"github.com/linhn0617/clio/internal/sessions"
 )
 
-// previewMessageLimit bounds how many messages the (whole-session) preview loads.
-const previewMessageLimit = 500
+// previewMessageLimit bounds how many messages the (whole-session) Browse preview
+// loads — enough to fill any pane without formatting a whole long session per frame.
+const previewMessageLimit = 120
 
 // previewHitBefore/After bound the dialogue window the Search preview loads around
 // a hit: a little leading context so the hit sits near the top of the pane, and a
@@ -45,7 +46,7 @@ func loadSessionPreview(ctx context.Context, database *db.DB, sessionUUID string
 		return nil
 	}
 	return func() tea.Msg {
-		msgs, _, err := sessions.GetMessages(orBackground(ctx), database, sessionUUID, 0, previewMessageLimit, false)
+		msgs, _, err := sessions.GetMessages(orBackground(ctx), database, sessionUUID, 0, previewMessageLimit, false, false)
 		return previewLoadedMsg{owner: owner, gen: gen, msgs: msgs, err: err}
 	}
 }
@@ -58,7 +59,7 @@ func loadHitPreview(ctx context.Context, database *db.DB, sessionUUID string, hi
 		return nil
 	}
 	return func() tea.Msg {
-		msgs, err := sessions.GetWindow(orBackground(ctx), database, sessionUUID, hitSeq, previewHitBefore, previewHitAfter, false)
+		msgs, err := sessions.GetWindow(orBackground(ctx), database, sessionUUID, hitSeq, previewHitBefore, previewHitAfter, false, false)
 		return previewLoadedMsg{owner: owner, gen: gen, msgs: msgs, err: err}
 	}
 }
