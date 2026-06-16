@@ -193,18 +193,17 @@ func TestSearchViewSelectionSchedulesPreview(t *testing.T) {
 	}
 }
 
-// The preview load command reads the selected session's messages.
-func TestSearchViewLoadPreviewQueries(t *testing.T) {
+// The preview command reads a window around the selected hit's messages.
+func TestSearchViewPreviewCmdQueries(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p")
 	addMsg(t, d, "s1", 0, "user", "hello world")
 	addMsg(t, d, "s1", 1, "assistant", "hi there")
 	addMsg(t, d, "s1", 2, "user", "more talk")
 	v := searchView{db: d, results: []searchHit{{sessionUUID: "s1", seq: 1}}}
-	_, cmd := v.loadPreview()
-	pm, ok := cmd().(previewLoadedMsg)
+	pm, ok := v.previewCmd()().(previewLoadedMsg)
 	if !ok {
-		t.Fatalf("loadPreview should emit previewLoadedMsg, got %T", cmd())
+		t.Fatalf("previewCmd should emit previewLoadedMsg, got %T", v.previewCmd()())
 	}
 	if pm.err != nil || pm.owner != tabSearch {
 		t.Fatalf("preview wrong: owner=%d %+v err=%v", pm.owner, pm.msgs, pm.err)
@@ -218,6 +217,26 @@ func TestSearchViewLoadPreviewQueries(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("preview window should include the hit seq 1: %+v", pm.msgs)
+	}
+}
+
+// A selection schedules a debounced detail tick; only the matching tick (this
+// view, current generation) fires the actual preview query.
+func TestSearchViewPreviewDebounced(t *testing.T) {
+	v := searchView{db: testDB(t), results: []searchHit{{sessionUUID: "s1"}}}
+	v2, cmd := v.loadPreview()
+	tick, ok := cmd().(detailTickMsg)
+	if !ok || tick.owner != tabSearch || tick.gen != v2.previewGen {
+		t.Fatalf("loadPreview should schedule a detail tick for this view+gen, got %#v", cmd())
+	}
+	if _, c := sUpdate(t, v2, detailTickMsg{owner: tabSearch, gen: v2.previewGen}); c == nil {
+		t.Fatal("a matching detail tick should fire the preview query")
+	}
+	if _, c := sUpdate(t, v2, detailTickMsg{owner: tabSearch, gen: v2.previewGen - 1}); c != nil {
+		t.Fatal("a superseded (older generation) detail tick should not fire a query")
+	}
+	if _, c := sUpdate(t, v2, detailTickMsg{owner: tabBrowse, gen: v2.previewGen}); c != nil {
+		t.Fatal("a detail tick owned by another view should be ignored")
 	}
 }
 

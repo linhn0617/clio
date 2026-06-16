@@ -3,12 +3,33 @@ package tui
 import (
 	"context"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/sessions"
 )
+
+// detailDebounce delays a selection-driven detail load (Search/Browse preview,
+// Activity drill) so holding ↑/↓ coalesces into one query for the final row
+// instead of one per intermediate row. Short enough not to feel laggy.
+const detailDebounce = 80 * time.Millisecond
+
+// detailTickMsg fires after the debounce. It is keyed by owner (the requesting
+// view) and that view's detail generation, so a tick a newer selection has
+// superseded — or one meant for another view — does nothing.
+type detailTickMsg struct {
+	owner tab
+	gen   int
+}
+
+// scheduleDetail starts the debounce timer for a view's detail load.
+func scheduleDetail(owner tab, gen int) tea.Cmd {
+	return tea.Tick(detailDebounce, func(time.Time) tea.Msg {
+		return detailTickMsg{owner: owner, gen: gen}
+	})
+}
 
 // previewMessageLimit bounds how many messages the (whole-session) Browse preview
 // loads — enough to fill any pane without formatting a whole long session per frame.

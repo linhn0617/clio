@@ -89,6 +89,10 @@ func (v searchView) Update(msg tea.Msg) (searchView, tea.Cmd) {
 		if msg.owner == tabSearch && msg.gen == v.previewGen { // ours, and not superseded
 			v.previewMsgs, v.previewErr = msg.msgs, msg.err
 		}
+	case detailTickMsg:
+		if msg.owner == tabSearch && msg.gen == v.previewGen { // debounce settled, still current
+			return v, v.previewCmd()
+		}
 	case tea.KeyMsg:
 		// The query input is focused: arrows navigate; printable keys (including
 		// j/k/q) are query text.
@@ -145,16 +149,22 @@ func (v searchView) runSearch(g int) tea.Cmd {
 	}
 }
 
-// loadPreview reads a dialogue window around the selected hit for the preview
-// pane. It bumps the preview generation so a slower response for an earlier hit
-// is dropped, and returns the updated view alongside the command.
+// loadPreview bumps the preview generation and starts the debounce timer; the
+// matching detailTickMsg fires the actual query, so holding ↑/↓ coalesces into
+// one load for the final hit instead of one per intermediate row.
 func (v searchView) loadPreview() (searchView, tea.Cmd) {
 	v.previewGen++
+	return v, scheduleDetail(tabSearch, v.previewGen)
+}
+
+// previewCmd reads a dialogue window around the selected hit, tagged with the
+// current preview generation so a slower response for an earlier hit is dropped.
+func (v searchView) previewCmd() tea.Cmd {
 	if v.selected < 0 || v.selected >= len(v.results) {
-		return v, nil
+		return nil
 	}
 	h := v.results[v.selected]
-	return v, loadHitPreview(v.ctx, v.db, h.sessionUUID, h.seq, tabSearch, v.previewGen)
+	return loadHitPreview(v.ctx, v.db, h.sessionUUID, h.seq, tabSearch, v.previewGen)
 }
 
 // selectedHitSeq is the in-session seq of the selected hit, marked in the preview;

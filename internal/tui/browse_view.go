@@ -62,6 +62,10 @@ func (v browseView) Update(msg tea.Msg) (browseView, tea.Cmd) {
 		if msg.owner == tabBrowse && msg.gen == v.previewGen { // ours, and not superseded
 			v.previewMsgs, v.previewErr = msg.msgs, msg.err
 		}
+	case detailTickMsg:
+		if msg.owner == tabBrowse && msg.gen == v.previewGen { // debounce settled, still current
+			return v, v.previewCmd()
+		}
 	case tea.KeyMsg:
 		// No text input on this tab: arrows and j/k both navigate the list.
 		switch msg.String() {
@@ -88,12 +92,17 @@ func (v browseView) selectedSession() string {
 	return ""
 }
 
-// loadPreview reads the selected session's messages for the preview pane. It
-// bumps the preview generation so a slower response for an earlier selection is
-// dropped, and returns the updated view alongside the command.
+// loadPreview bumps the preview generation and starts the debounce timer; the
+// matching detailTickMsg fires the query, so holding j/k coalesces into one load.
 func (v browseView) loadPreview() (browseView, tea.Cmd) {
 	v.previewGen++
-	return v, loadSessionPreview(v.ctx, v.db, v.selectedSession(), tabBrowse, v.previewGen)
+	return v, scheduleDetail(tabBrowse, v.previewGen)
+}
+
+// previewCmd reads the selected session's messages, tagged with the current
+// preview generation so a slower response for an earlier selection is dropped.
+func (v browseView) previewCmd() tea.Cmd {
+	return loadSessionPreview(v.ctx, v.db, v.selectedSession(), tabBrowse, v.previewGen)
 }
 
 // selectPreview drops the previous session's preview before loading the new

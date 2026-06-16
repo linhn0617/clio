@@ -36,6 +36,7 @@ type activityView struct {
 	selected      int
 	loaded        bool
 	err           error
+	drillGen      int // bumps on each drill load; debounce ticks and stale results are dropped
 	drill         []sessions.Session
 	drillErr      error
 }
@@ -80,7 +81,14 @@ func (v activityView) switchKind() (activityView, tea.Cmd) {
 // selection's, so the detail pane never shows sessions for a different value.
 func (v activityView) selectDrill() (activityView, tea.Cmd) {
 	v.drill, v.drillErr = nil, nil
-	return v, v.drillCmd()
+	return v.scheduleDrill()
+}
+
+// scheduleDrill bumps the drill generation and starts the debounce timer; the
+// matching detailTickMsg fires the query, so holding j/k coalesces into one drill.
+func (v activityView) scheduleDrill() (activityView, tea.Cmd) {
+	v.drillGen++
+	return v, scheduleDetail(tabActivity, v.drillGen)
 }
 
 // load aggregates the top values of the current kind.
@@ -118,11 +126,15 @@ func (v activityView) Update(msg tea.Msg) (activityView, tea.Cmd) {
 		if msg.kind == v.currentKind() {
 			v.entries, v.err, v.selected, v.loaded = msg.entries, msg.err, 0, true
 			v.drill, v.drillErr = nil, nil
-			return v, v.drillCmd()
+			return v.scheduleDrill()
 		}
 	case activityDrillMsg:
 		if msg.kind == v.currentKind() && msg.value == v.selectedValue() {
 			v.drill, v.drillErr = msg.sessions, msg.err
+		}
+	case detailTickMsg:
+		if msg.owner == tabActivity && msg.gen == v.drillGen { // debounce settled, still current
+			return v, v.drillCmd()
 		}
 	case tea.KeyMsg:
 		switch msg.String() {
