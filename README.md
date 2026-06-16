@@ -6,7 +6,7 @@ English | [繁體中文](./README_zh-TW.md)
 
 clio indexes Claude Code's session files (`~/.claude/projects/*.jsonl`) into a local SQLite + FTS5 database and exposes them through two interfaces:
 
-- **CLI** — `clio search` / `clio ask` / `clio list` / `clio show` to search, answer questions over, and read past conversations across all projects
+- **CLI** — `clio search` / `clio ask` / `clio list` / `clio show` to search, answer questions over, and read past conversations across all projects, or `clio tui` for an interactive dashboard
 - **MCP server** — lets Claude Code query its own history in-session ("what did we discuss last week?", "how did we fix that bug?")
 
 It is local-first, read-only against your `.claude` data, and never writes to your original session files.
@@ -26,13 +26,13 @@ You *could* `grep ~/.claude/projects/*.jsonl` — but that's exactly what clio i
 
 **1. Install the binary**
 
-**Prebuilt (recommended)** — download the asset for your platform from the [latest release](https://github.com/linhn0617/clio/releases/latest) (current: [**v0.6.0**](https://github.com/linhn0617/clio/releases/tag/v0.6.0); macOS/Linux `amd64`+`arm64`, Windows `amd64`), put it on your `PATH`, and verify it against `SHASUMS256.txt`. This repo is private, so download while signed in to GitHub.
+**Prebuilt (recommended)** — download the asset for your platform from the [latest release](https://github.com/linhn0617/clio/releases/latest) (current: [**v0.7.0**](https://github.com/linhn0617/clio/releases/tag/v0.7.0); macOS/Linux `amd64`+`arm64`, Windows `amd64`), put it on your `PATH`, and verify it against `SHASUMS256.txt`. This repo is private, so download while signed in to GitHub.
 
 **Or with `go install`:**
 
 ```
 export GOPRIVATE=github.com/linhn0617/*   # private repo: set once
-go install github.com/linhn0617/clio/cmd/clio@v0.6.0   # or @latest for the newest
+go install github.com/linhn0617/clio/cmd/clio@v0.7.0   # or @latest for the newest
 ```
 
 This drops `clio` into `$(go env GOPATH)/bin` — make sure that's on your `PATH`, and that your git/GitHub auth can clone the private repo.
@@ -60,6 +60,7 @@ Claude calls clio over MCP to answer. While Claude Code runs, clio's MCP server 
 **4. (Optional) Use the CLI directly**
 
 ```
+clio tui                        # interactive dashboard: search/browse/activity/ask
 clio search "驗證 流程"          # full-text search (CJK + code)
 clio ask "how did we fix that auth bug"   # cited evidence bundle for a question (no generation)
 clio list --since 7d --touched auth.ts    # browse recent sessions, filter by activity

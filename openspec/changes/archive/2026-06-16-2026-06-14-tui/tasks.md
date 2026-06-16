@@ -25,5 +25,5 @@
 
 - [x] 4.1 `go build/vet/test ./...` green (incl. `-race` + windows cross-build);
   `openspec validate --strict`.
-- [ ] 4.2 Third-party (codex) review of the real diff to a clean gate; then Claude
+- [x] 4.2 Third-party (codex) review of the real diff to a clean gate; then Claude
   `/review`.
