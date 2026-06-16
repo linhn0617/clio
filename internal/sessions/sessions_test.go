@@ -101,6 +101,24 @@ func TestListSessionsFilterByRan(t *testing.T) {
 	}
 }
 
+// TargetKind/TargetValue match a tool_targets entry exactly — unlike Touched
+// (prefix) and Ran (substring), so an Activity drill matches its grouped value
+// and not substring-related neighbours.
+func TestListSessionsFilterByExactTarget(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p", 1)
+	addSession(t, d, "s2", "/p", 1)
+	addTarget(t, d, "s1", "command", "go test")
+	addTarget(t, d, "s2", "command", "go test ./...")
+	got, err := ListSessions(context.Background(), d, ListFilter{TargetKind: "command", TargetValue: "go test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].UUID != "s1" {
+		t.Fatalf("exact target should match only the exact command, got %+v", got)
+	}
+}
+
 func TestActivityByKind(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p", 1)
@@ -283,14 +301,14 @@ func TestGetMessagesPaginationAndHasMore(t *testing.T) {
 	for i := range 5 {
 		addMsg(t, d, "s1", i, "user", "m")
 	}
-	page, hasMore, err := GetMessages(context.Background(), d, "s1", 0, 2, false)
+	page, hasMore, err := GetMessages(context.Background(), d, "s1", 0, 2, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(page) != 2 || !hasMore {
 		t.Fatalf("page=%d hasMore=%v want 2,true", len(page), hasMore)
 	}
-	last, hasMore, _ := GetMessages(context.Background(), d, "s1", 4, 2, false)
+	last, hasMore, _ := GetMessages(context.Background(), d, "s1", 4, 2, false, true)
 	if len(last) != 1 || hasMore {
 		t.Fatalf("last page=%d hasMore=%v want 1,false", len(last), hasMore)
 	}
@@ -301,13 +319,32 @@ func TestGetMessagesExcludesToolOutput(t *testing.T) {
 	addSession(t, d, "s1", "/p", 1)
 	addMsg(t, d, "s1", 0, "user", "hi")
 	addMsg(t, d, "s1", 1, "tool_result", "tool noise")
-	page, _, _ := GetMessages(context.Background(), d, "s1", 0, 50, false)
+	page, _, _ := GetMessages(context.Background(), d, "s1", 0, 50, false, true)
 	if len(page) != 1 || page[0].Role != "user" {
 		t.Fatalf("expected only user msg, got %+v", page)
 	}
-	all, _, _ := GetMessages(context.Background(), d, "s1", 0, 50, true)
+	all, _, _ := GetMessages(context.Background(), d, "s1", 0, 50, true, true)
 	if len(all) != 2 {
 		t.Fatalf("with tool output expected 2, got %d", len(all))
+	}
+}
+
+// includeRaw=false omits the heavy raw_json column while keeping content intact,
+// so the high-frequency TUI preview path doesn't pull it off disk.
+func TestGetMessagesOmitsRawWhenNotIncluded(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p", 1)
+	addMsg(t, d, "s1", 0, "user", "hello")
+	full, _, err := GetMessages(context.Background(), d, "s1", 0, 50, true, true)
+	if err != nil || len(full) != 1 || full[0].RawJSON == "" {
+		t.Fatalf("with includeRaw the row should carry raw_json: %+v err=%v", full, err)
+	}
+	lite, _, err := GetMessages(context.Background(), d, "s1", 0, 50, true, false)
+	if err != nil || len(lite) != 1 || lite[0].RawJSON != "" {
+		t.Fatalf("without includeRaw raw_json should be empty: %+v err=%v", lite, err)
+	}
+	if lite[0].Content != full[0].Content {
+		t.Fatalf("content must be unaffected by omitting raw_json: %q vs %q", lite[0].Content, full[0].Content)
 	}
 }
 

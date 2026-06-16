@@ -194,7 +194,7 @@ func assembleGroup(ctx context.Context, database *db.DB, uuid string, score floa
 			break
 		}
 		used++
-		win, err := sessions.GetWindow(ctx, database, uuid, hs, opt.Window, opt.Window, false)
+		win, err := sessions.GetWindow(ctx, database, uuid, hs, opt.Window, opt.Window, false, false)
 		if err != nil {
 			return EvidenceGroup{}, err
 		}

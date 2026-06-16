@@ -168,7 +168,7 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 		}
 		offset := req.GetInt("offset", 0)
 		limit := clamp(req.GetInt("limit", defaultReadLimit), defaultReadLimit, maxReadLimit)
-		msgs, hasMore, err := sessions.GetMessages(ctx, database, sess.UUID, offset, limit, req.GetBool("include_tool_output", false))
+		msgs, hasMore, err := sessions.GetMessages(ctx, database, sess.UUID, offset, limit, req.GetBool("include_tool_output", false), false)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}

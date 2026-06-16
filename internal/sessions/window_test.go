@@ -27,7 +27,7 @@ func TestGetWindowSkipsToolOutput(t *testing.T) {
 	addMsg(t, d, "s1", 4, "user", "HIT question")
 	addMsg(t, d, "s1", 5, "assistant", "HIT answer")
 
-	win, err := GetWindow(context.Background(), d, "s1", 4, 1, 1, false)
+	win, err := GetWindow(context.Background(), d, "s1", 4, 1, 1, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestGetWindowClampsAtStart(t *testing.T) {
 	addMsg(t, d, "s1", 1, "assistant", "second")
 	addMsg(t, d, "s1", 2, "user", "third")
 
-	win, err := GetWindow(context.Background(), d, "s1", 0, 2, 1, false)
+	win, err := GetWindow(context.Background(), d, "s1", 0, 2, 1, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

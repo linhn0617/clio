@@ -46,7 +46,7 @@ func newShowCmd() *cobra.Command {
 			if limit <= 0 {
 				limit = defaultShowMessages
 			}
-			msgs, _, err := sessions.GetMessages(cmd.Context(), database, sess.UUID, 0, limit, !noToolOutput)
+			msgs, _, err := sessions.GetMessages(cmd.Context(), database, sess.UUID, 0, limit, !noToolOutput, true)
 			if err != nil {
 				return err
 			}

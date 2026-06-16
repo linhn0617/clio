@@ -40,6 +40,8 @@ type ListFilter struct {
 	Touched       string // only sessions whose tool calls touched a file under this path prefix
 	Tool          string // only sessions that used this tool (exact name)
 	Ran           string // only sessions that ran a command containing this substring
+	TargetKind    string // with TargetValue: only sessions with a tool_targets row of this exact kind
+	TargetValue   string // with TargetKind: only sessions with a tool_targets row of this exact value
 }
 
 // ListSessions returns sessions matching filter, most recent first.
@@ -73,6 +75,10 @@ func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session
 	if f.Ran != "" {
 		q += ` AND uuid IN (SELECT session_uuid FROM tool_targets WHERE kind='command' AND value LIKE ? ESCAPE '\')`
 		args = append(args, "%"+db.EscapeLike(f.Ran)+"%")
+	}
+	if f.TargetKind != "" && f.TargetValue != "" {
+		q += ` AND uuid IN (SELECT session_uuid FROM tool_targets WHERE kind = ? AND value = ?)`
+		args = append(args, f.TargetKind, f.TargetValue)
 	}
 	q += " ORDER BY ended_at DESC LIMIT ?"
 	args = append(args, f.Limit)
@@ -139,14 +145,25 @@ func ResolvePrefix(ctx context.Context, database *db.DB, prefix string) (Session
 	}
 }
 
+// rawColumn selects raw_json only when the caller needs it; otherwise an empty
+// string in its place, so high-frequency readers (e.g. the TUI preview) don't
+// pull the largest column off disk for content they never render.
+func rawColumn(includeRaw bool) string {
+	if includeRaw {
+		return "raw_json"
+	}
+	return "''"
+}
+
 // GetMessages returns a session's messages ordered by seq, paginated.
 // When includeToolOutput is false, tool_use/tool_result/thinking are omitted.
+// When includeRaw is false, raw_json is not read (Message.RawJSON stays empty).
 // Returns the page and whether more rows exist past offset+limit.
-func GetMessages(ctx context.Context, database *db.DB, sessionUUID string, offset, limit int, includeToolOutput bool) ([]Message, bool, error) {
+func GetMessages(ctx context.Context, database *db.DB, sessionUUID string, offset, limit int, includeToolOutput, includeRaw bool) ([]Message, bool, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	q := `SELECT seq, COALESCE(ts,0), role, content, raw_json FROM messages WHERE session_uuid = ?`
+	q := `SELECT seq, COALESCE(ts,0), role, content, ` + rawColumn(includeRaw) + ` FROM messages WHERE session_uuid = ?`
 	if !includeToolOutput {
 		q += " AND role IN ('user','assistant')"
 	}
@@ -179,7 +196,7 @@ func GetMessages(ctx context.Context, database *db.DB, sessionUUID string, offse
 // following ones, ordered by seq. The window is taken in user/assistant turn space
 // (when includeToolOutput is false), so tool_use/tool_result events between a
 // question and its answer neither consume the window nor appear in it.
-func GetWindow(ctx context.Context, database *db.DB, sessionUUID string, hitSeq, before, after int, includeToolOutput bool) ([]Message, error) {
+func GetWindow(ctx context.Context, database *db.DB, sessionUUID string, hitSeq, before, after int, includeToolOutput, includeRaw bool) ([]Message, error) {
 	if before < 0 {
 		before = 0
 	}
@@ -190,7 +207,7 @@ func GetWindow(ctx context.Context, database *db.DB, sessionUUID string, hitSeq,
 	if !includeToolOutput {
 		roleClause = " AND role IN ('user','assistant')"
 	}
-	const cols = `seq, COALESCE(ts,0), role, content, raw_json`
+	cols := `seq, COALESCE(ts,0), role, content, ` + rawColumn(includeRaw)
 
 	// The hit and preceding turns, newest-first, reversed to ascending.
 	pre, err := windowRows(ctx, database,

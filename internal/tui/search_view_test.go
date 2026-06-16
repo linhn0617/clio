@@ -1,0 +1,331 @@
+package tui
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/linhn0617/clio/internal/db"
+	"github.com/linhn0617/clio/internal/sessions"
+)
+
+// A cancelled context surfaces an error from the shared preview load instead of
+// running the query — so quitting the TUI never blocks on in-flight DB work.
+func TestPreviewLoadHonorsContext(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	addMsg(t, d, "s1", 0, "user", "hi")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	msg := loadSessionPreview(ctx, d, "s1", tabBrowse, 1)()
+	if msg.(previewLoadedMsg).err == nil {
+		t.Fatal("a cancelled context should surface an error from the preview load")
+	}
+}
+
+func testDB(t *testing.T) *db.DB {
+	t.Helper()
+	d, err := db.Open(filepath.Join(t.TempDir(), "t.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	return d
+}
+
+func addSession(t *testing.T, d *db.DB, uuid, project string) {
+	t.Helper()
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, ended_at, turn_count) VALUES (?,?,?,?,1)`,
+		uuid, project, uuid+".jsonl", time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func addMsg(t *testing.T, d *db.DB, sess string, seq int, role, content string) {
+	t.Helper()
+	if _, err := d.Exec(`INSERT INTO messages(session_uuid, seq, ts, role, content, raw_json) VALUES (?,?,?,?,?,?)`,
+		sess, seq, time.Now().Unix(), role, content, "{}"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func sUpdate(t *testing.T, v searchView, msg tea.Msg) (searchView, tea.Cmd) {
+	t.Helper()
+	return v.Update(msg)
+}
+
+// Typing updates the query and schedules a debounced search; only the latest
+// debounce generation actually fires the query (stale keystrokes are dropped).
+func TestSearchViewDebounceGeneration(t *testing.T) {
+	v := searchView{db: testDB(t)}
+	v, cmd := sUpdate(t, v, runes("au"))
+	if v.query != "au" {
+		t.Fatalf("query = %q, want au", v.query)
+	}
+	if cmd == nil {
+		t.Fatal("typing should schedule a debounce command")
+	}
+	// A stale debounce (older generation) must NOT trigger a search.
+	if _, c := sUpdate(t, v, searchDebounceMsg{gen: v.gen - 1}); c != nil {
+		t.Fatal("stale debounce generation should not fire a search")
+	}
+	// The current generation fires the search command.
+	if _, c := sUpdate(t, v, searchDebounceMsg{gen: v.gen}); c == nil {
+		t.Fatal("current debounce generation should fire a search")
+	}
+}
+
+// Changing the query clears the previous query's results and preview immediately
+// and marks the view as searching, so stale hits are never shown or navigable.
+func TestSearchViewQueryChangeClearsStaleResults(t *testing.T) {
+	v := searchView{
+		db:          testDB(t),
+		query:       "auth",
+		results:     []searchHit{{sessionUUID: "s1"}, {sessionUUID: "s2"}},
+		previewMsgs: []sessions.Message{{Content: "x"}},
+		selected:    1,
+	}
+	v, _ = sUpdate(t, v, runes("x"))
+	if len(v.results) != 0 || len(v.previewMsgs) != 0 || v.selected != 0 {
+		t.Fatalf("changing the query should clear stale results/preview/selection: %+v", v)
+	}
+	if !v.searching {
+		t.Fatal("a pending search should mark the view as searching")
+	}
+	// Results arriving for the current generation clear the searching flag.
+	v, _ = sUpdate(t, v, searchResultsMsg{gen: v.gen, results: []searchHit{{sessionUUID: "s3"}}})
+	if v.searching {
+		t.Fatal("results arriving should clear the searching flag")
+	}
+}
+
+// Results for the current generation populate the list; stale results are ignored.
+func TestSearchViewResults(t *testing.T) {
+	v := searchView{gen: 5}
+	res := []searchHit{{sessionUUID: "s1"}, {sessionUUID: "s2"}}
+	v, _ = sUpdate(t, v, searchResultsMsg{gen: 5, results: res})
+	if len(v.results) != 2 || v.selected != 0 {
+		t.Fatalf("results not populated / selection not reset: %+v", v)
+	}
+	// Stale results (older generation) ignored.
+	v2, _ := sUpdate(t, v, searchResultsMsg{gen: 4, results: nil})
+	if len(v2.results) != 2 {
+		t.Fatal("stale results should be ignored")
+	}
+}
+
+// Editing the query invalidates an in-flight preview from the previous
+// selection, so a late response can't repopulate the pane mid-search.
+func TestSearchViewQueryChangeInvalidatesPreview(t *testing.T) {
+	v := searchView{db: testDB(t), results: []searchHit{{sessionUUID: "s1"}}, previewGen: 3}
+	staleGen := v.previewGen
+	v, _ = sUpdate(t, v, runes("x")) // edit query -> scheduleSearch
+	v, _ = sUpdate(t, v, previewLoadedMsg{owner: tabSearch, gen: staleGen, msgs: []sessions.Message{{Content: "old"}}})
+	if len(v.previewMsgs) != 0 {
+		t.Fatal("an in-flight preview from before the query change should be ignored")
+	}
+}
+
+// Moving the selection clears the previous session's preview before loading the
+// new one, so the preview pane never shows the wrong conversation.
+func TestSearchViewSelectionClearsStalePreview(t *testing.T) {
+	v := searchView{
+		results:     []searchHit{{sessionUUID: "s1"}, {sessionUUID: "s2"}},
+		previewMsgs: []sessions.Message{{Content: "old session"}},
+	}
+	v, _ = sUpdate(t, v, key(tea.KeyDown))
+	if len(v.previewMsgs) != 0 {
+		t.Fatal("changing selection should clear the stale preview before the new load")
+	}
+}
+
+// Up/Down move the selection, clamped to the result range.
+func TestSearchViewSelection(t *testing.T) {
+	v := searchView{gen: 1, results: []searchHit{{}, {}, {}}}
+	v, _ = sUpdate(t, v, key(tea.KeyDown))
+	v, _ = sUpdate(t, v, key(tea.KeyDown))
+	if v.selected != 2 {
+		t.Fatalf("selected = %d, want 2", v.selected)
+	}
+	v, _ = sUpdate(t, v, key(tea.KeyDown)) // clamp at end
+	if v.selected != 2 {
+		t.Fatalf("selection should clamp at the last result, got %d", v.selected)
+	}
+	for range 5 {
+		v, _ = sUpdate(t, v, key(tea.KeyUp))
+	}
+	if v.selected != 0 {
+		t.Fatalf("selection should clamp at 0, got %d", v.selected)
+	}
+}
+
+// The search command actually queries the index for the current query.
+func TestSearchViewRunSearchQueries(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	addMsg(t, d, "s1", 0, "user", "the authentication module design")
+	v := searchView{db: d, query: "authentication", gen: 1}
+	msg := v.runSearch(1)()
+	r, ok := msg.(searchResultsMsg)
+	if !ok {
+		t.Fatalf("runSearch should emit searchResultsMsg, got %T", msg)
+	}
+	if r.err != nil || len(r.results) != 1 || r.results[0].sessionUUID != "s1" {
+		t.Fatalf("runSearch result wrong: %+v err=%v", r.results, r.err)
+	}
+}
+
+// Moving the selection schedules a preview load for the newly selected session.
+func TestSearchViewSelectionSchedulesPreview(t *testing.T) {
+	v := searchView{db: testDB(t), results: []searchHit{{sessionUUID: "s1"}, {sessionUUID: "s2"}}}
+	_, cmd := sUpdate(t, v, key(tea.KeyDown))
+	if cmd == nil {
+		t.Fatal("moving the selection should schedule a preview load")
+	}
+	// With no results there is nothing to preview.
+	if _, c := sUpdate(t, searchView{db: testDB(t)}, key(tea.KeyDown)); c != nil {
+		t.Fatal("no results should not schedule a preview load")
+	}
+}
+
+// The preview command reads a window around the selected hit's messages.
+func TestSearchViewPreviewCmdQueries(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	addMsg(t, d, "s1", 0, "user", "hello world")
+	addMsg(t, d, "s1", 1, "assistant", "hi there")
+	addMsg(t, d, "s1", 2, "user", "more talk")
+	v := searchView{db: d, results: []searchHit{{sessionUUID: "s1", seq: 1}}}
+	pm, ok := v.previewCmd()().(previewLoadedMsg)
+	if !ok {
+		t.Fatalf("previewCmd should emit previewLoadedMsg, got %T", v.previewCmd()())
+	}
+	if pm.err != nil || pm.owner != tabSearch {
+		t.Fatalf("preview wrong: owner=%d %+v err=%v", pm.owner, pm.msgs, pm.err)
+	}
+	// The preview window is anchored on the selected hit's seq.
+	found := false
+	for _, m := range pm.msgs {
+		if m.Seq == 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("preview window should include the hit seq 1: %+v", pm.msgs)
+	}
+}
+
+// A selection schedules a debounced detail tick; only the matching tick (this
+// view, current generation) fires the actual preview query.
+func TestSearchViewPreviewDebounced(t *testing.T) {
+	v := searchView{db: testDB(t), results: []searchHit{{sessionUUID: "s1"}}}
+	v2, cmd := v.loadPreview()
+	tick, ok := cmd().(detailTickMsg)
+	if !ok || tick.owner != tabSearch || tick.gen != v2.previewGen {
+		t.Fatalf("loadPreview should schedule a detail tick for this view+gen, got %#v", cmd())
+	}
+	if _, c := sUpdate(t, v2, detailTickMsg{owner: tabSearch, gen: v2.previewGen}); c == nil {
+		t.Fatal("a matching detail tick should fire the preview query")
+	}
+	if _, c := sUpdate(t, v2, detailTickMsg{owner: tabSearch, gen: v2.previewGen - 1}); c != nil {
+		t.Fatal("a superseded (older generation) detail tick should not fire a query")
+	}
+	if _, c := sUpdate(t, v2, detailTickMsg{owner: tabBrowse, gen: v2.previewGen}); c != nil {
+		t.Fatal("a detail tick owned by another view should be ignored")
+	}
+}
+
+// Preview results for the current generation populate the pane; a stale
+// generation, or a preview owned by another view, is ignored.
+func TestSearchViewPreviewResults(t *testing.T) {
+	v := searchView{results: []searchHit{{sessionUUID: "s1"}}, previewGen: 5}
+	v, _ = sUpdate(t, v, previewLoadedMsg{owner: tabSearch, gen: 5, msgs: []sessions.Message{{Role: "user", Content: "hi"}}})
+	if len(v.previewMsgs) != 1 {
+		t.Fatalf("preview not populated: %+v", v.previewMsgs)
+	}
+	if v2, _ := sUpdate(t, v, previewLoadedMsg{owner: tabSearch, gen: 4, msgs: nil}); len(v2.previewMsgs) != 1 {
+		t.Fatal("a stale preview generation should be ignored")
+	}
+	if v3, _ := sUpdate(t, v, previewLoadedMsg{owner: tabBrowse, gen: 5, msgs: nil}); len(v3.previewMsgs) != 1 {
+		t.Fatal("a preview owned by another view should be ignored")
+	}
+}
+
+// View renders both panes of the master-detail layout: the results list and the
+// session preview.
+func TestSearchViewRendersMasterDetail(t *testing.T) {
+	v := searchView{
+		width: 100, height: 30, query: "auth",
+		results:     []searchHit{{sessionUUID: "s1", project: "/proj", role: "user", snippet: "the [auth] module"}},
+		previewMsgs: []sessions.Message{{Role: "assistant", Content: "the auth module design notes"}},
+	}
+	out := v.View()
+	if !strings.Contains(out, "module") {
+		t.Fatalf("view should show the result snippet (left pane): %q", out)
+	}
+	if !strings.Contains(out, "design notes") {
+		t.Fatalf("view should show the preview content (right pane): %q", out)
+	}
+}
+
+// The selected hit's message (by seq) is marked in the preview window, so the
+// user sees which turn they selected — even with several hits in one session.
+func TestSearchViewPreviewMarksHit(t *testing.T) {
+	v := searchView{
+		width: 100, height: 30,
+		results: []searchHit{{sessionUUID: "s1", seq: 7}},
+		previewMsgs: []sessions.Message{
+			{Seq: 6, Role: "user", Content: "before the hit"},
+			{Seq: 7, Role: "assistant", Content: "the hit line"},
+			{Seq: 8, Role: "user", Content: "after the hit"},
+		},
+	}
+	out := v.View()
+	// One marker for the selected list row, one for the hit message in the
+	// preview: if seq-marking broke, only the list row would be marked.
+	if n := strings.Count(out, previewMatchMarker); n < 2 {
+		t.Fatalf("the selected hit should be marked in the preview (markers=%d): %q", n, out)
+	}
+}
+
+// renderPreview surfaces a load error instead of rendering an empty pane.
+func TestRenderPreviewSurfacesError(t *testing.T) {
+	out := renderPreview(nil, errors.New("boom"), -1)
+	if !strings.Contains(out, "preview error") || !strings.Contains(out, "boom") {
+		t.Fatalf("a preview load error should be shown: %q", out)
+	}
+}
+
+// The search status line surfaces a preview-load error (distinct from a query error).
+func TestSearchViewStatusShowsPreviewError(t *testing.T) {
+	v := searchView{width: 80, height: 24, previewErr: errors.New("disk gone")}
+	if !strings.Contains(v.View(), "preview") {
+		t.Fatalf("status should surface the preview error: %q", v.View())
+	}
+}
+
+// loadHitPreview honors context cancellation (the Search preview path).
+func TestLoadHitPreviewHonorsContext(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	addMsg(t, d, "s1", 0, "user", "hi")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	msg := loadHitPreview(ctx, d, "s1", 0, tabSearch, 1)()
+	if msg.(previewLoadedMsg).err == nil {
+		t.Fatal("a cancelled context should surface an error from the hit-preview load")
+	}
+}
+
+// The status line surfaces errors instead of crashing the view.
+func TestSearchViewStatusShowsError(t *testing.T) {
+	v := searchView{width: 80, height: 24, err: errors.New("boom")}
+	if !strings.Contains(v.View(), "boom") {
+		t.Fatalf("status line should surface the error: %q", v.View())
+	}
+}

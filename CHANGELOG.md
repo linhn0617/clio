@@ -5,6 +5,32 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-16
+
+Browse and search your history without leaving the terminal. `clio tui` opens a
+full-screen dashboard over the same index the CLI and MCP server read — live
+search, recent sessions, an activity overview, and question-answering — each with
+a master-detail preview of the matched conversation. Read-only: nothing is written
+to the index while you browse.
+
+### Added
+
+- `clio tui`: an interactive Bubble Tea dashboard with four tabs — **Search**
+  (debounced live search; the selected hit is windowed and highlighted in its
+  surrounding turns), **Browse** (recent sessions, optional `--project`), **Activity**
+  (top files / commands / tools, drilling into the sessions behind each entry), and
+  **Ask** (`ask` evidence groups with their windowed excerpts). `Tab`/`Shift-Tab` or
+  `1`-`4` switch tabs; `↑↓` / `j k` navigate (lists scroll to keep the selection in
+  view); `Esc` or `Ctrl-C` quits. On Search and Ask the focused input takes `q` and
+  the digits as query text. Opens like `search` (incremental catch-up; defers to a
+  running MCP server) and, when no index exists, exits with a hint to run `clio index`.
+
+### Changed
+
+- `sessions.GetMessages` / `GetWindow` take an `includeRaw` flag so the TUI preview
+  skips the `raw_json` column it never renders, keeping selection-driven loads light
+  on a large index. (internal)
+
 ## [0.6.0] - 2026-06-14
 
 Ask a question, get a cited answer from your own history. `clio ask` retrieves the

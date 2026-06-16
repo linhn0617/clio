@@ -1,0 +1,152 @@
+package tui
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-runewidth"
+
+	"github.com/linhn0617/clio/internal/db"
+	"github.com/linhn0617/clio/internal/sessions"
+)
+
+// browseListLimit bounds how many recent sessions the Browse list loads.
+const browseListLimit = 50
+
+// browseView lists recent sessions (optionally filtered by project) with a
+// preview of the selected session's messages.
+type browseView struct {
+	db            *db.DB
+	ctx           context.Context
+	width, height int
+	project       string // optional project-path prefix filter
+	sessions      []sessions.Session
+	selected      int
+	loaded        bool
+	err           error
+	previewGen    int // bumps on each preview load; stale preview responses are dropped
+	previewMsgs   []sessions.Message
+	previewErr    error
+}
+
+// browseLoadedMsg carries the recent sessions loaded for the list.
+type browseLoadedMsg struct {
+	sessions []sessions.Session
+	err      error
+}
+
+// load fetches the recent sessions for the list.
+func (v browseView) load() tea.Cmd {
+	database, project, ctx := v.db, v.project, orBackground(v.ctx)
+	if database == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ss, err := sessions.ListSessions(ctx, database,
+			sessions.ListFilter{ProjectPrefix: project, Limit: browseListLimit})
+		return browseLoadedMsg{sessions: ss, err: err}
+	}
+}
+
+func (v browseView) Update(msg tea.Msg) (browseView, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		v.width, v.height = msg.Width, msg.Height
+	case browseLoadedMsg:
+		v.sessions, v.err, v.selected, v.loaded = msg.sessions, msg.err, 0, true
+		v.previewMsgs, v.previewErr = nil, nil
+		return v.loadPreview()
+	case previewLoadedMsg:
+		if msg.owner == tabBrowse && msg.gen == v.previewGen { // ours, and not superseded
+			v.previewMsgs, v.previewErr = msg.msgs, msg.err
+		}
+	case detailTickMsg:
+		if msg.owner == tabBrowse && msg.gen == v.previewGen { // debounce settled, still current
+			return v, v.previewCmd()
+		}
+	case tea.KeyMsg:
+		// No text input on this tab: arrows and j/k both navigate the list.
+		switch msg.String() {
+		case "up", "k":
+			if v.selected > 0 {
+				v.selected--
+				return v.selectPreview()
+			}
+		case "down", "j":
+			if v.selected < len(v.sessions)-1 {
+				v.selected++
+				return v.selectPreview()
+			}
+		}
+	}
+	return v, nil
+}
+
+// selectedSession is the UUID of the current selection, or "" when there is none.
+func (v browseView) selectedSession() string {
+	if v.selected >= 0 && v.selected < len(v.sessions) {
+		return v.sessions[v.selected].UUID
+	}
+	return ""
+}
+
+// loadPreview bumps the preview generation and starts the debounce timer; the
+// matching detailTickMsg fires the query, so holding j/k coalesces into one load.
+func (v browseView) loadPreview() (browseView, tea.Cmd) {
+	v.previewGen++
+	return v, scheduleDetail(tabBrowse, v.previewGen)
+}
+
+// previewCmd reads the selected session's messages, tagged with the current
+// preview generation so a slower response for an earlier selection is dropped.
+func (v browseView) previewCmd() tea.Cmd {
+	return loadSessionPreview(v.ctx, v.db, v.selectedSession(), tabBrowse, v.previewGen)
+}
+
+// selectPreview drops the previous session's preview before loading the new
+// selection's, so the preview pane never shows the wrong conversation.
+func (v browseView) selectPreview() (browseView, tea.Cmd) {
+	v.previewMsgs, v.previewErr = nil, nil
+	return v.loadPreview()
+}
+
+// View renders the master-detail layout: the session list on the left, the
+// selected session's preview on the right, and a status line beneath.
+func (v browseView) View() string {
+	return masterDetail(v.width, v.height, v.renderList,
+		renderPreview(v.previewMsgs, v.previewErr, -1), v.statusLine())
+}
+
+func (v browseView) renderList(w, h int) string {
+	if len(v.sessions) == 0 {
+		if v.loaded {
+			return "No sessions."
+		}
+		return "Loading…"
+	}
+	var lines []string
+	start, end := visibleWindow(v.selected, len(v.sessions), h)
+	for i := start; i < end; i++ {
+		s := v.sessions[i]
+		marker := "  "
+		if i == v.selected {
+			marker = previewMatchMarker
+		}
+		label := s.Title
+		if label == "" {
+			label = s.ProjectPath
+		}
+		row := marker + shortID(s.UUID) + " " + oneLine(label)
+		lines = append(lines, runewidth.Truncate(row, w, "…"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (v browseView) statusLine() string {
+	if v.err != nil {
+		return "⚠ " + v.err.Error()
+	}
+	return fmt.Sprintf("%d sessions · ↑/↓ navigate · tab switch view · esc quit", len(v.sessions))
+}
