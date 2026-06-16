@@ -59,5 +59,11 @@ func masterDetail(width, height int, renderList func(w, h int) string, preview, 
 	for i, ln := range lines {
 		lines[i] = runewidth.Truncate(ln, w, "")
 	}
-	return strings.Join(lines, "\n") + "\n" + runewidth.Truncate(status, w, "…")
+	// The "…" ellipsis is itself width 2, so it can't fit (and would overflow) a
+	// 1-cell terminal; drop to an empty tail there, like the body rows.
+	statusTail := "…"
+	if w < 2 {
+		statusTail = ""
+	}
+	return strings.Join(lines, "\n") + "\n" + runewidth.Truncate(status, w, statusTail)
 }

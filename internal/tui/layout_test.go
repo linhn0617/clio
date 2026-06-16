@@ -20,6 +20,19 @@ func TestMasterDetailNarrowTerminalNoOverflow(t *testing.T) {
 	}
 }
 
+// Even a 1-column terminal must not overflow: the status line's "…" ellipsis is
+// width 2, so it needs an empty tail when there is no room for it.
+func TestMasterDetailWidth1NoOverflow(t *testing.T) {
+	out := masterDetail(1, 6,
+		func(w, h int) string { return "list" },
+		"preview", "12 results · ↑/↓ navigate · esc quit")
+	for _, line := range strings.Split(out, "\n") {
+		if width := runewidth.StringWidth(line); width > 1 {
+			t.Fatalf("width-1 terminal overflowed (got %d): %q", width, line)
+		}
+	}
+}
+
 // A tiny terminal must not explode into a 24-line default render.
 func TestMasterDetailTinyHeight(t *testing.T) {
 	out := masterDetail(80, 2,
