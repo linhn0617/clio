@@ -274,6 +274,35 @@ func TestSearchViewPreviewMarksHit(t *testing.T) {
 	}
 }
 
+// renderPreview surfaces a load error instead of rendering an empty pane.
+func TestRenderPreviewSurfacesError(t *testing.T) {
+	out := renderPreview(nil, errors.New("boom"), -1)
+	if !strings.Contains(out, "preview error") || !strings.Contains(out, "boom") {
+		t.Fatalf("a preview load error should be shown: %q", out)
+	}
+}
+
+// The search status line surfaces a preview-load error (distinct from a query error).
+func TestSearchViewStatusShowsPreviewError(t *testing.T) {
+	v := searchView{width: 80, height: 24, previewErr: errors.New("disk gone")}
+	if !strings.Contains(v.View(), "preview") {
+		t.Fatalf("status should surface the preview error: %q", v.View())
+	}
+}
+
+// loadHitPreview honors context cancellation (the Search preview path).
+func TestLoadHitPreviewHonorsContext(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p")
+	addMsg(t, d, "s1", 0, "user", "hi")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	msg := loadHitPreview(ctx, d, "s1", 0, tabSearch, 1)()
+	if msg.(previewLoadedMsg).err == nil {
+		t.Fatal("a cancelled context should surface an error from the hit-preview load")
+	}
+}
+
 // The status line surfaces errors instead of crashing the view.
 func TestSearchViewStatusShowsError(t *testing.T) {
 	v := searchView{width: 80, height: 24, err: errors.New("boom")}

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,22 @@ import (
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/sessions"
 )
+
+// The drill pane surfaces a drill error; the status line surfaces a list error.
+func TestActivityViewSurfacesErrors(t *testing.T) {
+	v := activityView{
+		width: 80, height: 24, loaded: true,
+		entries:  []sessions.ActivityCount{{Value: "/a", Count: 1}},
+		drillErr: errors.New("drill boom"),
+	}
+	if !strings.Contains(v.View(), "drill error") {
+		t.Fatalf("the drill pane should surface the drill error: %q", v.View())
+	}
+	v2 := activityView{width: 80, height: 24, err: errors.New("kind boom")}
+	if !strings.Contains(v2.View(), "kind boom") {
+		t.Fatalf("the status line should surface the list error: %q", v2.View())
+	}
+}
 
 func addTarget(t *testing.T, d *db.DB, sess, kind, value string) {
 	t.Helper()

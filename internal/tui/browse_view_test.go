@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -9,6 +10,14 @@ import (
 
 	"github.com/linhn0617/clio/internal/sessions"
 )
+
+// The browse status line surfaces a list-load error instead of crashing.
+func TestBrowseViewStatusShowsError(t *testing.T) {
+	v := browseView{width: 80, height: 24, err: errors.New("list boom")}
+	if !strings.Contains(v.View(), "list boom") {
+		t.Fatalf("status should surface the list error: %q", v.View())
+	}
+}
 
 // renderList scrolls so the selected row stays visible past the pane height.
 func TestBrowseViewListScrollsToSelection(t *testing.T) {
