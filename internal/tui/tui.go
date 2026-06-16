@@ -64,8 +64,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		// Reserve the tab-bar row when sizing the sub-views.
-		return m.routeAll(tea.WindowSizeMsg{Width: msg.Width, Height: msg.Height - 1})
+		// Reserve the tab-bar row when sizing the sub-views, clamped to ≥1 so a
+		// tiny terminal doesn't underflow to 0 (which renders as an unsized 24).
+		return m.routeAll(tea.WindowSizeMsg{Width: msg.Width, Height: max(msg.Height-1, 1)})
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc":

@@ -104,7 +104,7 @@ func (v askView) runAsk(g int) tea.Cmd {
 // groups on the left, the selected group's excerpts on the right.
 func (v askView) View() string {
 	header := "? " + v.query
-	body := masterDetail(v.width, v.height-1, v.renderList, v.renderExcerpts(), v.statusLine())
+	body := masterDetail(v.width, max(v.height-1, 1), v.renderList, v.renderExcerpts(), v.statusLine())
 	return header + "\n" + body
 }
 

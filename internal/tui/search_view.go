@@ -177,7 +177,7 @@ func (v searchView) selectPreview() (searchView, tea.Cmd) {
 // session preview on the right, and a status line beneath.
 func (v searchView) View() string {
 	header := "› " + v.query
-	body := masterDetail(v.width, v.height-1, v.renderList,
+	body := masterDetail(v.width, max(v.height-1, 1), v.renderList,
 		renderPreview(v.previewMsgs, v.previewErr, v.selectedHitSeq()), v.statusLine())
 	return header + "\n" + body
 }

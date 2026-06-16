@@ -173,6 +173,15 @@ func TestRootForwardsWindowSize(t *testing.T) {
 	}
 }
 
+// A real tiny terminal height clamps to ≥1 per sub-view instead of underflowing
+// to 0 (which masterDetail would treat as unsized and explode to 24 lines).
+func TestRootClampsTinyHeight(t *testing.T) {
+	m := step(t, newTest(nil), tea.WindowSizeMsg{Width: 80, Height: 1})
+	if m.search.height != 1 {
+		t.Fatalf("sub-view height should clamp to 1 at terminal height 1, got %d", m.search.height)
+	}
+}
+
 // The root view includes the active sub-view's rendering.
 func TestRootViewIncludesActiveView(t *testing.T) {
 	m := newTest(nil)

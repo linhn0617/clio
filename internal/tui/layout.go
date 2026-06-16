@@ -40,8 +40,8 @@ func masterDetail(width, height int, renderList func(w, h int) string, preview, 
 	bodyH := max(h-1, 1) // reserve the status line
 	leftW := w / 3
 	leftW = max(leftW, 24)
-	leftW = min(leftW, w-2)
-	leftW = max(leftW, 1)
+	leftW = min(leftW, w-3) // leave the divider + at least 2 cells for the right pane,
+	leftW = max(leftW, 1)   // so a width-2 CJK glyph fits instead of overflowing
 	rightW := max(w-leftW-1, 1)
 
 	box := func(width int) lipgloss.Style {
@@ -53,5 +53,11 @@ func masterDetail(width, height int, renderList func(w, h int) string, preview, 
 		divider,
 		box(rightW).Render(preview),
 	)
-	return body + "\n" + runewidth.Truncate(status, w, "…")
+	// Hard-clamp every row to the terminal width: lipgloss can pad a width-2 CJK
+	// glyph one cell past a narrow pane, which would corrupt the alt-screen.
+	lines := strings.Split(body, "\n")
+	for i, ln := range lines {
+		lines[i] = runewidth.Truncate(ln, w, "")
+	}
+	return strings.Join(lines, "\n") + "\n" + runewidth.Truncate(status, w, "…")
 }
