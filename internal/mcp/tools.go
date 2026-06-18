@@ -197,13 +197,16 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 			AgentType string `json:"agent_type,omitempty"`
 			Title     string `json:"title"`
 			Messages  []m    `json:"messages,omitempty"`
+			HasMore   bool   `json:"has_more,omitempty"`
 		}
 		inclSub := req.GetBool("include_subagents", false)
 		subs := make([]sub, 0, len(children))
 		for _, c := range children {
 			row := sub{UUID: c.UUID, AgentType: c.AgentType, Title: c.Title}
 			if inclSub {
-				cmsgs, _, err := sessions.GetMessages(ctx, database, c.UUID, 0, limit, req.GetBool("include_tool_output", false), false)
+				// Bounded by the same limit as the parent; has_more tells the client a
+				// long subagent was truncated (paginate it via read_session on its uuid).
+				cmsgs, cMore, err := sessions.GetMessages(ctx, database, c.UUID, 0, limit, req.GetBool("include_tool_output", false), false)
 				if err != nil {
 					return mcp.NewToolResultError(err.Error()), nil
 				}
@@ -212,6 +215,7 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 					cm = append(cm, m{x.Seq, tsString(x.TS), x.Role, x.Content})
 				}
 				row.Messages = cm
+				row.HasMore = cMore
 			}
 			subs = append(subs, row)
 		}

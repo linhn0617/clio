@@ -309,3 +309,22 @@ func TestHandleReadSessionInlinesSubagents(t *testing.T) {
 		t.Fatalf("inlined child message content wrong: %v", msgs[0])
 	}
 }
+
+// An inlined subagent transcript longer than the page limit signals has_more, so a
+// client can tell it was truncated (and paginate the child via read_session).
+func TestHandleReadSessionInlineSignalsTruncation(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addChild(t, d, "agent-c", "/p", "P", "general-purpose")
+	for i := range 5 {
+		addMsg(t, d, "agent-c", i, "user", "m")
+	}
+	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "include_subagents": true, "limit": 2}))
+	sub := m["subagents"].([]any)[0].(map[string]any)
+	if msgs := sub["messages"].([]any); len(msgs) != 2 {
+		t.Fatalf("child page should respect limit=2, got %d", len(msgs))
+	}
+	if sub["has_more"] != true {
+		t.Fatalf("a truncated inlined child transcript must signal has_more, got %v", sub["has_more"])
+	}
+}

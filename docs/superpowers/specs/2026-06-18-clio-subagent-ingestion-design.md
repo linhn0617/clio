@@ -59,7 +59,7 @@ populated. Message-level attribution is already correct (messages do belong to t
 
 ### Backfill (existing 155 orphans)
 
-- Migration `0007` also runs `DELETE FROM ingest_state WHERE source_file LIKE
+- Migration `0008` runs `DELETE FROM ingest_state WHERE source_file LIKE
   '%/subagents/%'`, so the next `clio index` re-ingests those files (their bytes are
   unchanged, so incremental would otherwise skip them) and re-UPSERTs the **same**
   `agent-<id>` session rows now carrying `parent_session` + `agent_type`. No row
