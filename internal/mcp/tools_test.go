@@ -277,7 +277,35 @@ func TestHandleReadSessionReportsSubagents(t *testing.T) {
 	if !ok || len(subs) != 1 {
 		t.Fatalf("expected 1 subagent reported, got %v", m["subagents"])
 	}
-	if subs[0].(map[string]any)["uuid"] != "agent-c" {
-		t.Fatalf("subagent uuid wrong: %v", subs[0])
+	sub := subs[0].(map[string]any)
+	if sub["uuid"] != "agent-c" || sub["agent_type"] != "general-purpose" {
+		t.Fatalf("subagent should carry uuid + type: %v", sub)
+	}
+	// Reading the subagent itself surfaces its parent link and type at session level.
+	mc := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "agent-c"}))
+	sess := mc["session"].(map[string]any)
+	if sess["parent_session"] != "P" || sess["agent_type"] != "general-purpose" {
+		t.Fatalf("a subagent's session block should carry parent_session + agent_type: %v", sess)
+	}
+}
+
+// read_session inlines each subagent's messages when include_subagents is set,
+// matching CLI `show --include-subagents`.
+func TestHandleReadSessionInlinesSubagents(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addChild(t, d, "agent-c", "/p", "P", "general-purpose")
+	addMsg(t, d, "agent-c", 0, "assistant", "SUBMSG")
+	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "include_subagents": true}))
+	subs := m["subagents"].([]any)
+	if len(subs) != 1 {
+		t.Fatalf("expected 1 subagent, got %v", m["subagents"])
+	}
+	msgs, ok := subs[0].(map[string]any)["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		t.Fatalf("include_subagents should inline the child's messages, got %v", subs[0])
+	}
+	if msgs[0].(map[string]any)["content"] != "SUBMSG" {
+		t.Fatalf("inlined child message content wrong: %v", msgs[0])
 	}
 }

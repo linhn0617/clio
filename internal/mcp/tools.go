@@ -196,10 +196,24 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 			UUID      string `json:"uuid"`
 			AgentType string `json:"agent_type,omitempty"`
 			Title     string `json:"title"`
+			Messages  []m    `json:"messages,omitempty"`
 		}
+		inclSub := req.GetBool("include_subagents", false)
 		subs := make([]sub, 0, len(children))
 		for _, c := range children {
-			subs = append(subs, sub{c.UUID, c.AgentType, c.Title})
+			row := sub{UUID: c.UUID, AgentType: c.AgentType, Title: c.Title}
+			if inclSub {
+				cmsgs, _, err := sessions.GetMessages(ctx, database, c.UUID, 0, limit, req.GetBool("include_tool_output", false), false)
+				if err != nil {
+					return mcp.NewToolResultError(err.Error()), nil
+				}
+				cm := make([]m, 0, len(cmsgs))
+				for _, x := range cmsgs {
+					cm = append(cm, m{x.Seq, tsString(x.TS), x.Role, x.Content})
+				}
+				row.Messages = cm
+			}
+			subs = append(subs, row)
 		}
 		return mcp.NewToolResultJSON(map[string]any{
 			"session": map[string]any{

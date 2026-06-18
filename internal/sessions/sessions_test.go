@@ -566,6 +566,25 @@ func TestListSessionsPromotesRecentChildBeyondParentPage(t *testing.T) {
 	}
 }
 
+// Orphan subagents whose parent is not indexed count as separate sessions (the
+// COALESCE must collapse only on a parent that actually exists), so two orphans of
+// the same absent parent are not merged into one.
+func TestActivitySummaryCountsOrphanSubagentsSeparately(t *testing.T) {
+	d := testDB(t)
+	addChildSession(t, d, "agent-1", "/p", 1, "PX", "general-purpose") // parent PX absent
+	addChildSession(t, d, "agent-2", "/p", 1, "PX", "general-purpose")
+	addMsg(t, d, "agent-1", 0, "user", "a")
+	addMsg(t, d, "agent-2", 0, "user", "b")
+	since := time.Now().Add(-24 * time.Hour).Unix()
+	buckets, err := ActivitySummary(context.Background(), d, since, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 1 || buckets[0].Sessions != 2 {
+		t.Fatalf("two orphans of an absent parent should count as 2 sessions, got %+v", buckets)
+	}
+}
+
 // A parent session and its subagents count as one session in the summary, while
 // the subagents' messages still count.
 func TestActivitySummaryCountsParentAndChildrenAsOne(t *testing.T) {

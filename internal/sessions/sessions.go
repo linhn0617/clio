@@ -75,11 +75,13 @@ func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session
 		// Match the listing's own page: a child is hidden only when its parent is on
 		// this page (same filters + recency order + limit), so a recent child of an
 		// off-page parent is promoted rather than lost.
-		q += " AND (parent_session IS NULL OR parent_session = '' OR parent_session NOT IN (SELECT uuid FROM sessions WHERE 1=1" + filterSQL + " ORDER BY ended_at DESC LIMIT ?))"
+		q += " AND (parent_session IS NULL OR parent_session = '' OR parent_session NOT IN (SELECT uuid FROM sessions WHERE 1=1" + filterSQL + " ORDER BY ended_at DESC, uuid DESC LIMIT ?))"
 		args = append(args, filterArgs...)
 		args = append(args, f.Limit)
 	}
-	q += " ORDER BY ended_at DESC LIMIT ?"
+	// uuid is a deterministic tiebreaker so the page (and the parent-presence
+	// subquery above) resolve ties at the LIMIT boundary identically.
+	q += " ORDER BY ended_at DESC, uuid DESC LIMIT ?"
 	args = append(args, f.Limit)
 
 	rows, err := database.QueryContext(ctx, q, args...)
@@ -371,8 +373,13 @@ func ActivitySummary(ctx context.Context, database *db.DB, since int64, groupBy 
 	default:
 		return nil, fmt.Errorf("invalid group_by %q", groupBy)
 	}
-	q := `SELECT ` + keyExpr + ` AS k, COUNT(DISTINCT COALESCE(s.parent_session, s.uuid)), COUNT(m.id)
-		FROM sessions s LEFT JOIN messages m ON m.session_uuid = s.uuid
+	// COALESCE to the parent's uuid only when that parent actually exists (p.uuid),
+	// so a parent + its subagents count once, while orphan subagents of an absent
+	// parent each count on their own.
+	q := `SELECT ` + keyExpr + ` AS k, COUNT(DISTINCT COALESCE(p.uuid, s.uuid)), COUNT(m.id)
+		FROM sessions s
+		LEFT JOIN messages m ON m.session_uuid = s.uuid
+		LEFT JOIN sessions p ON p.uuid = s.parent_session
 		WHERE s.ended_at >= ?
 		GROUP BY k ORDER BY k DESC`
 	rows, err := database.QueryContext(ctx, q, since)

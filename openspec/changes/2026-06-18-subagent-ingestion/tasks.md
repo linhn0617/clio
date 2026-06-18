@@ -41,5 +41,9 @@
   `openspec validate --strict`; smoke-tested read-only against a **copy** of the
   real index (179 files indexed → 148 subagents linked, types Explore/Plan/
   general-purpose, 0 orphans; live db untouched).
-- [ ] 4.2 Third-party (codex) review of the real implementation diff; fix findings;
-  re-review to a clean gate. Then Claude `/review`.
+- [x] 4.2 Third-party (codex) review of the real diff: 5 rounds to a clean gate
+  (R1 [P1] page-blind subagent suppression + incremental-metadata loss; R2–R4 [P2]
+  project fallback, show json/raw flag, TUI async-selection + dup-load, page-aware
+  LIMIT, child fetch cap; R5 CLEAN). Then Claude `/review` (3 fresh-context agents):
+  isSubagentFile false-positive guard, ActivitySummary orphan count, read_session
+  inline, ORDER BY tiebreaker, degenerate-path guard, + test gaps — all fixed.

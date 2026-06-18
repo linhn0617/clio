@@ -39,8 +39,10 @@ populated. Message-level attribution is already correct (messages do belong to t
 
 ### Detection & extraction (`internal/ingest`)
 
-- A source file is a subagent transcript **iff an ancestor directory is `subagents/`**
-  (Claude Code's layout; unambiguous).
+- A source file is a subagent transcript **iff its parent directory is `subagents/`
+  AND its filename is `agent-<id>.jsonl`** (Claude Code's layout). The filename
+  prefix guards against a normal session in a project dir that happens to be named
+  `subagents`.
 - `parentUUID` = inner **`sessionId`** (authoritative); falls back to the parent
   directory name when the field is absent.
 - `agentType` = the **first non-empty `attributionAgent`** in the file (else `""`).

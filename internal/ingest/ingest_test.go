@@ -1030,6 +1030,23 @@ func TestIngestNormalSessionHasNoParent(t *testing.T) {
 	}
 }
 
+// A normal session whose encoded project directory is literally "subagents" must
+// NOT be misdetected as a subagent transcript (detection requires the agent-<id>
+// filename, not just a subagents/ parent dir).
+func TestIngestNormalSessionInSubagentsDirNotMisdetected(t *testing.T) {
+	projects := t.TempDir()
+	writeSession(t, projects, "subagents", "sess-x", sessionEvent("sess-x", "hello there"))
+	d := openTestDB(t)
+	if _, err := New(d, nil).IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	var parent string
+	d.QueryRow(`SELECT COALESCE(parent_session,'') FROM sessions WHERE uuid='sess-x'`).Scan(&parent)
+	if parent != "" {
+		t.Fatalf("a normal session under a project dir named 'subagents' must not link to a parent; got %q", parent)
+	}
+}
+
 // A subagent transcript with no cwd on any line falls back to the project
 // directory above <parent>/subagents, not the literal "subagents" directory.
 func TestIngestSubagentProjectFallsBackToProjectDir(t *testing.T) {

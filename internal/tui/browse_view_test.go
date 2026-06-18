@@ -223,6 +223,25 @@ func TestBrowseChildrenArrivalKeepsSelection(t *testing.T) {
 	}
 }
 
+// renderList shows the collapse caret + subagent count on a parent, and an indented
+// ↳ child row with its type once expanded.
+func TestBrowseViewRendersSubagentNesting(t *testing.T) {
+	v := browseView{db: testDB(t), width: 100, height: 30}
+	v, _ = v.Update(browseLoadedMsg{sessions: []sessions.Session{{UUID: "P", Title: "parent", SubagentCount: 1}}})
+	if out := v.renderList(100, 10); !strings.Contains(out, "▸+1") {
+		t.Fatalf("a collapsed parent should show a ▸+1 caret: %q", out)
+	}
+	v, _ = v.Update(key(tea.KeyEnter)) // expand
+	v, _ = v.Update(browseChildrenLoadedMsg{parent: "P", children: []sessions.Session{{UUID: "agent-c", AgentType: "general-purpose", Title: "kid"}}})
+	out := v.renderList(100, 10)
+	if !strings.Contains(out, "▾+1") {
+		t.Fatalf("an expanded parent's caret should be ▾+1: %q", out)
+	}
+	if !strings.Contains(out, "↳") || !strings.Contains(out, "general-purpose") {
+		t.Fatalf("an expanded child row should show ↳ and its type: %q", out)
+	}
+}
+
 // A duplicate child-load response (parent expanded, collapsed, re-expanded before
 // the first load returned) must shift the selection only once, not on every reply.
 func TestBrowseDuplicateChildrenArrivalShiftsOnce(t *testing.T) {

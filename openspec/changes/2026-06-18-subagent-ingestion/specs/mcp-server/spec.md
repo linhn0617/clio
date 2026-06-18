@@ -19,6 +19,11 @@ read-only.
 - **WHEN** a client calls `read_session` on a parent that spawned subagents
 - **THEN** the result SHALL include the parent's subagents
 
+#### Scenario: read_session inlines subagent messages on request
+
+- **WHEN** a client calls `read_session` on a parent with `include_subagents` set
+- **THEN** each reported subagent SHALL include its own messages
+
 #### Scenario: search hits carry parent and type
 
 - **WHEN** a `search` hit comes from a subagent transcript
