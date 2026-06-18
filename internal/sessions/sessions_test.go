@@ -507,6 +507,41 @@ func TestListSessionsNestsSubagents(t *testing.T) {
 	}
 }
 
+// A subagent child is promoted to top-level when its parent is excluded by the
+// listing's own filters (e.g. an old parent under --since), so recent subagent
+// activity is never hidden behind a filtered-out parent.
+func TestListSessionsPromotesChildWhenParentFilteredOut(t *testing.T) {
+	d := testDB(t)
+	old := time.Now().Add(-10 * 24 * time.Hour).Unix()
+	recent := time.Now().Unix()
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title) VALUES ('P','/p','P.jsonl',?,?,1,'parent')`, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session, agent_type) VALUES ('agent-c','/p','agent-c.jsonl',?,?,1,'kid','P','general-purpose')`, recent, recent); err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now().Add(-24 * time.Hour).Unix()
+	got, err := ListSessions(context.Background(), d, ListFilter{Since: since})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawChild, sawParent bool
+	for _, s := range got {
+		switch s.UUID {
+		case "agent-c":
+			sawChild = true
+		case "P":
+			sawParent = true
+		}
+	}
+	if sawParent {
+		t.Fatal("the old parent should be excluded by --since")
+	}
+	if !sawChild {
+		t.Fatal("a recent subagent must be promoted when its parent is filtered out of the listing, not hidden")
+	}
+}
+
 // A parent session and its subagents count as one session in the summary, while
 // the subagents' messages still count.
 func TestActivitySummaryCountsParentAndChildrenAsOne(t *testing.T) {

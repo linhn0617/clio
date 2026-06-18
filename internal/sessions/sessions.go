@@ -57,10 +57,49 @@ func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session
 	if f.Limit <= 0 {
 		f.Limit = 50
 	}
+	filterSQL, filterArgs := listFilters(f)
 	q := `SELECT uuid, COALESCE(project_path,''), COALESCE(title,''), COALESCE(started_at,0), COALESCE(ended_at,0), turn_count,
 		COALESCE(parent_session,''), COALESCE(agent_type,''),
 		(SELECT COUNT(*) FROM sessions sub WHERE sub.parent_session = sessions.uuid)
-		FROM sessions WHERE 1=1`
+		FROM sessions WHERE 1=1` + filterSQL
+	args := append([]any{}, filterArgs...)
+
+	// Subagent nesting: by default list only top-level sessions. A subagent child is
+	// hidden only when its parent is actually present in THIS listing (same filters),
+	// so a child whose parent is filtered out or unindexed is promoted, not lost.
+	// ParentSession instead lists exactly one parent's children.
+	if f.ParentSession != "" {
+		q += " AND parent_session = ?"
+		args = append(args, f.ParentSession)
+	} else if !f.IncludeSubagents {
+		q += " AND (parent_session IS NULL OR parent_session = '' OR parent_session NOT IN (SELECT uuid FROM sessions WHERE 1=1" + filterSQL + "))"
+		args = append(args, filterArgs...)
+	}
+	q += " ORDER BY ended_at DESC LIMIT ?"
+	args = append(args, f.Limit)
+
+	rows, err := database.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Session
+	for rows.Next() {
+		var s Session
+		if err := rows.Scan(&s.UUID, &s.ProjectPath, &s.Title, &s.StartedAt, &s.EndedAt, &s.TurnCount,
+			&s.ParentSession, &s.AgentType, &s.SubagentCount); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// listFilters builds the shared WHERE predicates (everything except the subagent
+// nesting clause and LIMIT), so the same filters scope both the listing and the
+// "is this child's parent in the listing?" subquery used for nesting.
+func listFilters(f ListFilter) (string, []any) {
+	q := ""
 	var args []any
 	if f.Since > 0 {
 		q += " AND ended_at >= ?"
@@ -90,32 +129,7 @@ func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session
 		q += ` AND uuid IN (SELECT session_uuid FROM tool_targets WHERE kind = ? AND value = ?)`
 		args = append(args, f.TargetKind, f.TargetValue)
 	}
-	// Subagent nesting: list only top-level sessions by default, promoting an orphan
-	// whose parent is not indexed; ParentSession instead lists one parent's children.
-	if f.ParentSession != "" {
-		q += " AND parent_session = ?"
-		args = append(args, f.ParentSession)
-	} else if !f.IncludeSubagents {
-		q += " AND (parent_session IS NULL OR parent_session = '' OR parent_session NOT IN (SELECT uuid FROM sessions))"
-	}
-	q += " ORDER BY ended_at DESC LIMIT ?"
-	args = append(args, f.Limit)
-
-	rows, err := database.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Session
-	for rows.Next() {
-		var s Session
-		if err := rows.Scan(&s.UUID, &s.ProjectPath, &s.Title, &s.StartedAt, &s.EndedAt, &s.TurnCount,
-			&s.ParentSession, &s.AgentType, &s.SubagentCount); err != nil {
-			return nil, err
-		}
-		out = append(out, s)
-	}
-	return out, rows.Err()
+	return q, args
 }
 
 // ErrNotFound / ErrAmbiguous report prefix resolution failures.

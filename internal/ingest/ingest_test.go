@@ -1030,6 +1030,43 @@ func TestIngestNormalSessionHasNoParent(t *testing.T) {
 	}
 }
 
+// On an incremental ingest, subagent metadata that appears only in later lines
+// (the assistant turn carrying attributionAgent) is written, not lost until a full
+// reindex.
+func TestIngestSubagentTypeFilledOnIncrement(t *testing.T) {
+	projects := t.TempDir()
+	// The first line must exceed the 512-byte fingerprint window so the later
+	// append is a true incremental ingest (a short first line shifts the head
+	// fingerprint and would force a full re-ingest, hiding the bug).
+	longTask := strings.Repeat("task detail ", 60)
+	scUser := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"parent-7","isSidechain":true,"agentId":"d7","message":{"role":"user","content":"` + longTask + `"}}`
+	path := writeSubagent(t, projects, "-p", "parent-7", "d7", scUser)
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	var typ0 string
+	d.QueryRow(`SELECT COALESCE(agent_type,'') FROM sessions WHERE uuid='agent-d7'`).Scan(&typ0)
+	if typ0 != "" {
+		t.Fatalf("precondition: no attributionAgent yet → agent_type empty, got %q", typ0)
+	}
+	// The assistant turn (carrying attributionAgent) appends later.
+	appendLine(t, path, `{"type":"assistant","timestamp":"2026-04-26T11:01:00Z","cwd":"/p","sessionId":"parent-7","isSidechain":true,"agentId":"d7","attributionAgent":"general-purpose","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}`)
+	bumpMtime(t, path)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	var typ1, parent string
+	d.QueryRow(`SELECT COALESCE(agent_type,''), COALESCE(parent_session,'') FROM sessions WHERE uuid='agent-d7'`).Scan(&typ1, &parent)
+	if typ1 != "general-purpose" {
+		t.Fatalf("incremental ingest should fill agent_type from a later line, got %q", typ1)
+	}
+	if parent != "parent-7" {
+		t.Fatalf("parent_session should remain set, got %q", parent)
+	}
+}
+
 // Upgrading a database that indexed subagent transcripts as orphan top-level
 // sessions (before linking existed) relinks them in place: the backfill migration
 // clears the subagent ingest watermark so the next index re-ingests and populates

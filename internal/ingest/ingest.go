@@ -432,23 +432,26 @@ func (ing *Ingester) upsertSession(tx *sql.Tx, s model.Session, userTurns int, k
 			s.UUID, nullEmpty(s.ProjectPath), s.SourceFile, nullZero(s.StartedAt), nullZero(s.EndedAt), userTurns, nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType))
 		return err
 	}
-	// Incremental: bump ended_at, set turn_count to the authoritative total,
-	// fill project_path/title if missing.
+	// Incremental: bump ended_at, set turn_count to the authoritative total, and
+	// fill project_path/title/parent_session/agent_type if still missing (subagent
+	// metadata can arrive in a later line, e.g. attributionAgent on the assistant turn).
 	_, err := tx.Exec(`UPDATE sessions SET
 		ended_at = MAX(COALESCE(ended_at,0), ?),
 		turn_count = ?,
 		project_path = COALESCE(NULLIF(project_path,''), ?),
-		title = COALESCE(NULLIF(title,''), ?)
+		title = COALESCE(NULLIF(title,''), ?),
+		parent_session = COALESCE(NULLIF(parent_session,''), ?),
+		agent_type = COALESCE(NULLIF(agent_type,''), ?)
 		WHERE uuid = ?`,
-		nullZero(s.EndedAt), userTurns, nullEmpty(s.ProjectPath), nullEmpty(s.Title), s.UUID)
+		nullZero(s.EndedAt), userTurns, nullEmpty(s.ProjectPath), nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType), s.UUID)
 	if err != nil {
 		return err
 	}
 	// If the session row didn't exist yet (incremental on a brand-new file path
 	// whose state was somehow present), ensure it exists.
-	_, err = tx.Exec(`INSERT OR IGNORE INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title)
-		VALUES (?,?,?,?,?,?,?)`,
-		s.UUID, nullEmpty(s.ProjectPath), s.SourceFile, nullZero(s.StartedAt), nullZero(s.EndedAt), userTurns, nullEmpty(s.Title))
+	_, err = tx.Exec(`INSERT OR IGNORE INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session, agent_type)
+		VALUES (?,?,?,?,?,?,?,?,?)`,
+		s.UUID, nullEmpty(s.ProjectPath), s.SourceFile, nullZero(s.StartedAt), nullZero(s.EndedAt), userTurns, nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType))
 	return err
 }
 
