@@ -459,7 +459,7 @@ func addChildSession(t *testing.T, d *db.DB, uuid, project string, turns int, pa
 // the parent link, type, and per-parent subagent count.
 func TestListSessionsNestsSubagents(t *testing.T) {
 	d := testDB(t)
-	addSession(t, d, "P", "/p", 2)                                   // top-level parent
+	addSession(t, d, "P", "/p", 2)                                    // top-level parent
 	addChildSession(t, d, "agent-C", "/p", 1, "P", "general-purpose") // child of P
 	addChildSession(t, d, "agent-O", "/p", 1, "PX", "Explore")        // orphan: parent PX absent
 
