@@ -83,6 +83,8 @@ populated. Message-level attribution is already correct (messages do belong to t
 - **CLI `show <parent>`**: trailing `Subagents:` list (id · type · title), drillable;
   `--include-subagents` inlines transcripts. `show <agent-id>`: header `↳ subagent
   (type) of <parent>`.
+- **CLI `search`**: a hit from a subagent transcript is labeled with its type
+  (`↳<type>`), so it is distinguishable from a top-level conversation.
 - **MCP**: `list_sessions` excludes subagents by default (`include_subagents` param);
   `read_session` on a parent reports its subagents (optional inline); `search`
   results carry `parent_session`/`agent_type`. All read-only.

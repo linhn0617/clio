@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/linhn0617/clio/internal/search"
 	"github.com/linhn0617/clio/internal/sessions"
 )
 
@@ -50,4 +51,20 @@ func formatSubagentsSection(children []sessions.Session) string {
 		fmt.Fprintf(&b, "- %s · %s · %s\n", shortID(c.UUID), typ, oneLine(c.Title, 60))
 	}
 	return b.String()
+}
+
+// formatSearchResult renders one `clio search` hit, labeling a hit that comes from
+// a subagent transcript with its type.
+func formatSearchResult(r search.Result) string {
+	tag := ""
+	if r.ParentSession != "" {
+		typ := r.AgentType
+		if typ == "" {
+			typ = "subagent"
+		}
+		tag = " ↳" + typ
+	}
+	return fmt.Sprintf("%s  %s  %s  [%s]%s\n    %s",
+		shortID(r.SessionUUID), formatTS(r.TS), trimProject(r.ProjectPath), r.Role, tag,
+		strings.ReplaceAll(strings.TrimSpace(r.Snippet), "\n", " "))
 }

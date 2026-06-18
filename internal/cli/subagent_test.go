@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/linhn0617/clio/internal/search"
 	"github.com/linhn0617/clio/internal/sessions"
 )
 
@@ -50,5 +51,16 @@ func TestFormatSubagentsSection(t *testing.T) {
 		if !strings.Contains(sec, want) {
 			t.Fatalf("section missing %q: %q", want, sec)
 		}
+	}
+}
+
+func TestFormatSearchResultLabelsSubagent(t *testing.T) {
+	normal := formatSearchResult(search.Result{SessionUUID: "s1", Role: "user", Snippet: "hello"})
+	if strings.Contains(normal, "↳") {
+		t.Fatalf("a normal hit should not be labeled: %q", normal)
+	}
+	sub := formatSearchResult(search.Result{SessionUUID: "agent-c", ParentSession: "P", AgentType: "Explore", Role: "assistant", Snippet: "found"})
+	if !strings.Contains(sub, "↳") || !strings.Contains(sub, "Explore") {
+		t.Fatalf("a subagent hit should be labeled with ↳ and its type: %q", sub)
 	}
 }

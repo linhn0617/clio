@@ -42,3 +42,14 @@ transcript with a header identifying it as a subagent of its parent and its type
 - **WHEN** the user runs `clio show <agent-id>`
 - **THEN** the output SHALL include a header noting it is a subagent (with its type)
   of its parent session
+
+### Requirement: search labels subagent hits
+
+`clio search` SHALL label a result that comes from a subagent transcript with the
+subagent's type, so a hit from a subagent is distinguishable from one in a
+top-level conversation.
+
+#### Scenario: A subagent hit is labeled
+
+- **WHEN** a `clio search` hit comes from a subagent transcript of type `Explore`
+- **THEN** the rendered result SHALL be marked as a subagent showing `Explore`
