@@ -115,9 +115,12 @@ func (v browseView) Update(msg tea.Msg) (browseView, tea.Cmd) {
 		return v.loadPreview()
 	case browseChildrenLoadedMsg:
 		if msg.err == nil {
-			// Keep the selection on the same session: if the parent is expanded and the
-			// selection sits below it, the children inserted above shift it down.
-			if v.expanded[msg.parent] {
+			_, already := v.kids[msg.parent]
+			// On the FIRST arrival, keep the selection on the same session: if the
+			// parent is expanded and the selection sits below it, the children inserted
+			// above shift it down. A duplicate reply (re-expanded before the first load
+			// returned) inserts no new rows, so it must not shift again.
+			if !already && v.expanded[msg.parent] {
 				if pIdx := v.parentRowIndex(msg.parent); pIdx >= 0 && v.selected > pIdx {
 					v.selected += len(msg.children)
 				}

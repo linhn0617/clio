@@ -201,3 +201,24 @@ func TestBrowseChildrenArrivalKeepsSelection(t *testing.T) {
 		t.Fatalf("selection should stay on Q after a child is inserted above it, got %q", v.selectedSession())
 	}
 }
+
+// A duplicate child-load response (parent expanded, collapsed, re-expanded before
+// the first load returned) must shift the selection only once, not on every reply.
+func TestBrowseDuplicateChildrenArrivalShiftsOnce(t *testing.T) {
+	v := browseView{db: testDB(t)}
+	v, _ = v.Update(browseLoadedMsg{sessions: []sessions.Session{
+		{UUID: "P", Title: "parent", SubagentCount: 1},
+		{UUID: "Q", Title: "other"},
+	}})
+	v, _ = v.Update(key(tea.KeyEnter)) // expand P
+	v, _ = v.Update(key(tea.KeyDown))  // selected -> Q
+	kids := []sessions.Session{{UUID: "agent-c", Title: "kid"}}
+	v, _ = v.Update(browseChildrenLoadedMsg{parent: "P", children: kids}) // first arrival shifts
+	if v.selectedSession() != "Q" {
+		t.Fatalf("after first arrival selection should be Q, got %q", v.selectedSession())
+	}
+	v, _ = v.Update(browseChildrenLoadedMsg{parent: "P", children: kids}) // duplicate must not shift again
+	if v.selectedSession() != "Q" {
+		t.Fatalf("a duplicate child-load must not shift selection again, got %q", v.selectedSession())
+	}
+}

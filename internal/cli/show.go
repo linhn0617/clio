@@ -67,7 +67,8 @@ func newShowCmd() *cobra.Command {
 				for _, c := range children {
 					so := subagentOut{Session: c}
 					if includeSubagents {
-						cm, _, err := sessions.GetMessages(cmd.Context(), database, c.UUID, 0, limit, !noToolOutput, false)
+						// includeRaw=true to match the parent's messages and `show <agent-id>`.
+						cm, _, err := sessions.GetMessages(cmd.Context(), database, c.UUID, 0, limit, !noToolOutput, true)
 						if err != nil {
 							return err
 						}
