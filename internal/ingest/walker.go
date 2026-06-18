@@ -57,3 +57,10 @@ func isSubagentFile(path string) bool {
 func subagentParentDir(path string) string {
 	return filepath.Base(filepath.Dir(filepath.Dir(path)))
 }
+
+// subagentProjectDirName returns the encoded project directory above a subagent
+// file's <parent-uuid>/subagents/ path, for project-path fallback when the
+// transcript carries no cwd (parentDirName would yield the literal "subagents").
+func subagentProjectDirName(path string) string {
+	return filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(path))))
+}

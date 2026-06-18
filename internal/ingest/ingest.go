@@ -261,7 +261,11 @@ func (ing *Ingester) streamParse(f *os.File, startOffset int64, p *Parser, path 
 		msgs = append(msgs, lineMsgs...)
 	}
 	if sess.ProjectPath == "" {
-		sess.ProjectPath = fallbackProjectPath(parentDirName(path))
+		dir := parentDirName(path)
+		if isSub {
+			dir = subagentProjectDirName(path) // skip the <parent>/subagents/ levels
+		}
+		sess.ProjectPath = fallbackProjectPath(dir)
 	}
 	if isSub && sess.ParentSession == "" {
 		sess.ParentSession = subagentParentDir(path)

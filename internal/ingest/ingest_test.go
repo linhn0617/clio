@@ -1030,6 +1030,23 @@ func TestIngestNormalSessionHasNoParent(t *testing.T) {
 	}
 }
 
+// A subagent transcript with no cwd on any line falls back to the project
+// directory above <parent>/subagents, not the literal "subagents" directory.
+func TestIngestSubagentProjectFallsBackToProjectDir(t *testing.T) {
+	projects := t.TempDir()
+	sc := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","sessionId":"parent-3","isSidechain":true,"agentId":"e3","message":{"role":"user","content":"go"}}`
+	writeSubagent(t, projects, "-Users-lin-Herd-proj", "parent-3", "e3", sc)
+	d := openTestDB(t)
+	if _, err := New(d, nil).IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	var pp string
+	d.QueryRow(`SELECT COALESCE(project_path,'') FROM sessions WHERE uuid='agent-e3'`).Scan(&pp)
+	if pp != "/Users/lin/Herd/proj" {
+		t.Fatalf("subagent project_path should decode the project dir (not the subagents dir), got %q", pp)
+	}
+}
+
 // On an incremental ingest, subagent metadata that appears only in later lines
 // (the assistant turn carrying attributionAgent) is written, not lost until a full
 // reindex.

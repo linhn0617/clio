@@ -181,3 +181,23 @@ func TestBrowseExpandCollapseNestsSubagents(t *testing.T) {
 		t.Fatalf("collapsed again is one row, got %d", len(v.rows()))
 	}
 }
+
+// When a parent's children arrive after the user has already moved the selection
+// below it, the selection shifts to stay on the same session instead of jumping
+// onto a freshly inserted child row.
+func TestBrowseChildrenArrivalKeepsSelection(t *testing.T) {
+	v := browseView{db: testDB(t)}
+	v, _ = v.Update(browseLoadedMsg{sessions: []sessions.Session{
+		{UUID: "P", Title: "parent", SubagentCount: 1},
+		{UUID: "Q", Title: "other"},
+	}})
+	v, _ = v.Update(key(tea.KeyEnter)) // expand P (selection stays on P, children load async)
+	v, _ = v.Update(key(tea.KeyDown))  // move to Q before children arrive
+	if v.selectedSession() != "Q" {
+		t.Fatalf("precondition: selection should be on Q, got %q", v.selectedSession())
+	}
+	v, _ = v.Update(browseChildrenLoadedMsg{parent: "P", children: []sessions.Session{{UUID: "agent-c", Title: "kid"}}})
+	if v.selectedSession() != "Q" {
+		t.Fatalf("selection should stay on Q after a child is inserted above it, got %q", v.selectedSession())
+	}
+}

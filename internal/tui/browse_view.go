@@ -68,6 +68,16 @@ func (v browseView) rows() []browseRow {
 	return out
 }
 
+// parentRowIndex returns the flattened-row index of a top-level parent, or -1.
+func (v browseView) parentRowIndex(uuid string) int {
+	for i, r := range v.rows() {
+		if !r.child && r.sess.UUID == uuid {
+			return i
+		}
+	}
+	return -1
+}
+
 // load fetches the recent sessions for the list.
 func (v browseView) load() tea.Cmd {
 	database, project, ctx := v.db, v.project, orBackground(v.ctx)
@@ -105,6 +115,13 @@ func (v browseView) Update(msg tea.Msg) (browseView, tea.Cmd) {
 		return v.loadPreview()
 	case browseChildrenLoadedMsg:
 		if msg.err == nil {
+			// Keep the selection on the same session: if the parent is expanded and the
+			// selection sits below it, the children inserted above shift it down.
+			if v.expanded[msg.parent] {
+				if pIdx := v.parentRowIndex(msg.parent); pIdx >= 0 && v.selected > pIdx {
+					v.selected += len(msg.children)
+				}
+			}
 			if v.kids == nil {
 				v.kids = map[string][]sessions.Session{}
 			}
