@@ -23,6 +23,7 @@ type Session struct {
 	TurnCount     int
 	Title         string
 	ParentSession string
+	AgentType     string
 }
 
 // Message is one indexable unit derived from an event's content block.
@@ -62,14 +63,15 @@ const (
 // RawEvent is a single line of a .jsonl session file. Only fields clio uses are
 // declared; unknown fields are ignored for forward compatibility.
 type RawEvent struct {
-	Type       string      `json:"type"`
-	UUID       string      `json:"uuid"`
-	ParentUUID *string     `json:"parentUuid"`
-	Timestamp  string      `json:"timestamp"`
-	CWD        string      `json:"cwd"`
-	SessionID  string      `json:"sessionId"`
-	Message    *RawMessage `json:"message"`
-	Summary    string      `json:"summary"`
+	Type             string      `json:"type"`
+	UUID             string      `json:"uuid"`
+	ParentUUID       *string     `json:"parentUuid"`
+	Timestamp        string      `json:"timestamp"`
+	CWD              string      `json:"cwd"`
+	SessionID        string      `json:"sessionId"`
+	AttributionAgent string      `json:"attributionAgent"`
+	Message          *RawMessage `json:"message"`
+	Summary          string      `json:"summary"`
 }
 
 // RawMessage is the nested message object on user/assistant events.

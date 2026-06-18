@@ -43,3 +43,17 @@ func sessionUUIDFromPath(path string) string {
 func parentDirName(path string) string {
 	return filepath.Base(filepath.Dir(path))
 }
+
+// isSubagentFile reports whether path is a Claude Code subagent transcript: a file
+// directly inside a "subagents" directory
+// (<project>/<parent-session-uuid>/subagents/agent-<id>.jsonl).
+func isSubagentFile(path string) bool {
+	return filepath.Base(filepath.Dir(path)) == "subagents"
+}
+
+// subagentParentDir returns the parent-session-uuid directory that holds a subagent
+// file's "subagents" dir — the fallback parent link when the transcript's lines
+// carry no sessionId.
+func subagentParentDir(path string) string {
+	return filepath.Base(filepath.Dir(filepath.Dir(path)))
+}

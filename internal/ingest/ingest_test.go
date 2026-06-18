@@ -941,3 +941,147 @@ func bumpMtime(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 }
+
+// writeSubagent creates a Claude Code subagent transcript under
+// <root>/<encodedDir>/<parentUUID>/subagents/agent-<agentID>.jsonl.
+func writeSubagent(t *testing.T, root, encodedDir, parentUUID, agentID string, lines ...string) string {
+	t.Helper()
+	dir := filepath.Join(root, encodedDir, parentUUID, "subagents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "agent-"+agentID+".jsonl")
+	var data []byte
+	for _, l := range lines {
+		data = append(data, []byte(l+"\n")...)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A subagent transcript (under a subagents/ dir) is linked to its parent session
+// via the inner sessionId and tagged with its type (attributionAgent), instead of
+// being indexed as an orphan top-level session keyed by its agent-<id> filename.
+func TestIngestSubagentLinksToParent(t *testing.T) {
+	projects := t.TempDir()
+	scUser := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"parent-1","isSidechain":true,"agentId":"a134","message":{"role":"user","content":"implement the thing"}}`
+	scAsst := `{"type":"assistant","timestamp":"2026-04-26T11:00:05Z","cwd":"/p","sessionId":"parent-1","isSidechain":true,"agentId":"a134","attributionAgent":"general-purpose","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`
+	writeSubagent(t, projects, "-p", "parent-1", "a134", scUser, scAsst)
+
+	d := openTestDB(t)
+	if _, err := New(d, nil).IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+
+	var parent, agentType string
+	if err := d.QueryRow(`SELECT COALESCE(parent_session,''), COALESCE(agent_type,'') FROM sessions WHERE uuid='agent-a134'`).Scan(&parent, &agentType); err != nil {
+		t.Fatal(err)
+	}
+	if parent != "parent-1" {
+		t.Fatalf("parent_session=%q want parent-1 (inner sessionId)", parent)
+	}
+	if agentType != "general-purpose" {
+		t.Fatalf("agent_type=%q want general-purpose (attributionAgent)", agentType)
+	}
+}
+
+// When a subagent transcript's lines carry no sessionId, the parent link falls
+// back to the parent-session-uuid directory that holds the subagents/ dir; a
+// transcript with no attributionAgent has an empty (generic) type.
+func TestIngestSubagentParentFallsBackToDir(t *testing.T) {
+	projects := t.TempDir()
+	// No sessionId field, no attributionAgent.
+	sc := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","isSidechain":true,"agentId":"b7","message":{"role":"user","content":"work it"}}`
+	writeSubagent(t, projects, "-p", "parent-2", "b7", sc)
+
+	d := openTestDB(t)
+	if _, err := New(d, nil).IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+
+	var parent, agentType string
+	if err := d.QueryRow(`SELECT COALESCE(parent_session,''), COALESCE(agent_type,'') FROM sessions WHERE uuid='agent-b7'`).Scan(&parent, &agentType); err != nil {
+		t.Fatal(err)
+	}
+	if parent != "parent-2" {
+		t.Fatalf("parent_session=%q want parent-2 (dir-name fallback)", parent)
+	}
+	if agentType != "" {
+		t.Fatalf("agent_type=%q want empty (no attributionAgent)", agentType)
+	}
+}
+
+// An ordinary session file (not under subagents/) has no parent link.
+func TestIngestNormalSessionHasNoParent(t *testing.T) {
+	projects := t.TempDir()
+	writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evUser2)
+	d := openTestDB(t)
+	if _, err := New(d, nil).IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	var parent string
+	if err := d.QueryRow(`SELECT COALESCE(parent_session,'') FROM sessions WHERE uuid='sess-1'`).Scan(&parent); err != nil {
+		t.Fatal(err)
+	}
+	if parent != "" {
+		t.Fatalf("parent_session=%q want empty for a normal session", parent)
+	}
+}
+
+// Upgrading a database that indexed subagent transcripts as orphan top-level
+// sessions (before linking existed) relinks them in place: the backfill migration
+// clears the subagent ingest watermark so the next index re-ingests and populates
+// parent_session/agent_type on the same rows, with no duplicates.
+func TestSubagentBackfillMigrationRelinksOrphans(t *testing.T) {
+	projects := t.TempDir()
+	sc := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"parent-9","isSidechain":true,"agentId":"c9","attributionAgent":"general-purpose","message":{"role":"user","content":"do the task"}}`
+	writeSubagent(t, projects, "-p", "parent-9", "c9", sc)
+
+	dbPath := filepath.Join(t.TempDir(), "test.sqlite")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(d, nil).IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a pre-feature index: the link is absent but the ingest watermark is
+	// present (so a plain re-index would skip the unchanged file), and the backfill
+	// migration has not yet run.
+	if _, err := d.Exec(`UPDATE sessions SET parent_session=NULL, agent_type=NULL WHERE uuid='agent-c9'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`DELETE FROM schema_migrations WHERE name='0008_backfill_subagents.sql'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Upgrade: re-open re-applies the backfill migration (clears the subagent
+	// watermark); the next index relinks the orphan in place.
+	d2, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d2.Close() })
+	if _, err := New(d2, nil).IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+
+	var parent, agentType string
+	if err := d2.QueryRow(`SELECT COALESCE(parent_session,''), COALESCE(agent_type,'') FROM sessions WHERE uuid='agent-c9'`).Scan(&parent, &agentType); err != nil {
+		t.Fatal(err)
+	}
+	if parent != "parent-9" || agentType != "general-purpose" {
+		t.Fatalf("orphan not relinked after backfill: parent=%q type=%q", parent, agentType)
+	}
+	var rows int
+	d2.QueryRow(`SELECT count(*) FROM sessions WHERE uuid='agent-c9'`).Scan(&rows)
+	if rows != 1 {
+		t.Fatalf("backfill duplicated session rows: %d", rows)
+	}
+}
