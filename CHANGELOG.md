@@ -5,6 +5,36 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-06-19
+
+Claude Code runs subagents (the Task tool) and stores each one's transcript in its
+own file. clio now recognizes those transcripts and links them to the conversation
+that spawned them, instead of indexing them as disconnected `agent-…` sessions. Your
+session list is no longer cluttered by them; they nest under their parent, stay
+searchable (labeled as subagents), and are reachable from the parent in every surface.
+
+### Added
+
+- Subagent ingestion: a transcript under a `subagents/` directory is linked to its
+  parent session (`parent_session`) and tagged with its type (e.g. `general-purpose`,
+  `Explore`). Existing histories are relinked automatically on the next index (a
+  one-time backfill); no full re-index needed.
+- `clio list` hides subagent children by default and annotates a parent with
+  `(+N subagents)`; `--include-subagents` lists them. `clio show <parent>` lists a
+  session's subagents and inlines them with `--include-subagents`; `clio show
+  <agent-id>` shows the subagent with its parent and type. `clio search` labels a hit
+  that comes from a subagent.
+- MCP: `list_sessions` excludes subagents by default (`include_subagents` to include),
+  `read_session` reports a parent's subagents (and inlines them with
+  `include_subagents`), and `search` results carry `parent_session`/`agent_type`.
+- TUI Browse nests subagents under their parent (`Enter` expands/collapses); Search
+  marks subagent hits.
+
+### Changed
+
+- `sessions.ActivitySummary` counts a parent and its subagents as one session (while
+  their messages still count). (internal)
+
 ## [0.7.0] - 2026-06-16
 
 Browse and search your history without leaving the terminal. `clio tui` opens a
