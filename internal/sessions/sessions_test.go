@@ -445,3 +445,167 @@ func TestActivitySummaryLocalDay(t *testing.T) {
 		t.Fatalf("want single bucket %q, got %+v", want, buckets)
 	}
 }
+
+func addChildSession(t *testing.T, d *db.DB, uuid, project string, turns int, parent, agentType string) {
+	t.Helper()
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session, agent_type) VALUES (?,?,?,?,?,?,?,?,?)`,
+		uuid, project, uuid+".jsonl", time.Now().Unix(), time.Now().Unix(), turns, "title-"+uuid, parent, agentType); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ListSessions hides subagent children by default (with orphan promotion when the
+// parent is absent), can include them, can list one parent's children, and carries
+// the parent link, type, and per-parent subagent count.
+func TestListSessionsNestsSubagents(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p", 2)                                    // top-level parent
+	addChildSession(t, d, "agent-C", "/p", 1, "P", "general-purpose") // child of P
+	addChildSession(t, d, "agent-O", "/p", 1, "PX", "Explore")        // orphan: parent PX absent
+
+	listed := func(f ListFilter) map[string]Session {
+		t.Helper()
+		got, err := ListSessions(context.Background(), d, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]Session{}
+		for _, s := range got {
+			m[s.UUID] = s
+		}
+		return m
+	}
+
+	def := listed(ListFilter{})
+	if _, ok := def["P"]; !ok {
+		t.Fatal("default list should include top-level parent P")
+	}
+	if _, ok := def["agent-C"]; ok {
+		t.Fatal("default list must hide subagent child agent-C")
+	}
+	if _, ok := def["agent-O"]; !ok {
+		t.Fatal("default list should promote orphan agent-O (parent PX absent)")
+	}
+	if def["P"].SubagentCount != 1 {
+		t.Fatalf("P.SubagentCount=%d want 1", def["P"].SubagentCount)
+	}
+
+	all := listed(ListFilter{IncludeSubagents: true})
+	if len(all) != 3 {
+		t.Fatalf("IncludeSubagents should list all 3, got %d", len(all))
+	}
+	if all["agent-C"].ParentSession != "P" || all["agent-C"].AgentType != "general-purpose" {
+		t.Fatalf("child should carry parent link and type: %+v", all["agent-C"])
+	}
+
+	kids := listed(ListFilter{ParentSession: "P"})
+	if len(kids) != 1 {
+		t.Fatalf("ParentSession=P should list exactly 1 child, got %d", len(kids))
+	}
+	if _, ok := kids["agent-C"]; !ok {
+		t.Fatal("ParentSession=P should list agent-C")
+	}
+}
+
+// A subagent child is promoted to top-level when its parent is excluded by the
+// listing's own filters (e.g. an old parent under --since), so recent subagent
+// activity is never hidden behind a filtered-out parent.
+func TestListSessionsPromotesChildWhenParentFilteredOut(t *testing.T) {
+	d := testDB(t)
+	old := time.Now().Add(-10 * 24 * time.Hour).Unix()
+	recent := time.Now().Unix()
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title) VALUES ('P','/p','P.jsonl',?,?,1,'parent')`, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session, agent_type) VALUES ('agent-c','/p','agent-c.jsonl',?,?,1,'kid','P','general-purpose')`, recent, recent); err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now().Add(-24 * time.Hour).Unix()
+	got, err := ListSessions(context.Background(), d, ListFilter{Since: since})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawChild, sawParent bool
+	for _, s := range got {
+		switch s.UUID {
+		case "agent-c":
+			sawChild = true
+		case "P":
+			sawParent = true
+		}
+	}
+	if sawParent {
+		t.Fatal("the old parent should be excluded by --since")
+	}
+	if !sawChild {
+		t.Fatal("a recent subagent must be promoted when its parent is filtered out of the listing, not hidden")
+	}
+}
+
+// A recent subagent whose parent falls outside the current page (LIMIT) is promoted
+// to the listing, not hidden behind an off-page parent.
+func TestListSessionsPromotesRecentChildBeyondParentPage(t *testing.T) {
+	d := testDB(t)
+	ins := func(uuid string, ended int64, parent any) {
+		if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session) VALUES (?,?,?,?,?,1,?,?)`,
+			uuid, "/p", uuid+".jsonl", ended, ended, uuid, parent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// C (a subagent of P) is the single most recent session; P is older and would
+	// fall outside a one-row page.
+	ins("C", 100, "P")
+	ins("T1", 90, nil)
+	ins("P", 80, nil)
+	got, err := ListSessions(context.Background(), d, ListFilter{Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].UUID != "C" {
+		t.Fatalf("the most recent row is subagent C; it must be promoted, not hidden behind its off-page parent: got %+v", got)
+	}
+}
+
+// Orphan subagents whose parent is not indexed count as separate sessions (the
+// COALESCE must collapse only on a parent that actually exists), so two orphans of
+// the same absent parent are not merged into one.
+func TestActivitySummaryCountsOrphanSubagentsSeparately(t *testing.T) {
+	d := testDB(t)
+	addChildSession(t, d, "agent-1", "/p", 1, "PX", "general-purpose") // parent PX absent
+	addChildSession(t, d, "agent-2", "/p", 1, "PX", "general-purpose")
+	addMsg(t, d, "agent-1", 0, "user", "a")
+	addMsg(t, d, "agent-2", 0, "user", "b")
+	since := time.Now().Add(-24 * time.Hour).Unix()
+	buckets, err := ActivitySummary(context.Background(), d, since, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 1 || buckets[0].Sessions != 2 {
+		t.Fatalf("two orphans of an absent parent should count as 2 sessions, got %+v", buckets)
+	}
+}
+
+// A parent session and its subagents count as one session in the summary, while
+// the subagents' messages still count.
+func TestActivitySummaryCountsParentAndChildrenAsOne(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p", 1)
+	addChildSession(t, d, "agent-C", "/p", 1, "P", "general-purpose")
+	addMsg(t, d, "P", 0, "user", "parent msg")
+	addMsg(t, d, "agent-C", 0, "user", "child msg")
+
+	since := time.Now().Add(-24 * time.Hour).Unix()
+	buckets, err := ActivitySummary(context.Background(), d, since, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 1 {
+		t.Fatalf("want 1 project bucket, got %+v", buckets)
+	}
+	if buckets[0].Sessions != 1 {
+		t.Fatalf("parent+child should count as 1 session, got %d", buckets[0].Sessions)
+	}
+	if buckets[0].Messages != 2 {
+		t.Fatalf("both messages should still count, got %d", buckets[0].Messages)
+	}
+}

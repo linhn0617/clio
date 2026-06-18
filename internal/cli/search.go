@@ -63,9 +63,7 @@ func newSearchCmd() *cobra.Command {
 				return nil
 			}
 			for _, r := range results {
-				fmt.Fprintf(os.Stdout, "%s  %s  %s  [%s]\n    %s\n",
-					shortID(r.SessionUUID), formatTS(r.TS), trimProject(r.ProjectPath), r.Role,
-					strings.ReplaceAll(strings.TrimSpace(r.Snippet), "\n", " "))
+				fmt.Fprintln(os.Stdout, formatSearchResult(r))
 			}
 			return nil
 		},

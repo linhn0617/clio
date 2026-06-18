@@ -40,6 +40,27 @@ func bUpdate(t *testing.T, v browseView, msg tea.Msg) (browseView, tea.Cmd) {
 	return v.Update(msg)
 }
 
+// Expanding a parent fetches all of its subagents, not just the first
+// browseListLimit (a session can spawn more than 50).
+func TestBrowseLoadChildrenFetchesBeyondTopLevelLimit(t *testing.T) {
+	d := testDB(t)
+	for i := range browseListLimit + 10 {
+		if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, parent_session) VALUES (?,?,?,?)`,
+			fmt.Sprintf("agent-%03d", i), "/p", "x.jsonl", "P"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v := browseView{db: d}
+	msg := v.loadChildren("P")()
+	cl, ok := msg.(browseChildrenLoadedMsg)
+	if !ok {
+		t.Fatalf("expected browseChildrenLoadedMsg, got %T", msg)
+	}
+	if len(cl.children) != browseListLimit+10 {
+		t.Fatalf("expanding a parent should fetch all %d children, got %d", browseListLimit+10, len(cl.children))
+	}
+}
+
 // load reads recent sessions into the list.
 func TestBrowseViewLoad(t *testing.T) {
 	d := testDB(t)
@@ -141,5 +162,103 @@ func TestBrowseViewEmptyState(t *testing.T) {
 	v := browseView{width: 80, height: 24, loaded: true}
 	if !strings.Contains(v.View(), "No sessions") {
 		t.Fatalf("loaded-but-empty browse should show an empty state: %q", v.View())
+	}
+}
+
+// Enter expands a parent to reveal its subagents (lazily loaded) as indented child
+// rows, and collapses them again.
+func TestBrowseExpandCollapseNestsSubagents(t *testing.T) {
+	v := browseView{db: testDB(t)}
+	v, _ = v.Update(browseLoadedMsg{sessions: []sessions.Session{{UUID: "P", Title: "parent", SubagentCount: 1}}})
+	if len(v.rows()) != 1 {
+		t.Fatalf("a collapsed parent is one row, got %d", len(v.rows()))
+	}
+	// Expand: marks expanded and requests the children.
+	v, cmd := v.Update(key(tea.KeyEnter))
+	if !v.expanded["P"] {
+		t.Fatal("Enter should expand a parent with subagents")
+	}
+	if cmd == nil {
+		t.Fatal("expanding should request the parent's children")
+	}
+	// Children arrive and nest under the parent as child rows.
+	v, _ = v.Update(browseChildrenLoadedMsg{parent: "P", children: []sessions.Session{{UUID: "agent-c", AgentType: "general-purpose", Title: "kid"}}})
+	rows := v.rows()
+	if len(rows) != 2 || !rows[1].child || rows[1].sess.UUID != "agent-c" {
+		t.Fatalf("expanded parent should nest its child: %+v", rows)
+	}
+	// Navigating down selects the nested child (its transcript previews).
+	v, _ = v.Update(key(tea.KeyDown))
+	if v.selectedSession() != "agent-c" {
+		t.Fatalf("down should select the nested child, got %q", v.selectedSession())
+	}
+	// Back to the parent and collapse.
+	v, _ = v.Update(key(tea.KeyUp))
+	v, _ = v.Update(key(tea.KeyEnter))
+	if v.expanded["P"] {
+		t.Fatal("Enter on an expanded parent should collapse it")
+	}
+	if len(v.rows()) != 1 {
+		t.Fatalf("collapsed again is one row, got %d", len(v.rows()))
+	}
+}
+
+// When a parent's children arrive after the user has already moved the selection
+// below it, the selection shifts to stay on the same session instead of jumping
+// onto a freshly inserted child row.
+func TestBrowseChildrenArrivalKeepsSelection(t *testing.T) {
+	v := browseView{db: testDB(t)}
+	v, _ = v.Update(browseLoadedMsg{sessions: []sessions.Session{
+		{UUID: "P", Title: "parent", SubagentCount: 1},
+		{UUID: "Q", Title: "other"},
+	}})
+	v, _ = v.Update(key(tea.KeyEnter)) // expand P (selection stays on P, children load async)
+	v, _ = v.Update(key(tea.KeyDown))  // move to Q before children arrive
+	if v.selectedSession() != "Q" {
+		t.Fatalf("precondition: selection should be on Q, got %q", v.selectedSession())
+	}
+	v, _ = v.Update(browseChildrenLoadedMsg{parent: "P", children: []sessions.Session{{UUID: "agent-c", Title: "kid"}}})
+	if v.selectedSession() != "Q" {
+		t.Fatalf("selection should stay on Q after a child is inserted above it, got %q", v.selectedSession())
+	}
+}
+
+// renderList shows the collapse caret + subagent count on a parent, and an indented
+// ↳ child row with its type once expanded.
+func TestBrowseViewRendersSubagentNesting(t *testing.T) {
+	v := browseView{db: testDB(t), width: 100, height: 30}
+	v, _ = v.Update(browseLoadedMsg{sessions: []sessions.Session{{UUID: "P", Title: "parent", SubagentCount: 1}}})
+	if out := v.renderList(100, 10); !strings.Contains(out, "▸+1") {
+		t.Fatalf("a collapsed parent should show a ▸+1 caret: %q", out)
+	}
+	v, _ = v.Update(key(tea.KeyEnter)) // expand
+	v, _ = v.Update(browseChildrenLoadedMsg{parent: "P", children: []sessions.Session{{UUID: "agent-c", AgentType: "general-purpose", Title: "kid"}}})
+	out := v.renderList(100, 10)
+	if !strings.Contains(out, "▾+1") {
+		t.Fatalf("an expanded parent's caret should be ▾+1: %q", out)
+	}
+	if !strings.Contains(out, "↳") || !strings.Contains(out, "general-purpose") {
+		t.Fatalf("an expanded child row should show ↳ and its type: %q", out)
+	}
+}
+
+// A duplicate child-load response (parent expanded, collapsed, re-expanded before
+// the first load returned) must shift the selection only once, not on every reply.
+func TestBrowseDuplicateChildrenArrivalShiftsOnce(t *testing.T) {
+	v := browseView{db: testDB(t)}
+	v, _ = v.Update(browseLoadedMsg{sessions: []sessions.Session{
+		{UUID: "P", Title: "parent", SubagentCount: 1},
+		{UUID: "Q", Title: "other"},
+	}})
+	v, _ = v.Update(key(tea.KeyEnter)) // expand P
+	v, _ = v.Update(key(tea.KeyDown))  // selected -> Q
+	kids := []sessions.Session{{UUID: "agent-c", Title: "kid"}}
+	v, _ = v.Update(browseChildrenLoadedMsg{parent: "P", children: kids}) // first arrival shifts
+	if v.selectedSession() != "Q" {
+		t.Fatalf("after first arrival selection should be Q, got %q", v.selectedSession())
+	}
+	v, _ = v.Update(browseChildrenLoadedMsg{parent: "P", children: kids}) // duplicate must not shift again
+	if v.selectedSession() != "Q" {
+		t.Fatalf("a duplicate child-load must not shift selection again, got %q", v.selectedSession())
 	}
 }

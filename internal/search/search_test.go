@@ -44,6 +44,27 @@ func addTarget(t *testing.T, d *db.DB, sess, kind, value string) {
 	}
 }
 
+// A search hit from a subagent session carries its parent link and type so a
+// client can label it; search itself does not filter subagent content out.
+func TestSearchResultCarriesSubagentInfo(t *testing.T) {
+	d := testDB(t)
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, turn_count, parent_session, agent_type) VALUES ('agent-z','/p','agent-z.jsonl',0,'parent-z','general-purpose')`); err != nil {
+		t.Fatal(err)
+	}
+	addMsg(t, d, "agent-z", 0, "assistant", "subagentfinding alpha", time.Now().Unix())
+
+	got, err := Search(context.Background(), d, Options{Query: "subagentfinding", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 {
+		t.Fatal("expected a hit from the subagent session")
+	}
+	if got[0].ParentSession != "parent-z" || got[0].AgentType != "general-purpose" {
+		t.Fatalf("hit should carry parent/type: %+v", got[0])
+	}
+}
+
 func TestSearchFilterByTool(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p")

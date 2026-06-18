@@ -195,6 +195,7 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 // count of lines skipped because they failed to parse or exceeded maxLineBytes.
 func (ing *Ingester) streamParse(f *os.File, startOffset int64, p *Parser, path string) ([]model.Message, model.Session, int64, int64, error) {
 	sess := model.Session{UUID: sessionUUIDFromPath(path), SourceFile: path}
+	isSub := isSubagentFile(path)
 	var msgs []model.Message
 	var consumed, unparsed int64
 
@@ -235,6 +236,17 @@ func (ing *Ingester) streamParse(f *os.File, startOffset int64, p *Parser, path 
 		if sess.Title == "" && info.TitleHint != "" {
 			sess.Title = info.TitleHint
 		}
+		if isSub {
+			// A subagent transcript carries its parent session's uuid in each line's
+			// sessionId; record it as the parent link (the child keeps its agent-<id>
+			// filename uuid). attributionAgent is the subagent's type.
+			if sess.ParentSession == "" && info.SessionID != "" {
+				sess.ParentSession = info.SessionID
+			}
+			if sess.AgentType == "" && info.AgentType != "" {
+				sess.AgentType = info.AgentType
+			}
+		}
 		if info.TS != 0 {
 			if sess.StartedAt == 0 || info.TS < sess.StartedAt {
 				sess.StartedAt = info.TS
@@ -249,7 +261,14 @@ func (ing *Ingester) streamParse(f *os.File, startOffset int64, p *Parser, path 
 		msgs = append(msgs, lineMsgs...)
 	}
 	if sess.ProjectPath == "" {
-		sess.ProjectPath = fallbackProjectPath(parentDirName(path))
+		dir := parentDirName(path)
+		if isSub {
+			dir = subagentProjectDirName(path) // skip the <parent>/subagents/ levels
+		}
+		sess.ProjectPath = fallbackProjectPath(dir)
+	}
+	if isSub && sess.ParentSession == "" {
+		sess.ParentSession = subagentParentDir(path)
 	}
 	return msgs, sess, consumed, unparsed, nil
 }
@@ -409,30 +428,34 @@ func (ing *Ingester) upsertIngestState(tx *sql.Tx, fs FileState, monotonic bool)
 
 func (ing *Ingester) upsertSession(tx *sql.Tx, s model.Session, userTurns int, kind changeKind) error {
 	if kind == changeFull {
-		_, err := tx.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session)
-			VALUES (?,?,?,?,?,?,?,?)
+		_, err := tx.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session, agent_type)
+			VALUES (?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(uuid) DO UPDATE SET project_path=excluded.project_path, source_file=excluded.source_file,
-			started_at=excluded.started_at, ended_at=excluded.ended_at, turn_count=excluded.turn_count, title=excluded.title`,
-			s.UUID, nullEmpty(s.ProjectPath), s.SourceFile, nullZero(s.StartedAt), nullZero(s.EndedAt), userTurns, nullEmpty(s.Title), nullEmpty(s.ParentSession))
+			started_at=excluded.started_at, ended_at=excluded.ended_at, turn_count=excluded.turn_count, title=excluded.title,
+			parent_session=excluded.parent_session, agent_type=excluded.agent_type`,
+			s.UUID, nullEmpty(s.ProjectPath), s.SourceFile, nullZero(s.StartedAt), nullZero(s.EndedAt), userTurns, nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType))
 		return err
 	}
-	// Incremental: bump ended_at, set turn_count to the authoritative total,
-	// fill project_path/title if missing.
+	// Incremental: bump ended_at, set turn_count to the authoritative total, and
+	// fill project_path/title/parent_session/agent_type if still missing (subagent
+	// metadata can arrive in a later line, e.g. attributionAgent on the assistant turn).
 	_, err := tx.Exec(`UPDATE sessions SET
 		ended_at = MAX(COALESCE(ended_at,0), ?),
 		turn_count = ?,
 		project_path = COALESCE(NULLIF(project_path,''), ?),
-		title = COALESCE(NULLIF(title,''), ?)
+		title = COALESCE(NULLIF(title,''), ?),
+		parent_session = COALESCE(NULLIF(parent_session,''), ?),
+		agent_type = COALESCE(NULLIF(agent_type,''), ?)
 		WHERE uuid = ?`,
-		nullZero(s.EndedAt), userTurns, nullEmpty(s.ProjectPath), nullEmpty(s.Title), s.UUID)
+		nullZero(s.EndedAt), userTurns, nullEmpty(s.ProjectPath), nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType), s.UUID)
 	if err != nil {
 		return err
 	}
 	// If the session row didn't exist yet (incremental on a brand-new file path
 	// whose state was somehow present), ensure it exists.
-	_, err = tx.Exec(`INSERT OR IGNORE INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title)
-		VALUES (?,?,?,?,?,?,?)`,
-		s.UUID, nullEmpty(s.ProjectPath), s.SourceFile, nullZero(s.StartedAt), nullZero(s.EndedAt), userTurns, nullEmpty(s.Title))
+	_, err = tx.Exec(`INSERT OR IGNORE INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session, agent_type)
+		VALUES (?,?,?,?,?,?,?,?,?)`,
+		s.UUID, nullEmpty(s.ProjectPath), s.SourceFile, nullZero(s.StartedAt), nullZero(s.EndedAt), userTurns, nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType))
 	return err
 }
 

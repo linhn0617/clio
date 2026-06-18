@@ -22,6 +22,7 @@ type EventInfo struct {
 	CWD       string
 	TS        int64
 	TitleHint string // first user text, for session title
+	AgentType string // subagent type (attributionAgent), for subagent transcripts
 }
 
 // Parser turns session event lines into indexable messages. It is stateful:
@@ -62,7 +63,7 @@ func (p *Parser) ParseLine(line []byte) ([]model.Message, EventInfo, error) {
 		return nil, EventInfo{}, err
 	}
 
-	info := EventInfo{SessionID: ev.SessionID, CWD: ev.CWD, TS: parseTS(ev.Timestamp)}
+	info := EventInfo{SessionID: ev.SessionID, CWD: ev.CWD, TS: parseTS(ev.Timestamp), AgentType: ev.AttributionAgent}
 
 	if ev.Message == nil || (ev.Type != model.RoleUser && ev.Type != model.RoleAssistant) {
 		return nil, info, nil // non-conversational event: skip, but keep cwd/ts

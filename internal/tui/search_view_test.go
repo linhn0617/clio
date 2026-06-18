@@ -14,6 +14,16 @@ import (
 	"github.com/linhn0617/clio/internal/sessions"
 )
 
+// A subagent hit is marked with a ↳ and its type in the results list.
+func TestSearchViewMarksSubagentHit(t *testing.T) {
+	v := searchView{width: 80, height: 20, query: "x"}
+	v.results = []searchHit{{sessionUUID: "agent-c", parentSession: "P", agentType: "general-purpose", snippet: "found it"}}
+	out := v.renderList(80, 10)
+	if !strings.Contains(out, "↳") || !strings.Contains(out, "general-purpose") {
+		t.Fatalf("a subagent hit should be marked with ↳ and its type: %q", out)
+	}
+}
+
 // A cancelled context surfaces an error from the shared preview load instead of
 // running the query — so quitting the TUI never blocks on in-flight DB work.
 func TestPreviewLoadHonorsContext(t *testing.T) {

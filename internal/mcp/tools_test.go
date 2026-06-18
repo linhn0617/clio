@@ -212,3 +212,119 @@ func TestHandleActivitySummaryRejectsBadGroupBy(t *testing.T) {
 		t.Fatal("expected an error result for an unsupported group_by")
 	}
 }
+
+func addChild(t *testing.T, d *db.DB, uuid, project, parent, agentType string) {
+	t.Helper()
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, ended_at, turn_count, parent_session, agent_type) VALUES (?,?,?,?,1,?,?)`,
+		uuid, project, uuid+".jsonl", time.Now().Unix(), parent, agentType); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHandleListSessionsNestsSubagents(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addChild(t, d, "agent-c", "/p", "P", "general-purpose")
+
+	// Default: only the top-level parent, annotated with its subagent count.
+	def := resultJSON(t, call(t, handleListSessions(d, nil), map[string]any{}))
+	if int(def["count"].(float64)) != 1 {
+		t.Fatalf("default should list only the parent, count=%v", def["count"])
+	}
+	prow := def["sessions"].([]any)[0].(map[string]any)
+	if prow["subagent_count"] == nil || int(prow["subagent_count"].(float64)) != 1 {
+		t.Fatalf("parent should report subagent_count=1, got %v", prow["subagent_count"])
+	}
+
+	// include_subagents: both rows; the child carries its parent link and type.
+	all := resultJSON(t, call(t, handleListSessions(d, nil), map[string]any{"include_subagents": true}))
+	if int(all["count"].(float64)) != 2 {
+		t.Fatalf("include_subagents should list both, count=%v", all["count"])
+	}
+	var child map[string]any
+	for _, s := range all["sessions"].([]any) {
+		if row := s.(map[string]any); row["uuid"] == "agent-c" {
+			child = row
+		}
+	}
+	if child == nil || child["parent_session"] != "P" || child["agent_type"] != "general-purpose" {
+		t.Fatalf("child row missing parent/type: %v", child)
+	}
+}
+
+func TestHandleSearchCarriesSubagentInfo(t *testing.T) {
+	d := testDB(t)
+	addChild(t, d, "agent-z", "/p", "parent-z", "general-purpose")
+	addMsg(t, d, "agent-z", 0, "assistant", "subagentfinding alpha")
+	m := resultJSON(t, call(t, handleSearch(d, nil), map[string]any{"query": "subagentfinding"}))
+	hits := m["results"].([]any)
+	if len(hits) == 0 {
+		t.Fatal("expected a hit from the subagent session")
+	}
+	h := hits[0].(map[string]any)
+	if h["parent_session"] != "parent-z" || h["agent_type"] != "general-purpose" {
+		t.Fatalf("hit missing parent/type: %v", h)
+	}
+}
+
+func TestHandleReadSessionReportsSubagents(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addChild(t, d, "agent-c", "/p", "P", "general-purpose")
+	addMsg(t, d, "P", 0, "user", "hi")
+	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P"}))
+	subs, ok := m["subagents"].([]any)
+	if !ok || len(subs) != 1 {
+		t.Fatalf("expected 1 subagent reported, got %v", m["subagents"])
+	}
+	sub := subs[0].(map[string]any)
+	if sub["uuid"] != "agent-c" || sub["agent_type"] != "general-purpose" {
+		t.Fatalf("subagent should carry uuid + type: %v", sub)
+	}
+	// Reading the subagent itself surfaces its parent link and type at session level.
+	mc := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "agent-c"}))
+	sess := mc["session"].(map[string]any)
+	if sess["parent_session"] != "P" || sess["agent_type"] != "general-purpose" {
+		t.Fatalf("a subagent's session block should carry parent_session + agent_type: %v", sess)
+	}
+}
+
+// read_session inlines each subagent's messages when include_subagents is set,
+// matching CLI `show --include-subagents`.
+func TestHandleReadSessionInlinesSubagents(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addChild(t, d, "agent-c", "/p", "P", "general-purpose")
+	addMsg(t, d, "agent-c", 0, "assistant", "SUBMSG")
+	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "include_subagents": true}))
+	subs := m["subagents"].([]any)
+	if len(subs) != 1 {
+		t.Fatalf("expected 1 subagent, got %v", m["subagents"])
+	}
+	msgs, ok := subs[0].(map[string]any)["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		t.Fatalf("include_subagents should inline the child's messages, got %v", subs[0])
+	}
+	if msgs[0].(map[string]any)["content"] != "SUBMSG" {
+		t.Fatalf("inlined child message content wrong: %v", msgs[0])
+	}
+}
+
+// An inlined subagent transcript longer than the page limit signals has_more, so a
+// client can tell it was truncated (and paginate the child via read_session).
+func TestHandleReadSessionInlineSignalsTruncation(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addChild(t, d, "agent-c", "/p", "P", "general-purpose")
+	for i := range 5 {
+		addMsg(t, d, "agent-c", i, "user", "m")
+	}
+	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "include_subagents": true, "limit": 2}))
+	sub := m["subagents"].([]any)[0].(map[string]any)
+	if msgs := sub["messages"].([]any); len(msgs) != 2 {
+		t.Fatalf("child page should respect limit=2, got %d", len(msgs))
+	}
+	if sub["has_more"] != true {
+		t.Fatalf("a truncated inlined child transcript must signal has_more, got %v", sub["has_more"])
+	}
+}

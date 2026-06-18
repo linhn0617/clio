@@ -22,14 +22,16 @@ type Options struct {
 
 // Result is one matched message.
 type Result struct {
-	MessageID   int64
-	Seq         int
-	SessionUUID string
-	ProjectPath string
-	Role        string
-	TS          int64
-	Snippet     string
-	Score       float64
+	MessageID     int64
+	Seq           int
+	SessionUUID   string
+	ProjectPath   string
+	Role          string
+	TS            int64
+	Snippet       string
+	Score         float64
+	ParentSession string // the hit session's parent, when it is a subagent transcript
+	AgentType     string // the hit session's subagent type, when it is a subagent
 }
 
 // terms splits a query into terms, honoring double-quoted phrases.

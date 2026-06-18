@@ -43,3 +43,37 @@ func sessionUUIDFromPath(path string) string {
 func parentDirName(path string) string {
 	return filepath.Base(filepath.Dir(path))
 }
+
+// isSubagentFile reports whether path is a Claude Code subagent transcript: an
+// agent-<id>.jsonl file directly inside a "subagents" directory
+// (<project>/<parent-session-uuid>/subagents/agent-<id>.jsonl). The filename prefix
+// is required so a normal session in a project dir that happens to be named
+// "subagents" is not misdetected.
+func isSubagentFile(path string) bool {
+	return filepath.Base(filepath.Dir(path)) == "subagents" &&
+		strings.HasPrefix(filepath.Base(path), "agent-")
+}
+
+// dirName returns the base of dir, treating the degenerate "." / separator results
+// (a path with no real ancestor at that depth) as empty.
+func dirName(dir string) string {
+	b := filepath.Base(dir)
+	if b == "." || b == string(filepath.Separator) {
+		return ""
+	}
+	return b
+}
+
+// subagentParentDir returns the parent-session-uuid directory that holds a subagent
+// file's "subagents" dir — the fallback parent link when the transcript's lines
+// carry no sessionId. Empty for a degenerate (too-shallow) path.
+func subagentParentDir(path string) string {
+	return dirName(filepath.Dir(filepath.Dir(path)))
+}
+
+// subagentProjectDirName returns the encoded project directory above a subagent
+// file's <parent-uuid>/subagents/ path, for project-path fallback when the
+// transcript carries no cwd (parentDirName would yield the literal "subagents").
+func subagentProjectDirName(path string) string {
+	return dirName(filepath.Dir(filepath.Dir(filepath.Dir(path))))
+}

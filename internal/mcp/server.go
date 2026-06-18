@@ -63,6 +63,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("touched", mcp.Description("Only sessions whose tool calls touched this path prefix")),
 		mcp.WithString("tool", mcp.Description("Only sessions that used this tool, e.g. Bash or mcp__server__name")),
 		mcp.WithString("ran", mcp.Description("Only sessions that ran a command containing this substring")),
+		mcp.WithBoolean("include_subagents", mcp.Description("Include subagent child sessions (default: top-level only)"), mcp.DefaultBool(false)),
 	), handleListSessions(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("activity_summary",
@@ -87,6 +88,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithNumber("offset", mcp.Description("Message offset for pagination"), mcp.DefaultNumber(0), mcp.Min(0)),
 		mcp.WithNumber("limit", mcp.Description("Max messages per page (default 50, max 200)"), mcp.DefaultNumber(defaultReadLimit), mcp.Min(1), mcp.Max(maxReadLimit)),
 		mcp.WithBoolean("include_tool_output", mcp.Description("Include tool output / thinking"), mcp.DefaultBool(false)),
+		mcp.WithBoolean("include_subagents", mcp.Description("Inline each subagent's messages in the result")),
 	), handleReadSession(database, beforeRead))
 
 	return s

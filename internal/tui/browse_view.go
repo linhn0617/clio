@@ -15,6 +15,11 @@ import (
 // browseListLimit bounds how many recent sessions the Browse list loads.
 const browseListLimit = 50
 
+// browseChildLimit bounds subagents fetched when expanding a parent. Unlike the
+// top-level list it is generous (a session can spawn many subagents) so an
+// expanded tree is fully navigable.
+const browseChildLimit = 1000
+
 // browseView lists recent sessions (optionally filtered by project) with a
 // preview of the selected session's messages.
 type browseView struct {
@@ -23,7 +28,9 @@ type browseView struct {
 	width, height int
 	project       string // optional project-path prefix filter
 	sessions      []sessions.Session
-	selected      int
+	expanded      map[string]bool               // parent uuid -> expanded in the list
+	kids          map[string][]sessions.Session // parent uuid -> its subagents (lazy)
+	selected      int                           // index into the flattened rows()
 	loaded        bool
 	err           error
 	previewGen    int // bumps on each preview load; stale preview responses are dropped
@@ -35,6 +42,45 @@ type browseView struct {
 type browseLoadedMsg struct {
 	sessions []sessions.Session
 	err      error
+}
+
+// browseRow is one flattened display row: a top-level session, or an indented
+// subagent child shown under its expanded parent.
+type browseRow struct {
+	sess  sessions.Session
+	child bool
+}
+
+// browseChildrenLoadedMsg carries a parent's subagents, fetched lazily on expand.
+type browseChildrenLoadedMsg struct {
+	parent   string
+	children []sessions.Session
+	err      error
+}
+
+// rows flattens the top-level sessions, inserting the children of any expanded
+// parent immediately beneath it. Navigation and rendering operate over these rows.
+func (v browseView) rows() []browseRow {
+	out := make([]browseRow, 0, len(v.sessions))
+	for _, s := range v.sessions {
+		out = append(out, browseRow{sess: s})
+		if v.expanded[s.UUID] {
+			for _, c := range v.kids[s.UUID] {
+				out = append(out, browseRow{sess: c, child: true})
+			}
+		}
+	}
+	return out
+}
+
+// parentRowIndex returns the flattened-row index of a top-level parent, or -1.
+func (v browseView) parentRowIndex(uuid string) int {
+	for i, r := range v.rows() {
+		if !r.child && r.sess.UUID == uuid {
+			return i
+		}
+	}
+	return -1
 }
 
 // load fetches the recent sessions for the list.
@@ -50,14 +96,45 @@ func (v browseView) load() tea.Cmd {
 	}
 }
 
+// loadChildren fetches a parent's subagents so they can nest under it on expand.
+func (v browseView) loadChildren(parent string) tea.Cmd {
+	database, ctx := v.db, orBackground(v.ctx)
+	if database == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		cs, err := sessions.ListSessions(ctx, database,
+			sessions.ListFilter{ParentSession: parent, Limit: browseChildLimit})
+		return browseChildrenLoadedMsg{parent: parent, children: cs, err: err}
+	}
+}
+
 func (v browseView) Update(msg tea.Msg) (browseView, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		v.width, v.height = msg.Width, msg.Height
 	case browseLoadedMsg:
 		v.sessions, v.err, v.selected, v.loaded = msg.sessions, msg.err, 0, true
+		v.expanded, v.kids = nil, nil
 		v.previewMsgs, v.previewErr = nil, nil
 		return v.loadPreview()
+	case browseChildrenLoadedMsg:
+		if msg.err == nil {
+			_, already := v.kids[msg.parent]
+			// On the FIRST arrival, keep the selection on the same session: if the
+			// parent is expanded and the selection sits below it, the children inserted
+			// above shift it down. A duplicate reply (re-expanded before the first load
+			// returned) inserts no new rows, so it must not shift again.
+			if !already && v.expanded[msg.parent] {
+				if pIdx := v.parentRowIndex(msg.parent); pIdx >= 0 && v.selected > pIdx {
+					v.selected += len(msg.children)
+				}
+			}
+			if v.kids == nil {
+				v.kids = map[string][]sessions.Session{}
+			}
+			v.kids[msg.parent] = msg.children
+		}
 	case previewLoadedMsg:
 		if msg.owner == tabBrowse && msg.gen == v.previewGen { // ours, and not superseded
 			v.previewMsgs, v.previewErr = msg.msgs, msg.err
@@ -67,7 +144,8 @@ func (v browseView) Update(msg tea.Msg) (browseView, tea.Cmd) {
 			return v, v.previewCmd()
 		}
 	case tea.KeyMsg:
-		// No text input on this tab: arrows and j/k both navigate the list.
+		// No text input on this tab: arrows and j/k navigate the flattened list;
+		// Enter expands or collapses the selected parent's subagents.
 		switch msg.String() {
 		case "up", "k":
 			if v.selected > 0 {
@@ -75,10 +153,12 @@ func (v browseView) Update(msg tea.Msg) (browseView, tea.Cmd) {
 				return v.selectPreview()
 			}
 		case "down", "j":
-			if v.selected < len(v.sessions)-1 {
+			if v.selected < len(v.rows())-1 {
 				v.selected++
 				return v.selectPreview()
 			}
+		case "enter":
+			return v.toggleExpand()
 		}
 	}
 	return v, nil
@@ -86,10 +166,36 @@ func (v browseView) Update(msg tea.Msg) (browseView, tea.Cmd) {
 
 // selectedSession is the UUID of the current selection, or "" when there is none.
 func (v browseView) selectedSession() string {
-	if v.selected >= 0 && v.selected < len(v.sessions) {
-		return v.sessions[v.selected].UUID
+	rows := v.rows()
+	if v.selected >= 0 && v.selected < len(rows) {
+		return rows[v.selected].sess.UUID
 	}
 	return ""
+}
+
+// toggleExpand expands or collapses the selected parent's subagents, fetching them
+// on first expand. A no-op on a child row or a parent with no subagents.
+func (v browseView) toggleExpand() (browseView, tea.Cmd) {
+	rows := v.rows()
+	if v.selected < 0 || v.selected >= len(rows) {
+		return v, nil
+	}
+	r := rows[v.selected]
+	if r.child || r.sess.SubagentCount == 0 {
+		return v, nil
+	}
+	if v.expanded == nil {
+		v.expanded = map[string]bool{}
+	}
+	if v.expanded[r.sess.UUID] {
+		v.expanded[r.sess.UUID] = false
+		return v, nil
+	}
+	v.expanded[r.sess.UUID] = true
+	if _, ok := v.kids[r.sess.UUID]; ok {
+		return v, nil // children already loaded
+	}
+	return v, v.loadChildren(r.sess.UUID)
 }
 
 // loadPreview bumps the preview generation and starts the debounce timer; the
@@ -120,25 +226,42 @@ func (v browseView) View() string {
 }
 
 func (v browseView) renderList(w, h int) string {
-	if len(v.sessions) == 0 {
+	rows := v.rows()
+	if len(rows) == 0 {
 		if v.loaded {
 			return "No sessions."
 		}
 		return "Loading…"
 	}
 	var lines []string
-	start, end := visibleWindow(v.selected, len(v.sessions), h)
+	start, end := visibleWindow(v.selected, len(rows), h)
 	for i := start; i < end; i++ {
-		s := v.sessions[i]
+		r := rows[i]
 		marker := "  "
 		if i == v.selected {
 			marker = previewMatchMarker
 		}
-		label := s.Title
+		label := r.sess.Title
 		if label == "" {
-			label = s.ProjectPath
+			label = r.sess.ProjectPath
 		}
-		row := marker + shortID(s.UUID) + " " + oneLine(label)
+		var row string
+		if r.child {
+			typ := r.sess.AgentType
+			if typ == "" {
+				typ = "subagent"
+			}
+			row = marker + "  ↳ " + shortID(r.sess.UUID) + " (" + typ + ") " + oneLine(label)
+		} else {
+			row = marker + shortID(r.sess.UUID) + " " + oneLine(label)
+			if r.sess.SubagentCount > 0 {
+				caret := "▸"
+				if v.expanded[r.sess.UUID] {
+					caret = "▾"
+				}
+				row += fmt.Sprintf(" %s+%d", caret, r.sess.SubagentCount)
+			}
+		}
 		lines = append(lines, runewidth.Truncate(row, w, "…"))
 	}
 	return strings.Join(lines, "\n")
@@ -148,5 +271,5 @@ func (v browseView) statusLine() string {
 	if v.err != nil {
 		return "⚠ " + v.err.Error()
 	}
-	return fmt.Sprintf("%d sessions · ↑/↓ navigate · tab switch view · esc quit", len(v.sessions))
+	return fmt.Sprintf("%d sessions · ↑/↓ navigate · ⏎ expand · tab switch view · esc quit", len(v.sessions))
 }
