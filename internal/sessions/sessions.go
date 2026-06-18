@@ -14,12 +14,15 @@ import (
 
 // Session is a row of the sessions table.
 type Session struct {
-	UUID        string
-	ProjectPath string
-	Title       string
-	StartedAt   int64
-	EndedAt     int64
-	TurnCount   int
+	UUID          string
+	ProjectPath   string
+	Title         string
+	StartedAt     int64
+	EndedAt       int64
+	TurnCount     int
+	ParentSession string // the spawning session's uuid, for a subagent transcript
+	AgentType     string // subagent type (e.g. general-purpose); empty for a normal session
+	SubagentCount int    // number of subagent children (top-level rows only)
 }
 
 // Message is a row of the messages table.
@@ -42,6 +45,11 @@ type ListFilter struct {
 	Ran           string // only sessions that ran a command containing this substring
 	TargetKind    string // with TargetValue: only sessions with a tool_targets row of this exact kind
 	TargetValue   string // with TargetKind: only sessions with a tool_targets row of this exact value
+	// IncludeSubagents lists subagent child sessions alongside top-level ones; by
+	// default only top-level sessions are returned (children are nested under their
+	// parent). ParentSession instead lists exactly one parent's children.
+	IncludeSubagents bool
+	ParentSession    string
 }
 
 // ListSessions returns sessions matching filter, most recent first.
@@ -49,7 +57,9 @@ func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session
 	if f.Limit <= 0 {
 		f.Limit = 50
 	}
-	q := `SELECT uuid, COALESCE(project_path,''), COALESCE(title,''), COALESCE(started_at,0), COALESCE(ended_at,0), turn_count
+	q := `SELECT uuid, COALESCE(project_path,''), COALESCE(title,''), COALESCE(started_at,0), COALESCE(ended_at,0), turn_count,
+		COALESCE(parent_session,''), COALESCE(agent_type,''),
+		(SELECT COUNT(*) FROM sessions sub WHERE sub.parent_session = sessions.uuid)
 		FROM sessions WHERE 1=1`
 	var args []any
 	if f.Since > 0 {
@@ -80,6 +90,14 @@ func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session
 		q += ` AND uuid IN (SELECT session_uuid FROM tool_targets WHERE kind = ? AND value = ?)`
 		args = append(args, f.TargetKind, f.TargetValue)
 	}
+	// Subagent nesting: list only top-level sessions by default, promoting an orphan
+	// whose parent is not indexed; ParentSession instead lists one parent's children.
+	if f.ParentSession != "" {
+		q += " AND parent_session = ?"
+		args = append(args, f.ParentSession)
+	} else if !f.IncludeSubagents {
+		q += " AND (parent_session IS NULL OR parent_session = '' OR parent_session NOT IN (SELECT uuid FROM sessions))"
+	}
 	q += " ORDER BY ended_at DESC LIMIT ?"
 	args = append(args, f.Limit)
 
@@ -91,7 +109,8 @@ func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session
 	var out []Session
 	for rows.Next() {
 		var s Session
-		if err := rows.Scan(&s.UUID, &s.ProjectPath, &s.Title, &s.StartedAt, &s.EndedAt, &s.TurnCount); err != nil {
+		if err := rows.Scan(&s.UUID, &s.ProjectPath, &s.Title, &s.StartedAt, &s.EndedAt, &s.TurnCount,
+			&s.ParentSession, &s.AgentType, &s.SubagentCount); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -107,11 +126,11 @@ var (
 
 // ResolvePrefix resolves a full uuid or unambiguous prefix to a Session.
 func ResolvePrefix(ctx context.Context, database *db.DB, prefix string) (Session, error) {
-	const cols = `uuid, COALESCE(project_path,''), COALESCE(title,''), COALESCE(started_at,0), COALESCE(ended_at,0), turn_count`
+	const cols = `uuid, COALESCE(project_path,''), COALESCE(title,''), COALESCE(started_at,0), COALESCE(ended_at,0), turn_count, COALESCE(parent_session,''), COALESCE(agent_type,'')`
 	// Exact match wins regardless of how many prefixes also match.
 	var s Session
 	err := database.QueryRowContext(ctx, `SELECT `+cols+` FROM sessions WHERE uuid = ?`, prefix).
-		Scan(&s.UUID, &s.ProjectPath, &s.Title, &s.StartedAt, &s.EndedAt, &s.TurnCount)
+		Scan(&s.UUID, &s.ProjectPath, &s.Title, &s.StartedAt, &s.EndedAt, &s.TurnCount, &s.ParentSession, &s.AgentType)
 	switch {
 	case err == nil:
 		return s, nil
@@ -127,7 +146,7 @@ func ResolvePrefix(ctx context.Context, database *db.DB, prefix string) (Session
 	var matches []Session
 	for rows.Next() {
 		var m Session
-		if err := rows.Scan(&m.UUID, &m.ProjectPath, &m.Title, &m.StartedAt, &m.EndedAt, &m.TurnCount); err != nil {
+		if err := rows.Scan(&m.UUID, &m.ProjectPath, &m.Title, &m.StartedAt, &m.EndedAt, &m.TurnCount, &m.ParentSession, &m.AgentType); err != nil {
 			return Session{}, err
 		}
 		matches = append(matches, m)
@@ -334,7 +353,7 @@ func ActivitySummary(ctx context.Context, database *db.DB, since int64, groupBy 
 	default:
 		return nil, fmt.Errorf("invalid group_by %q", groupBy)
 	}
-	q := `SELECT ` + keyExpr + ` AS k, COUNT(DISTINCT s.uuid), COUNT(m.id)
+	q := `SELECT ` + keyExpr + ` AS k, COUNT(DISTINCT COALESCE(s.parent_session, s.uuid)), COUNT(m.id)
 		FROM sessions s LEFT JOIN messages m ON m.session_uuid = s.uuid
 		WHERE s.ended_at >= ?
 		GROUP BY k ORDER BY k DESC`

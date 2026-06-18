@@ -445,3 +445,89 @@ func TestActivitySummaryLocalDay(t *testing.T) {
 		t.Fatalf("want single bucket %q, got %+v", want, buckets)
 	}
 }
+
+func addChildSession(t *testing.T, d *db.DB, uuid, project string, turns int, parent, agentType string) {
+	t.Helper()
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session, agent_type) VALUES (?,?,?,?,?,?,?,?,?)`,
+		uuid, project, uuid+".jsonl", time.Now().Unix(), time.Now().Unix(), turns, "title-"+uuid, parent, agentType); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ListSessions hides subagent children by default (with orphan promotion when the
+// parent is absent), can include them, can list one parent's children, and carries
+// the parent link, type, and per-parent subagent count.
+func TestListSessionsNestsSubagents(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p", 2)                                   // top-level parent
+	addChildSession(t, d, "agent-C", "/p", 1, "P", "general-purpose") // child of P
+	addChildSession(t, d, "agent-O", "/p", 1, "PX", "Explore")        // orphan: parent PX absent
+
+	listed := func(f ListFilter) map[string]Session {
+		t.Helper()
+		got, err := ListSessions(context.Background(), d, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]Session{}
+		for _, s := range got {
+			m[s.UUID] = s
+		}
+		return m
+	}
+
+	def := listed(ListFilter{})
+	if _, ok := def["P"]; !ok {
+		t.Fatal("default list should include top-level parent P")
+	}
+	if _, ok := def["agent-C"]; ok {
+		t.Fatal("default list must hide subagent child agent-C")
+	}
+	if _, ok := def["agent-O"]; !ok {
+		t.Fatal("default list should promote orphan agent-O (parent PX absent)")
+	}
+	if def["P"].SubagentCount != 1 {
+		t.Fatalf("P.SubagentCount=%d want 1", def["P"].SubagentCount)
+	}
+
+	all := listed(ListFilter{IncludeSubagents: true})
+	if len(all) != 3 {
+		t.Fatalf("IncludeSubagents should list all 3, got %d", len(all))
+	}
+	if all["agent-C"].ParentSession != "P" || all["agent-C"].AgentType != "general-purpose" {
+		t.Fatalf("child should carry parent link and type: %+v", all["agent-C"])
+	}
+
+	kids := listed(ListFilter{ParentSession: "P"})
+	if len(kids) != 1 {
+		t.Fatalf("ParentSession=P should list exactly 1 child, got %d", len(kids))
+	}
+	if _, ok := kids["agent-C"]; !ok {
+		t.Fatal("ParentSession=P should list agent-C")
+	}
+}
+
+// A parent session and its subagents count as one session in the summary, while
+// the subagents' messages still count.
+func TestActivitySummaryCountsParentAndChildrenAsOne(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p", 1)
+	addChildSession(t, d, "agent-C", "/p", 1, "P", "general-purpose")
+	addMsg(t, d, "P", 0, "user", "parent msg")
+	addMsg(t, d, "agent-C", 0, "user", "child msg")
+
+	since := time.Now().Add(-24 * time.Hour).Unix()
+	buckets, err := ActivitySummary(context.Background(), d, since, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 1 {
+		t.Fatalf("want 1 project bucket, got %+v", buckets)
+	}
+	if buckets[0].Sessions != 1 {
+		t.Fatalf("parent+child should count as 1 session, got %d", buckets[0].Sessions)
+	}
+	if buckets[0].Messages != 2 {
+		t.Fatalf("both messages should still count, got %d", buckets[0].Messages)
+	}
+}
