@@ -12,14 +12,15 @@ import (
 
 func newListCmd() *cobra.Command {
 	var (
-		since    string
-		project  string
-		minTurns int
-		limit    int
-		asJSON   bool
-		touched  string
-		tool     string
-		ran      string
+		since            string
+		project          string
+		minTurns         int
+		limit            int
+		asJSON           bool
+		touched          string
+		tool             string
+		ran              string
+		includeSubagents bool
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -36,13 +37,14 @@ func newListCmd() *cobra.Command {
 			defer database.Close()
 
 			rows, err := sessions.ListSessions(cmd.Context(), database, sessions.ListFilter{
-				Since:         sinceTS,
-				ProjectPrefix: project,
-				MinTurns:      minTurns,
-				Limit:         limit,
-				Touched:       touched,
-				Tool:          tool,
-				Ran:           ran,
+				Since:            sinceTS,
+				ProjectPrefix:    project,
+				MinTurns:         minTurns,
+				Limit:            limit,
+				Touched:          touched,
+				Tool:             tool,
+				Ran:              ran,
+				IncludeSubagents: includeSubagents,
 			})
 			if err != nil {
 				return err
@@ -57,8 +59,7 @@ func newListCmd() *cobra.Command {
 				return nil
 			}
 			for _, s := range rows {
-				fmt.Fprintf(os.Stdout, "%s  %s  %3d turns  %s  %s\n",
-					shortID(s.UUID), formatTS(s.EndedAt), s.TurnCount, trimProject(s.ProjectPath), oneLine(s.Title, 60))
+				fmt.Fprintln(os.Stdout, formatSessionLine(s))
 			}
 			return nil
 		},
@@ -71,5 +72,6 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&touched, "touched", "", "Only sessions whose tool calls touched this path prefix")
 	cmd.Flags().StringVar(&tool, "tool", "", "Only sessions that used this tool (exact name)")
 	cmd.Flags().StringVar(&ran, "ran", "", "Only sessions that ran a command containing this substring")
+	cmd.Flags().BoolVar(&includeSubagents, "include-subagents", false, "Include subagent child sessions (default: top-level only)")
 	return cmd
 }

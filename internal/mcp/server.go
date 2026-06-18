@@ -63,6 +63,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("touched", mcp.Description("Only sessions whose tool calls touched this path prefix")),
 		mcp.WithString("tool", mcp.Description("Only sessions that used this tool, e.g. Bash or mcp__server__name")),
 		mcp.WithString("ran", mcp.Description("Only sessions that ran a command containing this substring")),
+		mcp.WithBoolean("include_subagents", mcp.Description("Include subagent child sessions (default: top-level only)"), mcp.DefaultBool(false)),
 	), handleListSessions(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("activity_summary",

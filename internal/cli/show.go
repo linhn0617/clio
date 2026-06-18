@@ -22,10 +22,11 @@ func resolveShowFormat(format string, jsonFlag bool) string {
 
 func newShowCmd() *cobra.Command {
 	var (
-		format       string
-		noToolOutput bool
-		jsonFlag     bool
-		limit        int
+		format           string
+		noToolOutput     bool
+		jsonFlag         bool
+		limit            int
+		includeSubagents bool
 	)
 	cmd := &cobra.Command{
 		Use:   "show <session-uuid-or-prefix>",
@@ -50,22 +51,46 @@ func newShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// This session's subagents (its Task-tool children), if any.
+			children, err := sessions.ListSessions(cmd.Context(), database, sessions.ListFilter{ParentSession: sess.UUID, Limit: 1000})
+			if err != nil {
+				return err
+			}
 
 			switch format {
 			case "json":
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
 				return enc.Encode(struct {
-					Session  sessions.Session   `json:"session"`
-					Messages []sessions.Message `json:"messages"`
-				}{sess, msgs})
+					Session   sessions.Session   `json:"session"`
+					Messages  []sessions.Message `json:"messages"`
+					Subagents []sessions.Session `json:"subagents,omitempty"`
+				}{sess, msgs, children})
 			case "raw":
 				return writeRaw(os.Stdout, msgs)
 			case "markdown", "":
 				fmt.Fprintf(os.Stdout, "# %s\n\n_%s · %s · %d turns_\n\n",
 					orPlaceholder(sess.Title, "(untitled session)"), sess.ProjectPath, formatTS(sess.StartedAt), sess.TurnCount)
+				if note := subagentNote(sess); note != "" {
+					fmt.Fprintf(os.Stdout, "_%s_\n\n", note)
+				}
 				for _, m := range msgs {
 					fmt.Fprintf(os.Stdout, "## %s\n\n%s\n\n", m.Role, m.Content)
+				}
+				if sec := formatSubagentsSection(children); sec != "" {
+					fmt.Fprintf(os.Stdout, "%s\n", sec)
+				}
+				if includeSubagents {
+					for _, c := range children {
+						cmsgs, _, err := sessions.GetMessages(cmd.Context(), database, c.UUID, 0, limit, !noToolOutput, true)
+						if err != nil {
+							return err
+						}
+						fmt.Fprintf(os.Stdout, "---\n\n# ↳ subagent %s (%s)\n\n", shortID(c.UUID), orPlaceholder(c.AgentType, "subagent"))
+						for _, m := range cmsgs {
+							fmt.Fprintf(os.Stdout, "## %s\n\n%s\n\n", m.Role, m.Content)
+						}
+					}
 				}
 				return nil
 			default:
@@ -77,6 +102,7 @@ func newShowCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noToolOutput, "no-tool-output", false, "Omit tool output")
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output JSON (alias for --format json)")
 	cmd.Flags().IntVar(&limit, "limit", defaultShowMessages, "Maximum messages to render")
+	cmd.Flags().BoolVar(&includeSubagents, "include-subagents", false, "Inline the transcripts of this session's subagents")
 	return cmd
 }
 

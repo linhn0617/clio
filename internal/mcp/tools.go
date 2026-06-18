@@ -61,15 +61,17 @@ func handleSearch(database *db.DB, beforeRead func()) func(context.Context, mcp.
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		type hit struct {
-			SessionUUID string `json:"session_uuid"`
-			Project     string `json:"project"`
-			Role        string `json:"role"`
-			Timestamp   string `json:"timestamp"`
-			Snippet     string `json:"snippet"`
+			SessionUUID   string `json:"session_uuid"`
+			ParentSession string `json:"parent_session,omitempty"`
+			AgentType     string `json:"agent_type,omitempty"`
+			Project       string `json:"project"`
+			Role          string `json:"role"`
+			Timestamp     string `json:"timestamp"`
+			Snippet       string `json:"snippet"`
 		}
 		out := make([]hit, 0, len(res))
 		for _, r := range res {
-			out = append(out, hit{r.SessionUUID, r.ProjectPath, r.Role, tsString(r.TS), r.Snippet})
+			out = append(out, hit{r.SessionUUID, r.ParentSession, r.AgentType, r.ProjectPath, r.Role, tsString(r.TS), r.Snippet})
 		}
 		return mcp.NewToolResultJSON(map[string]any{"results": out, "count": len(out)})
 	}
@@ -81,28 +83,32 @@ func handleListSessions(database *db.DB, beforeRead func()) func(context.Context
 			beforeRead()
 		}
 		rows, err := sessions.ListSessions(ctx, database, sessions.ListFilter{
-			Since:         parseSince(req.GetString("since", "")),
-			ProjectPrefix: req.GetString("project", ""),
-			MinTurns:      req.GetInt("min_turns", 0),
-			Limit:         clamp(req.GetInt("limit", 20), 20, maxSearchLimit),
-			Touched:       req.GetString("touched", ""),
-			Tool:          req.GetString("tool", ""),
-			Ran:           req.GetString("ran", ""),
+			Since:            parseSince(req.GetString("since", "")),
+			ProjectPrefix:    req.GetString("project", ""),
+			MinTurns:         req.GetInt("min_turns", 0),
+			Limit:            clamp(req.GetInt("limit", 20), 20, maxSearchLimit),
+			Touched:          req.GetString("touched", ""),
+			Tool:             req.GetString("tool", ""),
+			Ran:              req.GetString("ran", ""),
+			IncludeSubagents: req.GetBool("include_subagents", false),
 		})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		type srow struct {
-			UUID      string `json:"uuid"`
-			Project   string `json:"project"`
-			Title     string `json:"title"`
-			Started   string `json:"started_at"`
-			Ended     string `json:"ended_at"`
-			TurnCount int    `json:"turn_count"`
+			UUID          string `json:"uuid"`
+			ParentSession string `json:"parent_session,omitempty"`
+			AgentType     string `json:"agent_type,omitempty"`
+			SubagentCount int    `json:"subagent_count,omitempty"`
+			Project       string `json:"project"`
+			Title         string `json:"title"`
+			Started       string `json:"started_at"`
+			Ended         string `json:"ended_at"`
+			TurnCount     int    `json:"turn_count"`
 		}
 		out := make([]srow, 0, len(rows))
 		for _, s := range rows {
-			out = append(out, srow{s.UUID, s.ProjectPath, s.Title, tsString(s.StartedAt), tsString(s.EndedAt), s.TurnCount})
+			out = append(out, srow{s.UUID, s.ParentSession, s.AgentType, s.SubagentCount, s.ProjectPath, s.Title, tsString(s.StartedAt), tsString(s.EndedAt), s.TurnCount})
 		}
 		return mcp.NewToolResultJSON(map[string]any{"sessions": out, "count": len(out)})
 	}
@@ -172,6 +178,10 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
+		children, err := sessions.ListSessions(ctx, database, sessions.ListFilter{ParentSession: sess.UUID, Limit: 1000})
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 		type m struct {
 			Seq     int    `json:"seq"`
 			TS      string `json:"timestamp"`
@@ -182,14 +192,25 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 		for _, x := range msgs {
 			out = append(out, m{x.Seq, tsString(x.TS), x.Role, x.Content})
 		}
+		type sub struct {
+			UUID      string `json:"uuid"`
+			AgentType string `json:"agent_type,omitempty"`
+			Title     string `json:"title"`
+		}
+		subs := make([]sub, 0, len(children))
+		for _, c := range children {
+			subs = append(subs, sub{c.UUID, c.AgentType, c.Title})
+		}
 		return mcp.NewToolResultJSON(map[string]any{
 			"session": map[string]any{
 				"uuid": sess.UUID, "project": sess.ProjectPath, "title": sess.Title,
 				"started_at": tsString(sess.StartedAt), "turn_count": sess.TurnCount,
+				"parent_session": sess.ParentSession, "agent_type": sess.AgentType,
 			},
-			"messages": out,
-			"offset":   offset,
-			"has_more": hasMore,
+			"messages":  out,
+			"subagents": subs,
+			"offset":    offset,
+			"has_more":  hasMore,
 		})
 	}
 }

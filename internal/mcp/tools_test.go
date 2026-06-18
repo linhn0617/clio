@@ -212,3 +212,72 @@ func TestHandleActivitySummaryRejectsBadGroupBy(t *testing.T) {
 		t.Fatal("expected an error result for an unsupported group_by")
 	}
 }
+
+func addChild(t *testing.T, d *db.DB, uuid, project, parent, agentType string) {
+	t.Helper()
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, ended_at, turn_count, parent_session, agent_type) VALUES (?,?,?,?,1,?,?)`,
+		uuid, project, uuid+".jsonl", time.Now().Unix(), parent, agentType); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHandleListSessionsNestsSubagents(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addChild(t, d, "agent-c", "/p", "P", "general-purpose")
+
+	// Default: only the top-level parent, annotated with its subagent count.
+	def := resultJSON(t, call(t, handleListSessions(d, nil), map[string]any{}))
+	if int(def["count"].(float64)) != 1 {
+		t.Fatalf("default should list only the parent, count=%v", def["count"])
+	}
+	prow := def["sessions"].([]any)[0].(map[string]any)
+	if prow["subagent_count"] == nil || int(prow["subagent_count"].(float64)) != 1 {
+		t.Fatalf("parent should report subagent_count=1, got %v", prow["subagent_count"])
+	}
+
+	// include_subagents: both rows; the child carries its parent link and type.
+	all := resultJSON(t, call(t, handleListSessions(d, nil), map[string]any{"include_subagents": true}))
+	if int(all["count"].(float64)) != 2 {
+		t.Fatalf("include_subagents should list both, count=%v", all["count"])
+	}
+	var child map[string]any
+	for _, s := range all["sessions"].([]any) {
+		if row := s.(map[string]any); row["uuid"] == "agent-c" {
+			child = row
+		}
+	}
+	if child == nil || child["parent_session"] != "P" || child["agent_type"] != "general-purpose" {
+		t.Fatalf("child row missing parent/type: %v", child)
+	}
+}
+
+func TestHandleSearchCarriesSubagentInfo(t *testing.T) {
+	d := testDB(t)
+	addChild(t, d, "agent-z", "/p", "parent-z", "general-purpose")
+	addMsg(t, d, "agent-z", 0, "assistant", "subagentfinding alpha")
+	m := resultJSON(t, call(t, handleSearch(d, nil), map[string]any{"query": "subagentfinding"}))
+	hits := m["results"].([]any)
+	if len(hits) == 0 {
+		t.Fatal("expected a hit from the subagent session")
+	}
+	h := hits[0].(map[string]any)
+	if h["parent_session"] != "parent-z" || h["agent_type"] != "general-purpose" {
+		t.Fatalf("hit missing parent/type: %v", h)
+	}
+}
+
+func TestHandleReadSessionReportsSubagents(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addChild(t, d, "agent-c", "/p", "P", "general-purpose")
+	addMsg(t, d, "P", 0, "user", "hi")
+	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P"}))
+	subs, ok := m["subagents"].([]any)
+	if !ok || len(subs) != 1 {
+		t.Fatalf("expected 1 subagent reported, got %v", m["subagents"])
+	}
+	if subs[0].(map[string]any)["uuid"] != "agent-c" {
+		t.Fatalf("subagent uuid wrong: %v", subs[0])
+	}
+}
