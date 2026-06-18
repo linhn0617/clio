@@ -23,12 +23,14 @@ const searchResultLimit = 50
 
 // searchHit is one result row the search view renders (a thin view of search.Result).
 type searchHit struct {
-	sessionUUID string
-	seq         int
-	project     string
-	role        string
-	ts          int64
-	snippet     string
+	sessionUUID   string
+	seq           int
+	project       string
+	role          string
+	ts            int64
+	snippet       string
+	parentSession string // non-empty when the hit comes from a subagent transcript
+	agentType     string // the subagent's type, when it is a subagent
 }
 
 // searchView is the live-search tab: a query, its results, the selection, and a
@@ -137,12 +139,14 @@ func (v searchView) runSearch(g int) tea.Cmd {
 		hits := make([]searchHit, len(res))
 		for i, r := range res {
 			hits[i] = searchHit{
-				sessionUUID: r.SessionUUID,
-				seq:         r.Seq,
-				project:     r.ProjectPath,
-				role:        r.Role,
-				ts:          r.TS,
-				snippet:     r.Snippet,
+				sessionUUID:   r.SessionUUID,
+				seq:           r.Seq,
+				project:       r.ProjectPath,
+				role:          r.Role,
+				ts:            r.TS,
+				snippet:       r.Snippet,
+				parentSession: r.ParentSession,
+				agentType:     r.AgentType,
 			}
 		}
 		return searchResultsMsg{gen: g, results: hits}
@@ -211,7 +215,15 @@ func (v searchView) renderList(w, h int) string {
 		if i == v.selected {
 			marker = previewMatchMarker
 		}
-		lines = append(lines, runewidth.Truncate(marker+oneLine(r.snippet), w, "…"))
+		line := oneLine(r.snippet)
+		if r.parentSession != "" {
+			typ := r.agentType
+			if typ == "" {
+				typ = "subagent"
+			}
+			line = "↳(" + typ + ") " + line
+		}
+		lines = append(lines, runewidth.Truncate(marker+line, w, "…"))
 	}
 	return strings.Join(lines, "\n")
 }

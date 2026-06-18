@@ -143,3 +143,41 @@ func TestBrowseViewEmptyState(t *testing.T) {
 		t.Fatalf("loaded-but-empty browse should show an empty state: %q", v.View())
 	}
 }
+
+// Enter expands a parent to reveal its subagents (lazily loaded) as indented child
+// rows, and collapses them again.
+func TestBrowseExpandCollapseNestsSubagents(t *testing.T) {
+	v := browseView{db: testDB(t)}
+	v, _ = v.Update(browseLoadedMsg{sessions: []sessions.Session{{UUID: "P", Title: "parent", SubagentCount: 1}}})
+	if len(v.rows()) != 1 {
+		t.Fatalf("a collapsed parent is one row, got %d", len(v.rows()))
+	}
+	// Expand: marks expanded and requests the children.
+	v, cmd := v.Update(key(tea.KeyEnter))
+	if !v.expanded["P"] {
+		t.Fatal("Enter should expand a parent with subagents")
+	}
+	if cmd == nil {
+		t.Fatal("expanding should request the parent's children")
+	}
+	// Children arrive and nest under the parent as child rows.
+	v, _ = v.Update(browseChildrenLoadedMsg{parent: "P", children: []sessions.Session{{UUID: "agent-c", AgentType: "general-purpose", Title: "kid"}}})
+	rows := v.rows()
+	if len(rows) != 2 || !rows[1].child || rows[1].sess.UUID != "agent-c" {
+		t.Fatalf("expanded parent should nest its child: %+v", rows)
+	}
+	// Navigating down selects the nested child (its transcript previews).
+	v, _ = v.Update(key(tea.KeyDown))
+	if v.selectedSession() != "agent-c" {
+		t.Fatalf("down should select the nested child, got %q", v.selectedSession())
+	}
+	// Back to the parent and collapse.
+	v, _ = v.Update(key(tea.KeyUp))
+	v, _ = v.Update(key(tea.KeyEnter))
+	if v.expanded["P"] {
+		t.Fatal("Enter on an expanded parent should collapse it")
+	}
+	if len(v.rows()) != 1 {
+		t.Fatalf("collapsed again is one row, got %d", len(v.rows()))
+	}
+}
