@@ -40,6 +40,27 @@ func bUpdate(t *testing.T, v browseView, msg tea.Msg) (browseView, tea.Cmd) {
 	return v.Update(msg)
 }
 
+// Expanding a parent fetches all of its subagents, not just the first
+// browseListLimit (a session can spawn more than 50).
+func TestBrowseLoadChildrenFetchesBeyondTopLevelLimit(t *testing.T) {
+	d := testDB(t)
+	for i := range browseListLimit + 10 {
+		if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, parent_session) VALUES (?,?,?,?)`,
+			fmt.Sprintf("agent-%03d", i), "/p", "x.jsonl", "P"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v := browseView{db: d}
+	msg := v.loadChildren("P")()
+	cl, ok := msg.(browseChildrenLoadedMsg)
+	if !ok {
+		t.Fatalf("expected browseChildrenLoadedMsg, got %T", msg)
+	}
+	if len(cl.children) != browseListLimit+10 {
+		t.Fatalf("expanding a parent should fetch all %d children, got %d", browseListLimit+10, len(cl.children))
+	}
+}
+
 // load reads recent sessions into the list.
 func TestBrowseViewLoad(t *testing.T) {
 	d := testDB(t)

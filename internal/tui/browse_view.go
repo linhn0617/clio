@@ -15,6 +15,11 @@ import (
 // browseListLimit bounds how many recent sessions the Browse list loads.
 const browseListLimit = 50
 
+// browseChildLimit bounds subagents fetched when expanding a parent. Unlike the
+// top-level list it is generous (a session can spawn many subagents) so an
+// expanded tree is fully navigable.
+const browseChildLimit = 1000
+
 // browseView lists recent sessions (optionally filtered by project) with a
 // preview of the selected session's messages.
 type browseView struct {
@@ -99,7 +104,7 @@ func (v browseView) loadChildren(parent string) tea.Cmd {
 	}
 	return func() tea.Msg {
 		cs, err := sessions.ListSessions(ctx, database,
-			sessions.ListFilter{ParentSession: parent, Limit: browseListLimit})
+			sessions.ListFilter{ParentSession: parent, Limit: browseChildLimit})
 		return browseChildrenLoadedMsg{parent: parent, children: cs, err: err}
 	}
 }

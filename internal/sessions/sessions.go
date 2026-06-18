@@ -72,8 +72,12 @@ func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session
 		q += " AND parent_session = ?"
 		args = append(args, f.ParentSession)
 	} else if !f.IncludeSubagents {
-		q += " AND (parent_session IS NULL OR parent_session = '' OR parent_session NOT IN (SELECT uuid FROM sessions WHERE 1=1" + filterSQL + "))"
+		// Match the listing's own page: a child is hidden only when its parent is on
+		// this page (same filters + recency order + limit), so a recent child of an
+		// off-page parent is promoted rather than lost.
+		q += " AND (parent_session IS NULL OR parent_session = '' OR parent_session NOT IN (SELECT uuid FROM sessions WHERE 1=1" + filterSQL + " ORDER BY ended_at DESC LIMIT ?))"
 		args = append(args, filterArgs...)
+		args = append(args, f.Limit)
 	}
 	q += " ORDER BY ended_at DESC LIMIT ?"
 	args = append(args, f.Limit)

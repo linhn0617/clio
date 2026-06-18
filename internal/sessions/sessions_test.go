@@ -542,6 +542,30 @@ func TestListSessionsPromotesChildWhenParentFilteredOut(t *testing.T) {
 	}
 }
 
+// A recent subagent whose parent falls outside the current page (LIMIT) is promoted
+// to the listing, not hidden behind an off-page parent.
+func TestListSessionsPromotesRecentChildBeyondParentPage(t *testing.T) {
+	d := testDB(t)
+	ins := func(uuid string, ended int64, parent any) {
+		if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session) VALUES (?,?,?,?,?,1,?,?)`,
+			uuid, "/p", uuid+".jsonl", ended, ended, uuid, parent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// C (a subagent of P) is the single most recent session; P is older and would
+	// fall outside a one-row page.
+	ins("C", 100, "P")
+	ins("T1", 90, nil)
+	ins("P", 80, nil)
+	got, err := ListSessions(context.Background(), d, ListFilter{Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].UUID != "C" {
+		t.Fatalf("the most recent row is subagent C; it must be promoted, not hidden behind its off-page parent: got %+v", got)
+	}
+}
+
 // A parent session and its subagents count as one session in the summary, while
 // the subagents' messages still count.
 func TestActivitySummaryCountsParentAndChildrenAsOne(t *testing.T) {
