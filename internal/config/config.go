@@ -16,6 +16,16 @@ func ClaudeProjectsDir() (string, error) {
 	return filepath.Join(home, ".claude", "projects"), nil
 }
 
+// CodexSessionsDir is where OpenAI Codex CLI stores per-session rollout JSONL files
+// (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl).
+func CodexSessionsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".codex", "sessions"), nil
+}
+
 // ClaudeConfigFile is Claude Code's main settings file (~/.claude.json).
 func ClaudeConfigFile() (string, error) {
 	home, err := os.UserHomeDir()
