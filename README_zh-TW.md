@@ -90,9 +90,9 @@ clio doctor                     # 健康檢查
 |------|------|
 | `search` | 全文搜尋、**依相關性與近期排序**（短查詢會退回子字串掃描；預設排除 tool output） |
 | `ask` | 從歷史回答問題：回傳最相關片段的帶引用證據包（依 session 分組、含前後 turn），交給 Claude 合成 |
-| `list_sessions` | 依日期/專案/turn 數，或依動過的檔／用過的工具／跑過的指令列出 session |
+| `list_sessions` | 依日期/專案/turn 數，或依動過的檔／用過的工具／跑過的指令列出 session；子代理巢狀在母體底下（`include_subagents` 可一併列出） |
 | `activity_summary` | 依天或專案，或你最常動的檔／指令／工具／搜尋 pattern／URL 統計（「我上週碰了什麼？」） |
-| `read_session` | 分頁讀取單一 session 的完整內容 |
+| `read_session` | 分頁讀取單一 session 的完整內容；回報母體的子代理（`include_subagents` 連訊息一起內嵌） |
 
 ## 隱私
 
