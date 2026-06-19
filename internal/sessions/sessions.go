@@ -23,6 +23,7 @@ type Session struct {
 	ParentSession string // the spawning session's uuid, for a subagent transcript
 	AgentType     string // subagent type (e.g. general-purpose); empty for a normal session
 	SubagentCount int    // number of subagent children (top-level rows only)
+	Source        string // originating tool: "claude-code" | "codex"
 }
 
 // Message is a row of the messages table.
@@ -50,6 +51,9 @@ type ListFilter struct {
 	// parent). ParentSession instead lists exactly one parent's children.
 	IncludeSubagents bool
 	ParentSession    string
+	// Source restricts the listing to one originating tool: "" / "claude-code"
+	// (default) lists Claude Code only, "codex" only Codex, "all" every source.
+	Source string
 }
 
 // ListSessions returns sessions matching filter, most recent first.
@@ -59,7 +63,7 @@ func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session
 	}
 	filterSQL, filterArgs := listFilters(f)
 	q := `SELECT uuid, COALESCE(project_path,''), COALESCE(title,''), COALESCE(started_at,0), COALESCE(ended_at,0), turn_count,
-		COALESCE(parent_session,''), COALESCE(agent_type,''),
+		COALESCE(parent_session,''), COALESCE(agent_type,''), COALESCE(source,''),
 		(SELECT COUNT(*) FROM sessions sub WHERE sub.parent_session = sessions.uuid)
 		FROM sessions WHERE 1=1` + filterSQL
 	args := append([]any{}, filterArgs...)
@@ -93,7 +97,7 @@ func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session
 	for rows.Next() {
 		var s Session
 		if err := rows.Scan(&s.UUID, &s.ProjectPath, &s.Title, &s.StartedAt, &s.EndedAt, &s.TurnCount,
-			&s.ParentSession, &s.AgentType, &s.SubagentCount); err != nil {
+			&s.ParentSession, &s.AgentType, &s.Source, &s.SubagentCount); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -134,6 +138,10 @@ func listFilters(f ListFilter) (string, []any) {
 	if f.TargetKind != "" && f.TargetValue != "" {
 		q += ` AND uuid IN (SELECT session_uuid FROM tool_targets WHERE kind = ? AND value = ?)`
 		args = append(args, f.TargetKind, f.TargetValue)
+	}
+	if clause, cargs := db.SourceFilter("source", f.Source); clause != "" {
+		q += clause
+		args = append(args, cargs...)
 	}
 	return q, args
 }

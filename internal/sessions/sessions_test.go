@@ -56,6 +56,35 @@ func addTarget(t *testing.T, d *db.DB, sess, kind, value string) {
 	}
 }
 
+func TestListSessionsFilterBySource(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "cc-1", "/p", 1) // source NULL -> treated as claude-code
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, source_file, turn_count, ended_at, source) VALUES ('cx-1','cx-1.jsonl',1,?,'codex')`, time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	ids := func(f ListFilter) []string {
+		got, err := ListSessions(ctx, d, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, s := range got {
+			out = append(out, s.UUID)
+		}
+		return out
+	}
+	if got := ids(ListFilter{}); len(got) != 1 || got[0] != "cc-1" {
+		t.Fatalf("default source: got %v want [cc-1]", got)
+	}
+	if got := ids(ListFilter{Source: "codex"}); len(got) != 1 || got[0] != "cx-1" {
+		t.Fatalf("source=codex: got %v want [cx-1]", got)
+	}
+	if got := ids(ListFilter{Source: "all"}); len(got) != 2 {
+		t.Fatalf("source=all: got %v want 2", got)
+	}
+}
+
 func TestListSessionsFilterByTouched(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p", 1)
