@@ -194,7 +194,7 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 // over-cap-without-newline line is NOT consumed and is left for the next pass) and the
 // count of lines skipped because they failed to parse or exceeded maxLineBytes.
 func (ing *Ingester) streamParse(f *os.File, startOffset int64, p *Parser, path string) ([]model.Message, model.Session, int64, int64, error) {
-	sess := model.Session{UUID: sessionUUIDFromPath(path), SourceFile: path}
+	sess := model.Session{UUID: sessionUUIDFromPath(path), SourceFile: path, Source: model.SourceClaudeCode}
 	isSub := isSubagentFile(path)
 	var msgs []model.Message
 	var consumed, unparsed int64
@@ -428,12 +428,12 @@ func (ing *Ingester) upsertIngestState(tx *sql.Tx, fs FileState, monotonic bool)
 
 func (ing *Ingester) upsertSession(tx *sql.Tx, s model.Session, userTurns int, kind changeKind) error {
 	if kind == changeFull {
-		_, err := tx.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session, agent_type)
-			VALUES (?,?,?,?,?,?,?,?,?)
+		_, err := tx.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session, agent_type, source)
+			VALUES (?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(uuid) DO UPDATE SET project_path=excluded.project_path, source_file=excluded.source_file,
 			started_at=excluded.started_at, ended_at=excluded.ended_at, turn_count=excluded.turn_count, title=excluded.title,
-			parent_session=excluded.parent_session, agent_type=excluded.agent_type`,
-			s.UUID, nullEmpty(s.ProjectPath), s.SourceFile, nullZero(s.StartedAt), nullZero(s.EndedAt), userTurns, nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType))
+			parent_session=excluded.parent_session, agent_type=excluded.agent_type, source=excluded.source`,
+			s.UUID, nullEmpty(s.ProjectPath), s.SourceFile, nullZero(s.StartedAt), nullZero(s.EndedAt), userTurns, nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType), nullEmpty(s.Source))
 		return err
 	}
 	// Incremental: bump ended_at, set turn_count to the authoritative total, and
@@ -445,17 +445,18 @@ func (ing *Ingester) upsertSession(tx *sql.Tx, s model.Session, userTurns int, k
 		project_path = COALESCE(NULLIF(project_path,''), ?),
 		title = COALESCE(NULLIF(title,''), ?),
 		parent_session = COALESCE(NULLIF(parent_session,''), ?),
-		agent_type = COALESCE(NULLIF(agent_type,''), ?)
+		agent_type = COALESCE(NULLIF(agent_type,''), ?),
+		source = COALESCE(NULLIF(source,''), ?)
 		WHERE uuid = ?`,
-		nullZero(s.EndedAt), userTurns, nullEmpty(s.ProjectPath), nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType), s.UUID)
+		nullZero(s.EndedAt), userTurns, nullEmpty(s.ProjectPath), nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType), nullEmpty(s.Source), s.UUID)
 	if err != nil {
 		return err
 	}
 	// If the session row didn't exist yet (incremental on a brand-new file path
 	// whose state was somehow present), ensure it exists.
-	_, err = tx.Exec(`INSERT OR IGNORE INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session, agent_type)
-		VALUES (?,?,?,?,?,?,?,?,?)`,
-		s.UUID, nullEmpty(s.ProjectPath), s.SourceFile, nullZero(s.StartedAt), nullZero(s.EndedAt), userTurns, nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType))
+	_, err = tx.Exec(`INSERT OR IGNORE INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session, agent_type, source)
+		VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		s.UUID, nullEmpty(s.ProjectPath), s.SourceFile, nullZero(s.StartedAt), nullZero(s.EndedAt), userTurns, nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType), nullEmpty(s.Source))
 	return err
 }
 

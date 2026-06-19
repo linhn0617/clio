@@ -50,6 +50,23 @@ func openTestDB(t *testing.T) *db.DB {
 	return database
 }
 
+func TestIngestRecordsClaudeCodeSource(t *testing.T) {
+	projects := t.TempDir()
+	writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evUser2)
+	database := openTestDB(t)
+	ing := New(database, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	var src string
+	if err := database.QueryRow(`SELECT source FROM sessions WHERE uuid='sess-1'`).Scan(&src); err != nil {
+		t.Fatal(err)
+	}
+	if src != "claude-code" {
+		t.Fatalf("source=%q want claude-code", src)
+	}
+}
+
 func TestIngestFullAndSearch(t *testing.T) {
 	projects := t.TempDir()
 	writeSession(t, projects, "-Users-lin-Herd-cli-project-COMPLETE", "sess-1", evUser1, evAsst1, evResult1, evUser2)
