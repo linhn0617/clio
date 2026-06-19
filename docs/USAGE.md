@@ -203,21 +203,24 @@ clio show 2f4d1a81 --no-tool-output
 ### `clio tui` — interactive dashboard / 互動式儀表板
 
 A full-screen terminal dashboard over the same index, **read-only**. Four tabs,
-each a list on the left and a preview of the selected conversation on the right.
+each with a list on the left and a detail pane on the right (what the pane shows
+depends on the tab — see below).
 
-全螢幕的終端機儀表板，唯讀地跑在同一個索引上。四個分頁，左邊清單、右邊預覽選中的對話。
+全螢幕的終端機儀表板，唯讀地跑在同一個索引上。四個分頁，左邊清單、右邊是對應的細節窗格
+（窗格內容依分頁而定，見下）。
 
 | Tab / 分頁 | English | 中文 |
 |------|---------|------|
 | **Search** | Live full-text search (debounced); the selected hit is highlighted in its surrounding turns | 即時全文搜尋（防抖）；選中的命中在前後 turn 中高亮 |
-| **Browse** | Recent sessions (optional project filter); a parent that spawned subagents shows `▸+N` and expands | 最近的 session（可依專案）；有子代理的母 session 顯示 `▸+N`，可展開 |
+| **Browse** | Recent sessions; a parent that spawned subagents shows `▸+N` and expands to a message preview of the selection | 最近的 session；有子代理的母 session 顯示 `▸+N`，可展開；右邊預覽選取的訊息 |
 | **Activity** | Top files / commands / tools; drill into the sessions behind each entry | 最常動的檔／指令／工具；鑽進每項背後的 session |
 | **Ask** | A question's cited evidence groups with their windowed excerpts | 問題的帶引用證據組與加窗片段 |
 
 | Key / 按鍵 | Action / 動作 |
 |-----|--------|
 | `Tab` / `Shift-Tab`, or `1`-`4` | Switch tabs (digits work on Browse/Activity) / 切換分頁（數字鍵在 Browse/Activity 有效） |
-| `↑` `↓` / `j` `k` | Move the selection / 移動選取 |
+| `↑` `↓` | Move the selection, on any tab / 移動選取（任一分頁） |
+| `j` / `k` | Move the selection on Browse/Activity (query text on Search/Ask) / 在 Browse/Activity 移動選取（在 Search/Ask 是查詢文字） |
 | `Enter` | On Browse, expand/collapse a parent's subagents / 在 Browse 展開或收合子代理 |
 | `Esc` / `Ctrl-C` | Quit, from any tab / 離開（任一分頁） |
 | `q` | Quit on Browse/Activity (it is query text on Search/Ask) / 在 Browse/Activity 離開（在 Search/Ask 是查詢文字） |
