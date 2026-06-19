@@ -38,13 +38,14 @@ type Model struct {
 }
 
 // New builds the root model over an open index. ctx is threaded into every
-// sub-view so their database queries are cancelled when the program exits.
-func New(ctx context.Context, database *db.DB) Model {
+// sub-view so their database queries are cancelled when the program exits. source
+// ("" / "claude-code" | "codex" | "all") scopes the data views to one tool.
+func New(ctx context.Context, database *db.DB, source string) Model {
 	return Model{
 		db:       database,
-		search:   searchView{db: database, ctx: ctx},
-		browse:   browseView{db: database, ctx: ctx},
-		activity: activityView{db: database, ctx: ctx},
+		search:   searchView{db: database, ctx: ctx, source: source},
+		browse:   browseView{db: database, ctx: ctx, source: source},
+		activity: activityView{db: database, ctx: ctx, source: source},
 		ask:      askView{db: database, ctx: ctx},
 	}
 }

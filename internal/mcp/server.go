@@ -36,6 +36,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("role", mcp.Description("Filter by role"), mcp.Enum("user", "assistant")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 10, max 50)"), mcp.DefaultNumber(defaultSearchLimit), mcp.Min(1), mcp.Max(maxSearchLimit)),
 		mcp.WithBoolean("include_tool_output", mcp.Description("Include tool output in results"), mcp.DefaultBool(false)),
+		mcp.WithString("source", mcp.Description("Which tool's history: claude-code (default), codex, or all"), mcp.Enum("claude-code", "codex", "all"), mcp.DefaultString("claude-code")),
 	), handleSearch(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("ask",
@@ -48,6 +49,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("since", mcp.Description("Only consider sessions since: 7d, 12h, 30m, or YYYY-MM-DD")),
 		mcp.WithString("project", mcp.Description("Limit to a project path prefix (default: all projects)")),
 		mcp.WithNumber("limit", mcp.Description(fmt.Sprintf("Max sessions in the bundle (default %d, max %d)", defaultAskSessions, maxAskSessions)), mcp.DefaultNumber(defaultAskSessions), mcp.Min(1), mcp.Max(maxAskSessions)),
+		mcp.WithString("source", mcp.Description("Which tool's history: claude-code (default), codex, or all"), mcp.Enum("claude-code", "codex", "all"), mcp.DefaultString("claude-code")),
 	), handleAsk(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("list_sessions",
@@ -64,6 +66,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("tool", mcp.Description("Only sessions that used this tool, e.g. Bash or mcp__server__name")),
 		mcp.WithString("ran", mcp.Description("Only sessions that ran a command containing this substring")),
 		mcp.WithBoolean("include_subagents", mcp.Description("Include subagent child sessions (default: top-level only)"), mcp.DefaultBool(false)),
+		mcp.WithString("source", mcp.Description("Which tool's history: claude-code (default), codex, or all"), mcp.Enum("claude-code", "codex", "all"), mcp.DefaultString("claude-code")),
 	), handleListSessions(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("activity_summary",
@@ -76,6 +79,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("group_by", mcp.Description("Grouping: day or project (counts), or file/command/tool/pattern/url (activity)"), mcp.Enum("day", "project", "file", "command", "tool", "pattern", "url"), mcp.DefaultString("day")),
 		mcp.WithString("project", mcp.Description("Filter by project path prefix")),
 		mcp.WithNumber("limit", mcp.Description("Max rows for file/command/tool/pattern/url grouping (default 30, max 50)"), mcp.DefaultNumber(30), mcp.Min(1), mcp.Max(maxSearchLimit)),
+		mcp.WithString("source", mcp.Description("Which tool's history: claude-code (default), codex, or all"), mcp.Enum("claude-code", "codex", "all"), mcp.DefaultString("claude-code")),
 	), handleActivitySummary(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("read_session",
@@ -89,6 +93,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithNumber("limit", mcp.Description("Max messages per page (default 50, max 200)"), mcp.DefaultNumber(defaultReadLimit), mcp.Min(1), mcp.Max(maxReadLimit)),
 		mcp.WithBoolean("include_tool_output", mcp.Description("Include tool output / thinking"), mcp.DefaultBool(false)),
 		mcp.WithBoolean("include_subagents", mcp.Description("Inline each subagent's messages in the result")),
+		mcp.WithString("source", mcp.Description("Source filter for prefix resolution: claude-code (default), codex, or all"), mcp.Enum("claude-code", "codex", "all"), mcp.DefaultString("claude-code")),
 	), handleReadSession(database, beforeRead))
 
 	return s

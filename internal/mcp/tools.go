@@ -56,6 +56,7 @@ func handleSearch(database *db.DB, beforeRead func()) func(context.Context, mcp.
 			Role:              req.GetString("role", ""),
 			Limit:             clamp(req.GetInt("limit", defaultSearchLimit), defaultSearchLimit, maxSearchLimit),
 			IncludeToolOutput: req.GetBool("include_tool_output", false),
+			Source:            req.GetString("source", "claude-code"),
 		})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -64,6 +65,7 @@ func handleSearch(database *db.DB, beforeRead func()) func(context.Context, mcp.
 			SessionUUID   string `json:"session_uuid"`
 			ParentSession string `json:"parent_session,omitempty"`
 			AgentType     string `json:"agent_type,omitempty"`
+			Source        string `json:"source"`
 			Project       string `json:"project"`
 			Role          string `json:"role"`
 			Timestamp     string `json:"timestamp"`
@@ -71,7 +73,7 @@ func handleSearch(database *db.DB, beforeRead func()) func(context.Context, mcp.
 		}
 		out := make([]hit, 0, len(res))
 		for _, r := range res {
-			out = append(out, hit{r.SessionUUID, r.ParentSession, r.AgentType, r.ProjectPath, r.Role, tsString(r.TS), r.Snippet})
+			out = append(out, hit{r.SessionUUID, r.ParentSession, r.AgentType, r.Source, r.ProjectPath, r.Role, tsString(r.TS), r.Snippet})
 		}
 		return mcp.NewToolResultJSON(map[string]any{"results": out, "count": len(out)})
 	}
@@ -91,6 +93,7 @@ func handleListSessions(database *db.DB, beforeRead func()) func(context.Context
 			Tool:             req.GetString("tool", ""),
 			Ran:              req.GetString("ran", ""),
 			IncludeSubagents: req.GetBool("include_subagents", false),
+			Source:           req.GetString("source", "claude-code"),
 		})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -100,6 +103,7 @@ func handleListSessions(database *db.DB, beforeRead func()) func(context.Context
 			ParentSession string `json:"parent_session,omitempty"`
 			AgentType     string `json:"agent_type,omitempty"`
 			SubagentCount int    `json:"subagent_count,omitempty"`
+			Source        string `json:"source"`
 			Project       string `json:"project"`
 			Title         string `json:"title"`
 			Started       string `json:"started_at"`
@@ -108,7 +112,7 @@ func handleListSessions(database *db.DB, beforeRead func()) func(context.Context
 		}
 		out := make([]srow, 0, len(rows))
 		for _, s := range rows {
-			out = append(out, srow{s.UUID, s.ParentSession, s.AgentType, s.SubagentCount, s.ProjectPath, s.Title, tsString(s.StartedAt), tsString(s.EndedAt), s.TurnCount})
+			out = append(out, srow{s.UUID, s.ParentSession, s.AgentType, s.SubagentCount, s.Source, s.ProjectPath, s.Title, tsString(s.StartedAt), tsString(s.EndedAt), s.TurnCount})
 		}
 		return mcp.NewToolResultJSON(map[string]any{"sessions": out, "count": len(out)})
 	}
@@ -124,9 +128,10 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 			since = time.Now().Add(-7 * 24 * time.Hour).Unix()
 		}
 		groupBy := req.GetString("group_by", "day")
+		source := req.GetString("source", "claude-code")
 		switch groupBy {
 		case "day", "project":
-			buckets, err := sessions.ActivitySummary(ctx, database, since, groupBy)
+			buckets, err := sessions.ActivitySummary(ctx, database, since, groupBy, source)
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
@@ -136,7 +141,7 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 			})
 		case "file", "command", "tool", "pattern", "url":
 			counts, err := sessions.ActivityByKind(ctx, database, groupBy, since,
-				req.GetString("project", ""), clamp(req.GetInt("limit", 30), 30, maxSearchLimit))
+				req.GetString("project", ""), source, clamp(req.GetInt("limit", 30), 30, maxSearchLimit))
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
@@ -168,7 +173,7 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 		if err != nil {
 			return mcp.NewToolResultError("uuid is required"), nil
 		}
-		sess, err := sessions.ResolvePrefix(ctx, database, uuid)
+		sess, err := sessions.ResolvePrefix(ctx, database, uuid, req.GetString("source", "claude-code"))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -247,6 +252,7 @@ func handleAsk(database *db.DB, beforeRead func()) func(context.Context, mcp.Cal
 			ProjectPrefix: req.GetString("project", ""),
 			Since:         parseSince(req.GetString("since", "")),
 			MaxSessions:   clamp(req.GetInt("limit", defaultAskSessions), defaultAskSessions, maxAskSessions),
+			Source:        req.GetString("source", "claude-code"),
 		})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil

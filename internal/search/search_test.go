@@ -44,6 +44,38 @@ func addTarget(t *testing.T, d *db.DB, sess, kind, value string) {
 	}
 }
 
+func TestSearchFilterBySource(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "cc-1", "/p") // source NULL -> claude-code
+	addMsg(t, d, "cc-1", 0, "user", "alpha bravo charlie", time.Now().Unix())
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, turn_count, source) VALUES ('cx-1','/p','cx-1.jsonl',0,'codex')`); err != nil {
+		t.Fatal(err)
+	}
+	addMsg(t, d, "cx-1", 0, "user", "alpha bravo charlie", time.Now().Unix())
+	ctx := context.Background()
+	hits := func(o Options) []string {
+		o.Query, o.Limit = "alpha bravo charlie", 10
+		res, err := Search(ctx, d, o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, r := range res {
+			out = append(out, r.SessionUUID+":"+r.Source)
+		}
+		return out
+	}
+	if got := hits(Options{}); len(got) != 1 || got[0] != "cc-1:claude-code" {
+		t.Fatalf("default: %v want [cc-1:claude-code]", got)
+	}
+	if got := hits(Options{Source: "codex"}); len(got) != 1 || got[0] != "cx-1:codex" {
+		t.Fatalf("codex: %v want [cx-1:codex]", got)
+	}
+	if got := hits(Options{Source: "all"}); len(got) != 2 {
+		t.Fatalf("all: %v want 2", got)
+	}
+}
+
 // A search hit from a subagent session carries its parent link and type so a
 // client can label it; search itself does not filter subagent content out.
 func TestSearchResultCarriesSubagentInfo(t *testing.T) {

@@ -30,6 +30,7 @@ var activityKinds = []struct{ kind, label string }{
 type activityView struct {
 	db            *db.DB
 	ctx           context.Context
+	source        string // source filter: "" / "claude-code" | "codex" | "all"
 	width, height int
 	kindIdx       int
 	entries       []sessions.ActivityCount
@@ -93,13 +94,13 @@ func (v activityView) scheduleDrill() (activityView, tea.Cmd) {
 
 // load aggregates the top values of the current kind.
 func (v activityView) load() tea.Cmd {
-	database, ctx := v.db, orBackground(v.ctx)
+	database, source, ctx := v.db, v.source, orBackground(v.ctx)
 	if database == nil {
 		return nil
 	}
 	kind := v.currentKind()
 	return func() tea.Msg {
-		ac, err := sessions.ActivityByKind(ctx, database, kind, 0, "", activityListLimit)
+		ac, err := sessions.ActivityByKind(ctx, database, kind, 0, "", source, activityListLimit)
 		return activityLoadedMsg{kind: kind, entries: ac, err: err}
 	}
 }
@@ -111,7 +112,7 @@ func (v activityView) drillCmd() tea.Cmd {
 		return nil
 	}
 	kind := v.currentKind()
-	filter := sessions.ListFilter{Limit: drillSessionLimit, TargetKind: kind, TargetValue: value}
+	filter := sessions.ListFilter{Limit: drillSessionLimit, TargetKind: kind, TargetValue: value, Source: v.source}
 	return func() tea.Msg {
 		ss, err := sessions.ListSessions(ctx, database, filter)
 		return activityDrillMsg{kind: kind, value: value, sessions: ss, err: err}

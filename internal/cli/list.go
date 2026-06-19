@@ -21,11 +21,15 @@ func newListCmd() *cobra.Command {
 		tool             string
 		ran              string
 		includeSubagents bool
+		source           string
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List sessions with optional filters",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateSource(source); err != nil {
+				return err
+			}
 			sinceTS, err := parseSince(since)
 			if err != nil {
 				return err
@@ -45,6 +49,7 @@ func newListCmd() *cobra.Command {
 				Tool:             tool,
 				Ran:              ran,
 				IncludeSubagents: includeSubagents,
+				Source:           source,
 			})
 			if err != nil {
 				return err
@@ -73,5 +78,6 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&tool, "tool", "", "Only sessions that used this tool (exact name)")
 	cmd.Flags().StringVar(&ran, "ran", "", "Only sessions that ran a command containing this substring")
 	cmd.Flags().BoolVar(&includeSubagents, "include-subagents", false, "Include subagent child sessions (default: top-level only)")
+	addSourceFlag(cmd, &source)
 	return cmd
 }

@@ -62,6 +62,9 @@ func TestCrossProcessConcurrentIngest(t *testing.T) {
 	writeGrowingSession(t, file, uuid, 200) // 200 user + 200 assistant lines
 
 	bin := buildHelper(t)
+	// Isolate the helper from the real ~/.codex: clio-ingest-once registers the Codex
+	// source from the home dir, so an empty HOME keeps this test hermetic (CC only).
+	home := t.TempDir()
 
 	const procs = 6
 	var wg sync.WaitGroup
@@ -70,7 +73,8 @@ func TestCrossProcessConcurrentIngest(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			cmd := exec.Command(bin)
-			cmd.Env = append(os.Environ(), "CLIO_DB="+dbPath, "CLIO_PROJECTS="+filepath.Dir(projects))
+			cmd.Env = append(os.Environ(), "CLIO_DB="+dbPath, "CLIO_PROJECTS="+filepath.Dir(projects),
+				"HOME="+home, "USERPROFILE="+home)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Errorf("helper failed: %v\n%s", err, out)
 			}

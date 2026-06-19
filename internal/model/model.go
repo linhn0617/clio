@@ -3,6 +3,12 @@ package model
 
 import "encoding/json"
 
+// Source identifiers for the originating agent tool of a session.
+const (
+	SourceClaudeCode = "claude-code"
+	SourceCodex      = "codex"
+)
+
 // Roles stored in the messages table.
 const (
 	RoleUser       = "user"
@@ -24,6 +30,7 @@ type Session struct {
 	Title         string
 	ParentSession string
 	AgentType     string
+	Source        string // originating tool, e.g. "claude-code" | "codex"
 }
 
 // Message is one indexable unit derived from an event's content block.

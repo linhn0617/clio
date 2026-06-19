@@ -70,9 +70,14 @@ func capValue(s string) string {
 func (ing *Ingester) BackfillActivity(ctx context.Context) error {
 	// Cheap pre-check without the write lock: is any tool_use message missing its
 	// facts? On a fully-indexed database this is the common path and returns at once.
+	// Backfill reparses raw_json as a Claude Code event, so it applies only to
+	// claude-code sessions (NULL source predates migration 0009). Other sources
+	// extract their tool_targets at ingest time and must not be reparsed here.
 	var pending int
 	if err := ing.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM messages m WHERE m.role = ? AND NOT EXISTS(SELECT 1 FROM tool_targets tt WHERE tt.message_id = m.id))`,
+		`SELECT EXISTS(SELECT 1 FROM messages m WHERE m.role = ?
+		   AND m.session_uuid IN (SELECT uuid FROM sessions WHERE source IS NULL OR source = 'claude-code')
+		   AND NOT EXISTS(SELECT 1 FROM tool_targets tt WHERE tt.message_id = m.id))`,
 		model.RoleToolUse).Scan(&pending); err != nil {
 		return err
 	}
@@ -95,7 +100,9 @@ func (ing *Ingester) BackfillActivity(ctx context.Context) error {
 	rows, err := tx.QueryContext(ctx,
 		`SELECT m.id, m.session_uuid, COALESCE(m.ts,0), m.raw_json,
 		        EXISTS(SELECT 1 FROM tool_targets tt WHERE tt.message_id = m.id)
-		 FROM messages m WHERE m.role = ? ORDER BY m.session_uuid, m.seq`,
+		 FROM messages m WHERE m.role = ?
+		   AND m.session_uuid IN (SELECT uuid FROM sessions WHERE source IS NULL OR source = 'claude-code')
+		 ORDER BY m.session_uuid, m.seq`,
 		model.RoleToolUse)
 	if err != nil {
 		return err

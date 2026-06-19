@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -64,6 +63,7 @@ func newMCPCmd() *cobra.Command {
 
 			projects, _ := config.ClaudeProjectsDir()
 			ing := ingest.New(rw, log)
+			ing.AddCodexSource() // also ingest Codex CLI history, when installed
 
 			var isLeaderNow atomic.Bool
 			isLeaderNow.Store(isLeader)
@@ -169,33 +169,32 @@ func leaderLoop(ctx context.Context, lease *lock.Lease, leaderFlag *atomic.Bool,
 	wctx, wcancel := context.WithCancel(ctx)
 	defer wcancel()
 
+	// Run the startup catch-up + watcher regardless of whether the Claude projects dir
+	// exists: on a Codex-only machine it is absent, but the Codex source still has
+	// history to ingest and live-watch. IngestAll/PurgeMissing/watcher all handle a
+	// missing root per-source.
 	if projects != "" {
-		if _, err := os.Stat(projects); err == nil {
-			if _, err := ing.IngestAll(wctx, projects, false); err != nil {
-				log.Warn("startup catch-up failed", "err", err)
-			}
-			if err := ing.BackfillActivity(wctx); err != nil {
-				log.Warn("activity backfill failed", "err", err)
-			}
-			// Reflect deletions that happened while clio was down before we start
-			// serving, so a just-promoted leader (and CLI readers deferring to it)
-			// don't surface sources that no longer exist.
-			if err := ing.PurgeMissing(wctx, projects); err != nil {
-				log.Warn("startup purge failed", "err", err)
-			}
-			// Catch-up done: safe to serve reads without follower catch-up.
-			leaderFlag.Store(true)
-			go func() {
-				if err := watcher.New(ing, projects, log).Run(wctx); err != nil {
-					log.Warn("watcher stopped", "err", err)
-				}
-			}()
-		} else {
-			// projects dir doesn't exist; nothing to catch up.
-			leaderFlag.Store(true)
+		if _, err := ing.IngestAll(wctx, projects, false); err != nil {
+			log.Warn("startup catch-up failed", "err", err)
 		}
+		if err := ing.BackfillActivity(wctx); err != nil {
+			log.Warn("activity backfill failed", "err", err)
+		}
+		// Reflect deletions that happened while clio was down before we start
+		// serving, so a just-promoted leader (and CLI readers deferring to it)
+		// don't surface sources that no longer exist.
+		if err := ing.PurgeMissing(wctx, projects); err != nil {
+			log.Warn("startup purge failed", "err", err)
+		}
+		// Catch-up done: safe to serve reads without follower catch-up.
+		leaderFlag.Store(true)
+		go func() {
+			if err := watcher.New(ing, projects, log).Run(wctx); err != nil {
+				log.Warn("watcher stopped", "err", err)
+			}
+		}()
 	} else {
-		// No projects configured; nothing to catch up.
+		// No projects path resolved; nothing to catch up.
 		leaderFlag.Store(true)
 	}
 

@@ -27,6 +27,7 @@ type browseView struct {
 	ctx           context.Context
 	width, height int
 	project       string // optional project-path prefix filter
+	source        string // source filter: "" / "claude-code" | "codex" | "all"
 	sessions      []sessions.Session
 	expanded      map[string]bool               // parent uuid -> expanded in the list
 	kids          map[string][]sessions.Session // parent uuid -> its subagents (lazy)
@@ -85,13 +86,13 @@ func (v browseView) parentRowIndex(uuid string) int {
 
 // load fetches the recent sessions for the list.
 func (v browseView) load() tea.Cmd {
-	database, project, ctx := v.db, v.project, orBackground(v.ctx)
+	database, project, source, ctx := v.db, v.project, v.source, orBackground(v.ctx)
 	if database == nil {
 		return nil
 	}
 	return func() tea.Msg {
 		ss, err := sessions.ListSessions(ctx, database,
-			sessions.ListFilter{ProjectPrefix: project, Limit: browseListLimit})
+			sessions.ListFilter{ProjectPrefix: project, Source: source, Limit: browseListLimit})
 		return browseLoadedMsg{sessions: ss, err: err}
 	}
 }
@@ -244,6 +245,9 @@ func (v browseView) renderList(w, h int) string {
 		label := r.sess.Title
 		if label == "" {
 			label = r.sess.ProjectPath
+		}
+		if r.sess.Source == "codex" {
+			label = "[codex] " + label
 		}
 		var row string
 		if r.child {

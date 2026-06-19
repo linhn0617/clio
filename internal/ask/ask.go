@@ -29,6 +29,7 @@ type Options struct {
 	MaxSessions   int    // cap on grouped sessions (default 6)
 	Window        int    // dialogue turns each side of a hit (default 2)
 	MaxExcerptLen int    // per-excerpt rune cap (default 600)
+	Source        string // "" / "claude-code" (default) | "codex" | "all"
 }
 
 // Answer is the evidence bundle for a question: ranked sessions, each with
@@ -90,6 +91,7 @@ func Ask(ctx context.Context, database *db.DB, opt Options) (Answer, error) {
 		ProjectPrefix: opt.ProjectPrefix,
 		Limit:         pool,
 		MaxPerSession: maxHitsPerSession, // a session only needs this many hits to window + rank
+		Source:        opt.Source,
 	})
 	if err != nil {
 		return ans, err
@@ -222,7 +224,7 @@ func assembleGroup(ctx context.Context, database *db.DB, uuid string, score floa
 	}
 
 	// Citation metadata: exact-uuid resolve returns title/project/ended_at.
-	if meta, err := sessions.ResolvePrefix(ctx, database, uuid); err == nil {
+	if meta, err := sessions.ResolvePrefix(ctx, database, uuid, "all"); err == nil {
 		eg.Title = meta.Title
 		eg.Project = meta.ProjectPath
 		eg.EndedAt = meta.EndedAt

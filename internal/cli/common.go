@@ -7,11 +7,40 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/spf13/cobra"
+
 	"github.com/linhn0617/clio/internal/config"
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
 	"github.com/linhn0617/clio/internal/lock"
 )
+
+// addSourceFlag registers the shared --source flag (which agent tool's history to
+// read), defaulting to Claude Code so existing behavior is unchanged.
+func addSourceFlag(cmd *cobra.Command, p *string) {
+	cmd.Flags().StringVar(p, "source", "claude-code", "Which tool's history: claude-code | codex | all")
+}
+
+// validateSource rejects an unknown --source value before it reaches a query.
+func validateSource(s string) error {
+	switch s {
+	case "", "claude-code", "codex", "all":
+		return nil
+	default:
+		return fmt.Errorf("invalid --source %q (want claude-code, codex, or all)", s)
+	}
+}
+
+// codexAvailable reports whether the Codex sessions dir exists, so a Codex-only
+// machine (no ~/.claude/projects) can still bootstrap and index.
+func codexAvailable() bool {
+	dir, err := config.CodexSessionsDir()
+	if err != nil {
+		return false
+	}
+	fi, serr := os.Stat(dir)
+	return serr == nil && fi.IsDir()
+}
 
 func stderrLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
@@ -45,17 +74,19 @@ func openForQuery() (*db.DB, error) {
 		return nil, err
 	}
 	if projects, err := config.ClaudeProjectsDir(); err == nil {
-		if _, statErr := os.Stat(projects); statErr == nil {
-			ing := ingest.New(database, discardLogger())
-			if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
-				stderrLogger().Warn("incremental catch-up failed", "err", err)
-			}
-			if err := ing.PurgeMissing(context.Background(), projects); err != nil {
-				stderrLogger().Warn("catch-up purge failed", "err", err)
-			}
-			if err := ing.BackfillActivity(context.Background()); err != nil {
-				stderrLogger().Warn("activity backfill failed", "err", err)
-			}
+		// Run the catch-up unconditionally (not gated on the Claude dir existing): on a
+		// Codex-only machine ~/.claude/projects is absent, but the Codex source still
+		// has history to ingest. IngestAll/PurgeMissing handle missing roots per-source.
+		ing := ingest.New(database, discardLogger())
+		ing.AddCodexSource() // also catch up Codex CLI history, when installed
+		if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+			stderrLogger().Warn("incremental catch-up failed", "err", err)
+		}
+		if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+			stderrLogger().Warn("catch-up purge failed", "err", err)
+		}
+		if err := ing.BackfillActivity(context.Background()); err != nil {
+			stderrLogger().Warn("activity backfill failed", "err", err)
 		}
 	}
 	return database, nil

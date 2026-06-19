@@ -50,6 +50,161 @@ func openTestDB(t *testing.T) *db.DB {
 	return database
 }
 
+func TestIngestRefusesCrossSourceUUIDCollision(t *testing.T) {
+	projects := t.TempDir()
+	// A Claude Code session file whose filename uuid collides with an existing
+	// codex session already in the index.
+	writeSession(t, projects, "-Users-lin-Herd-x", "dup-1", evUser1, evUser2)
+	database := openTestDB(t)
+	if _, err := database.Exec(`INSERT INTO sessions(uuid, source_file, turn_count, source) VALUES ('dup-1','/codex/dup-1.jsonl',0,'codex')`); err != nil {
+		t.Fatal(err)
+	}
+	ing := New(database, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatalf("IngestAll must not hard-error on a per-file conflict: %v", err)
+	}
+	// The pre-existing codex session must be intact: not overwritten, no CC messages attached.
+	var src string
+	if err := database.QueryRow(`SELECT source FROM sessions WHERE uuid='dup-1'`).Scan(&src); err != nil {
+		t.Fatal(err)
+	}
+	if src != "codex" {
+		t.Fatalf("source=%q want codex (the CC ingest must not overwrite a different source)", src)
+	}
+	var msgCount int
+	database.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_uuid='dup-1'`).Scan(&msgCount)
+	if msgCount != 0 {
+		t.Fatalf("got %d messages attached to the codex session, want 0", msgCount)
+	}
+	// The conflict is recorded durably.
+	var conflicts int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM source_conflicts WHERE uuid='dup-1' AND conflicting_source='claude-code' AND seen_source='codex'`).Scan(&conflicts); err != nil {
+		t.Fatal(err)
+	}
+	if conflicts != 1 {
+		t.Fatalf("source_conflicts rows=%d want 1", conflicts)
+	}
+}
+
+func writeCodexRollout(t *testing.T, dir, uuid string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-2026-06-19T10-00-00-"+uuid+".jsonl")
+	lines := `{"timestamp":"2026-06-19T10:00:00Z","type":"session_meta","payload":{"id":"` + uuid + `","cwd":"/p"}}
+{"timestamp":"2026-06-19T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi codex"}]}}
+`
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIngestAllIngestsCodexWhenClaudeRootMissing(t *testing.T) {
+	missingCC := filepath.Join(t.TempDir(), "does-not-exist") // never created
+	codexRoot := t.TempDir()
+	const uuid = "0199dddd-eeee-7fff-8000-111111111111"
+	writeCodexRollout(t, codexRoot, uuid)
+	database := openTestDB(t)
+	ing := New(database, nil)
+	ing.AddSource(codexSource{root: codexRoot})
+	if _, err := ing.IngestAll(context.Background(), missingCC, false); err != nil {
+		t.Fatalf("IngestAll must not abort when the Claude root is missing: %v", err)
+	}
+	var n int
+	database.QueryRow(`SELECT COUNT(*) FROM sessions WHERE uuid=? AND source='codex'`, uuid).Scan(&n)
+	if n != 1 {
+		t.Fatalf("codex not ingested when the Claude root is missing (n=%d)", n)
+	}
+}
+
+func TestPurgeMissingClearsStaleSourceConflict(t *testing.T) {
+	projects := t.TempDir()
+	ccFile := writeSession(t, projects, "-Users-lin-Herd-x", "dup-2", evUser1, evUser2)
+	database := openTestDB(t)
+	if _, err := database.Exec(`INSERT INTO sessions(uuid, source_file, turn_count, source) VALUES ('dup-2','/codex/dup-2.jsonl',0,'codex')`); err != nil {
+		t.Fatal(err)
+	}
+	ing := New(database, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	database.QueryRow(`SELECT COUNT(*) FROM source_conflicts`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("expected 1 conflict recorded, got %d", n)
+	}
+	// Delete the conflicting transcript; purge must clear its stale conflict record
+	// (a refused file is never in ingest_state, so this is its only cleanup path).
+	if err := os.Remove(ccFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	database.QueryRow(`SELECT COUNT(*) FROM source_conflicts`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("stale conflict not cleared after the file was deleted, got %d", n)
+	}
+}
+
+func TestPurgeMissingPreservesUnavailableCodexRoot(t *testing.T) {
+	ccRoot := t.TempDir()
+	codexRoot := t.TempDir()
+	const uuid = "0199cccc-dddd-7eee-8fff-aaaaaaaaaaaa"
+	writeCodexRollout(t, codexRoot, uuid)
+	database := openTestDB(t)
+	ing := New(database, nil)
+	ing.AddSource(codexSource{root: codexRoot})
+	if _, err := ing.IngestAll(context.Background(), ccRoot, false); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	database.QueryRow(`SELECT COUNT(*) FROM sessions WHERE uuid=?`, uuid).Scan(&n)
+	if n != 1 {
+		t.Fatalf("codex session not indexed (n=%d)", n)
+	}
+	// The Codex root becomes temporarily unavailable.
+	if err := os.RemoveAll(codexRoot); err != nil {
+		t.Fatal(err)
+	}
+	// Purging against the healthy Claude Code root must NOT purge the Codex rows.
+	if err := ing.PurgeMissing(context.Background(), ccRoot); err != nil {
+		t.Fatal(err)
+	}
+	database.QueryRow(`SELECT COUNT(*) FROM sessions WHERE uuid=?`, uuid).Scan(&n)
+	if n != 1 {
+		t.Fatalf("codex session purged when its root was temporarily unavailable (n=%d)", n)
+	}
+}
+
+func TestSourceForRoutesToClaudeCodeFallback(t *testing.T) {
+	ing := New(openTestDB(t), nil)
+	if src := ing.sourceFor("/x/abc.jsonl"); src == nil || src.Name() != "claude-code" {
+		t.Fatalf("expected the claude-code fallback for a .jsonl path, got %v", src)
+	}
+	if src := ing.sourceFor("/x/not-a-transcript.txt"); src != nil {
+		t.Fatalf("expected no owner for a non-.jsonl path, got %v", src.Name())
+	}
+}
+
+func TestIngestRecordsClaudeCodeSource(t *testing.T) {
+	projects := t.TempDir()
+	writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evUser2)
+	database := openTestDB(t)
+	ing := New(database, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	var src string
+	if err := database.QueryRow(`SELECT source FROM sessions WHERE uuid='sess-1'`).Scan(&src); err != nil {
+		t.Fatal(err)
+	}
+	if src != "claude-code" {
+		t.Fatalf("source=%q want claude-code", src)
+	}
+}
+
 func TestIngestFullAndSearch(t *testing.T) {
 	projects := t.TempDir()
 	writeSession(t, projects, "-Users-lin-Herd-cli-project-COMPLETE", "sess-1", evUser1, evAsst1, evResult1, evUser2)

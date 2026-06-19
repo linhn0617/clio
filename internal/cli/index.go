@@ -29,8 +29,8 @@ func newIndexCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, err := os.Stat(projects); err != nil {
-				return fmt.Errorf("claude projects dir not found at %s: %w", projects, err)
+			if _, err := os.Stat(projects); err != nil && !codexAvailable() {
+				return fmt.Errorf("no sessions to index: neither %s nor a Codex sessions dir exists: %w", projects, err)
 			}
 			dbPath, err := config.DBPath()
 			if err != nil {
@@ -44,6 +44,7 @@ func newIndexCmd() *cobra.Command {
 
 			log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 			ing := ingest.New(database, log)
+			ing.AddCodexSource() // index Codex CLI history too, when installed
 
 			st, err := ing.IngestAll(cmd.Context(), projects, full)
 			if err != nil {
