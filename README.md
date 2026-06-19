@@ -90,9 +90,9 @@ When registered via `clio install-mcp`, Claude Code can call:
 |------|--------------|
 | `search` | Full-text search, **ranked** by relevance + recency (short queries fall back to a substring scan; tool output excluded by default) |
 | `ask` | Answer a question from history: a cited bundle of the most relevant excerpts, windowed in their turns and grouped by session, for Claude to synthesize from |
-| `list_sessions` | List sessions by date/project/turn count, or by file touched / tool used / command run |
+| `list_sessions` | List sessions by date/project/turn count, or by file touched / tool used / command run; subagent children are hidden by default (each parent carries a `subagent_count`), `include_subagents` adds them as rows with `parent_session` / `agent_type` |
 | `activity_summary` | Counts by day or project, or your most-used files / commands / tools / patterns / URLs ("what did I touch last week?") |
-| `read_session` | Read one session in full, paginated |
+| `read_session` | Read one session in full, paginated; reports a parent's subagents (`include_subagents` inlines them) |
 
 ## Privacy
 

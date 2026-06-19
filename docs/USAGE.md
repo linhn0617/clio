@@ -78,9 +78,9 @@ The MCP server exposes five tools / MCP server 提供五個工具：
 |------|---------|------|
 | `search` | Full-text search across all conversations (tool output excluded by default) | 跨所有對話全文搜尋（預設排除 tool output） |
 | `ask` | Cited evidence bundle answering a question (windowed excerpts grouped by session) for Claude to synthesize from | 回答問題的帶引用證據包（依 session 分組的加窗片段），交給 Claude 合成 |
-| `list_sessions` | List sessions by date/project/turn, or file touched / tool used / command run | 依日期/專案/turn，或動過的檔／用過的工具／跑過的指令列出 session |
+| `list_sessions` | List sessions by date/project/turn, or file touched / tool used / command run (subagent children excluded by default; `include_subagents` includes them) | 依日期/專案/turn，或動過的檔／用過的工具／跑過的指令列出 session（子代理子項預設不列入；`include_subagents` 會列入） |
 | `activity_summary` | Counts by day/project, or most-used files/commands/tools/patterns/URLs | 依天/專案，或最常動的檔/指令/工具/pattern/URL 統計 |
-| `read_session` | Read one session in full, paginated | 分頁讀取單一 session 全文 |
+| `read_session` | Read one session in full, paginated; reports a parent's subagents (`include_subagents` inlines their messages) | 分頁讀取單一 session 全文；回報母體的子代理（`include_subagents` 連訊息一起內嵌） |
 
 While Claude Code runs, clio's MCP server watches `~/.claude/projects/` and keeps
 the index current automatically — you never run anything manually.
@@ -164,19 +164,21 @@ clio ask "rate limiter" --project myapp --json
 | `--project` | Filter by project path prefix | 依專案路徑前綴過濾 | — |
 | `--min-turns` | Only sessions with at least this many turns | 至少這麼多 turn 的 session | `0` |
 | `--limit` | Maximum number of sessions | session 上限 | `50` |
+| `--include-subagents` | Also list subagent child sessions (hidden by default; see [Subagents](#subagents--子代理)) | 連子代理子 session 一起列（預設隱藏；見 [子代理](#subagents--子代理)） | `false` |
 | `--json` | Output JSON | JSON 輸出 | `false` |
 
 ```bash
 clio list --since 14d --limit 8
 clio list --project myapp --min-turns 10
+clio list --include-subagents             # show the agent-… child sessions too
 clio list --json
 ```
 
-Example output / 範例輸出:
+Example output / 範例輸出 (subagents are hidden; a parent shows its count / 子代理隱藏，母體顯示數量):
 
 ```
-2f4d1a81  2026-05-23 19:48   36 turns  clio  claude --continue
-agent-a3  2026-05-23 15:01    1 turns  twin3-personal-agent-main  You are a MAINTAINABILITY specialist…
+2f4d1a81  2026-05-23 19:48   36 turns  clio  claude --continue  (+42 subagents)
+ffe5096c  2026-06-17 23:29    6 turns  lin  幫我找一下 obsidian-vault 的資料夾在哪
 ```
 
 ### `clio show <session-uuid-or-prefix>` — read a full session / 讀完整對話
@@ -185,6 +187,7 @@ agent-a3  2026-05-23 15:01    1 turns  twin3-personal-agent-main  You are a MAIN
 |------|---------|------|---------|
 | `--format` | Output format (`markdown`\|`json`\|`raw`) | 輸出格式 | `markdown` |
 | `--no-tool-output` | Omit tool output | 省略 tool 輸出 | `false` |
+| `--include-subagents` | Also inline this session's subagent transcripts | 連同此 session 的子代理逐字稿一起內嵌 | `false` |
 
 EN: The argument accepts a full session UUID or an unambiguous prefix (e.g. the
 short id shown by `list`/`search`).
@@ -196,6 +199,65 @@ clio show 2f4d1a81 --format json
 clio show 2f4d1a81 --format raw              # original JSONL events / 原始事件
 clio show 2f4d1a81 --no-tool-output
 ```
+
+### `clio tui` — interactive dashboard / 互動式儀表板
+
+A full-screen terminal dashboard over the same index, **read-only**. Four tabs,
+each with a list on the left and a detail pane on the right (what the pane shows
+depends on the tab — see below).
+
+全螢幕的終端機儀表板，唯讀地跑在同一個索引上。四個分頁，左邊清單、右邊是對應的細節窗格
+（窗格內容依分頁而定，見下）。
+
+| Tab / 分頁 | English | 中文 |
+|------|---------|------|
+| **Search** | Live full-text search (debounced); the selected hit is highlighted in its surrounding turns | 即時全文搜尋（防抖）；選中的命中在前後 turn 中高亮 |
+| **Browse** | Recent sessions; a parent that spawned subagents shows `▸+N` and expands to a message preview of the selection | 最近的 session；有子代理的母 session 顯示 `▸+N`，可展開；右邊預覽選取的訊息 |
+| **Activity** | Top files / commands / tools; drill into the sessions behind each entry | 最常動的檔／指令／工具；鑽進每項背後的 session |
+| **Ask** | A question's cited evidence groups with their windowed excerpts | 問題的帶引用證據組與加窗片段 |
+
+| Key / 按鍵 | Action / 動作 |
+|-----|--------|
+| `Tab` / `Shift-Tab`, or `1`-`4` | Switch tabs (digits work on Browse/Activity) / 切換分頁（數字鍵在 Browse/Activity 有效） |
+| `↑` `↓` | Move the selection, on any tab / 移動選取（任一分頁） |
+| `j` / `k` | Move the selection on Browse/Activity (query text on Search/Ask) / 在 Browse/Activity 移動選取（在 Search/Ask 是查詢文字） |
+| `Enter` | On Browse, expand/collapse a parent's subagents / 在 Browse 展開或收合子代理 |
+| `Esc` / `Ctrl-C` | Quit, from any tab / 離開（任一分頁） |
+| `q` | Quit on Browse/Activity (it is query text on Search/Ask) / 在 Browse/Activity 離開（在 Search/Ask 是查詢文字） |
+
+`clio tui` takes no flags and opens like `search`: a quick incremental catch-up
+first (or it defers to a running MCP server), and if no index exists yet it exits
+with a hint to run `clio index`.
+
+`clio tui` 不吃旗標，開啟方式跟 `search` 一樣：先做一次增量補進度（若有在跑的 MCP
+server 就交給它），若還沒有索引會提示你先跑 `clio index`。
+
+```bash
+clio tui
+```
+
+### Subagents / 子代理
+
+Claude Code's Task tool spawns **subagents** (e.g. `general-purpose`, `Explore`),
+each with its own transcript file. clio links a subagent transcript to the
+conversation that spawned it and hides it from listings by default, so your
+history stays uncluttered while the subagent's work stays searchable.
+
+Claude Code 的 Task 工具會派出**子代理**（例如 `general-purpose`、`Explore`），每個
+都有自己的逐字稿。clio 把子代理的逐字稿連到「派出它的那場對話」底下，並在清單中預設
+隱藏，所以歷史清單不被洗版，子代理做的事也照樣搜得到。
+
+- **`clio list`** hides subagents by default and tags a parent with `(+N subagents)`; `--include-subagents` lists them too. (A subagent whose parent isn't in the current listing — filtered out by `--since`/`--project` or past the `--limit` — is still shown, so recent work is never lost.)
+- **`clio show <parent>`** lists the parent's subagents (id · type · title); `--include-subagents` inlines their transcripts (subject to `--limit`). `clio show <agent-id>` reads one subagent, with a header naming its parent and type.
+- **`clio search`** still finds subagent content and labels such hits with `↳<type>`.
+- **TUI Browse** nests a parent's subagents beneath it (`Enter` to expand/collapse); a subagent whose parent isn't on the current page appears as its own row.
+- **MCP** mirrors this: `list_sessions` and `read_session` take an `include_subagents` parameter, and `search` results carry `parent_session` / `agent_type`.
+
+- **`clio list`**：預設隱藏子代理，並在母 session 標 `(+N subagents)`；`--include-subagents` 連子代理一起列。（若某子代理的母體不在當前清單裡——被 `--since`/`--project` 濾掉或超出 `--limit`——它仍會顯示，近期工作不會遺漏。）
+- **`clio show <母體>`**：列出該母體的子代理（id · 類型 · 標題）；`--include-subagents` 內嵌它們的逐字稿（受 `--limit` 限制）。`clio show <agent-id>` 讀單一子代理，並在開頭標明其母體與類型。
+- **`clio search`**：照樣搜得到子代理內容，並把這類命中標上 `↳<類型>`。
+- **TUI Browse**：把子代理巢狀在母體底下（`Enter` 展開／收合）；母體不在當頁的子代理會自成一列。
+- **MCP**：同步支援 —— `list_sessions`、`read_session` 接受 `include_subagents` 參數，`search` 結果帶 `parent_session` / `agent_type`。
 
 ### `clio activity` — what you worked on / 你做了什麼
 
