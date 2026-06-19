@@ -26,7 +26,7 @@ func TestReconcileDetectsTruncation(t *testing.T) {
 		src, 22, 1, 22, "fp", 1); err != nil {
 		t.Fatal(err)
 	}
-	if m, tr, _, _ := reconcile(d); m != 0 || tr != 0 {
+	if m, _, tr, _, _ := reconcile(d, []string{dir}); m != 0 || tr != 0 {
 		t.Fatalf("expected clean before truncation, got missing=%d truncated=%d", m, tr)
 	}
 
@@ -34,7 +34,7 @@ func TestReconcileDetectsTruncation(t *testing.T) {
 	if err := os.WriteFile(src, []byte("0123\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, tr, _, _ := reconcile(d); tr != 1 {
+	if _, _, tr, _, _ := reconcile(d, []string{dir}); tr != 1 {
 		t.Fatalf("expected 1 truncated, got %d", tr)
 	}
 }
@@ -48,7 +48,7 @@ func TestReconcileDetectsMissing(t *testing.T) {
 	defer d.Close()
 	d.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at) VALUES (?,?,?,?,?,?)`,
 		filepath.Join(dir, "gone.jsonl"), 10, 1, 10, "fp", 1)
-	if m, _, _, _ := reconcile(d); m != 1 {
+	if m, _, _, _, _ := reconcile(d, []string{dir}); m != 1 {
 		t.Fatalf("expected 1 missing, got %d", m)
 	}
 }
@@ -210,11 +210,31 @@ func TestReconcileFlagsUnverifiable(t *testing.T) {
 	defer d.Close()
 	d.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at) VALUES (?,?,?,?,?,?)`,
 		filepath.Join(notDir, "child.jsonl"), 10, 1, 10, "fp", 1)
-	m, _, _, rerr := reconcile(d)
+	m, _, _, _, rerr := reconcile(d, []string{dir})
 	if rerr != nil {
 		t.Fatalf("unexpected error: %v", rerr)
 	}
 	if m != 1 {
 		t.Fatalf("expected unverifiable file flagged (missing=1), got %d", m)
+	}
+}
+
+func TestReconcilePreservesFilesUnderUnavailableRoot(t *testing.T) {
+	dir := t.TempDir()
+	d, err := db.Open(filepath.Join(dir, "x.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	// A tracked file whose source root is NOT among the available roots: its absence
+	// is preservation (the root is unavailable), not a deletion.
+	d.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at) VALUES (?,?,?,?,?,?)`,
+		filepath.Join(dir, "unavailable-root", "rollout-x.jsonl"), 10, 1, 10, "fp", 1)
+	m, preserved, _, _, rerr := reconcile(d, []string{filepath.Join(dir, "available-root")})
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if m != 0 || preserved != 1 {
+		t.Fatalf("expected the file under an unavailable root preserved, got missing=%d preserved=%d", m, preserved)
 	}
 }

@@ -64,6 +64,16 @@ func (claudeCodeSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, 
 	return parseResult{Session: sess, Messages: msgs, ClioIDs: parser.ClioToolUseIDs(), Consumed: consumed, Unparsed: unparsed}, nil
 }
 
+// pathUnderAny reports whether path lies within any of roots.
+func pathUnderAny(path string, roots []string) bool {
+	for _, r := range roots {
+		if pathUnder(path, r) {
+			return true
+		}
+	}
+	return false
+}
+
 // sourceFor returns the registered source that owns path (more specific sources first;
 // the claude-code fallback owns any remaining .jsonl), or nil when none does.
 func (ing *Ingester) sourceFor(path string) Source {

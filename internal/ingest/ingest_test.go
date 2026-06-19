@@ -86,6 +86,50 @@ func TestIngestRefusesCrossSourceUUIDCollision(t *testing.T) {
 	}
 }
 
+func writeCodexRollout(t *testing.T, dir, uuid string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-2026-06-19T10-00-00-"+uuid+".jsonl")
+	lines := `{"timestamp":"2026-06-19T10:00:00Z","type":"session_meta","payload":{"id":"` + uuid + `","cwd":"/p"}}
+{"timestamp":"2026-06-19T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi codex"}]}}
+`
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPurgeMissingPreservesUnavailableCodexRoot(t *testing.T) {
+	ccRoot := t.TempDir()
+	codexRoot := t.TempDir()
+	const uuid = "0199cccc-dddd-7eee-8fff-aaaaaaaaaaaa"
+	writeCodexRollout(t, codexRoot, uuid)
+	database := openTestDB(t)
+	ing := New(database, nil)
+	ing.AddSource(codexSource{root: codexRoot})
+	if _, err := ing.IngestAll(context.Background(), ccRoot, false); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	database.QueryRow(`SELECT COUNT(*) FROM sessions WHERE uuid=?`, uuid).Scan(&n)
+	if n != 1 {
+		t.Fatalf("codex session not indexed (n=%d)", n)
+	}
+	// The Codex root becomes temporarily unavailable.
+	if err := os.RemoveAll(codexRoot); err != nil {
+		t.Fatal(err)
+	}
+	// Purging against the healthy Claude Code root must NOT purge the Codex rows.
+	if err := ing.PurgeMissing(context.Background(), ccRoot); err != nil {
+		t.Fatal(err)
+	}
+	database.QueryRow(`SELECT COUNT(*) FROM sessions WHERE uuid=?`, uuid).Scan(&n)
+	if n != 1 {
+		t.Fatalf("codex session purged when its root was temporarily unavailable (n=%d)", n)
+	}
+}
+
 func TestSourceForRoutesToClaudeCodeFallback(t *testing.T) {
 	ing := New(openTestDB(t), nil)
 	if src := ing.sourceFor("/x/abc.jsonl"); src == nil || src.Name() != "claude-code" {

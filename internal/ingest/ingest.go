@@ -536,24 +536,45 @@ func (ing *Ingester) upsertSession(tx *sql.Tx, s model.Session, userTurns int, k
 // PurgeMissing reconciles the DB against the filesystem and removes rows for source
 // files confirmed gone (a not-exist stat result). It is the authoritative deletion path
 // (fsnotify Remove/Rename events fire during atomic temp->rename writes, so a raw event
-// is not trustworthy). Two blast-radius guards: it does nothing if the projects root is
-// missing/unreadable, and it refuses to purge when the missing set is both a large count
-// and most of the corpus (a filesystem problem, not deletions).
+// is not trustworthy). It is partitioned per source root: a root that is missing or
+// unreadable is in "preservation mode" — its rows are kept and it never authorizes
+// purging another root's rows, so a temporarily-absent root (e.g. Codex not mounted)
+// cannot wipe its index. A second guard refuses to purge when the missing set is both a
+// large count and most of the candidate corpus (a filesystem problem, not deletions).
 func (ing *Ingester) PurgeMissing(ctx context.Context, projectsDir string) error {
-	// Root guard: if the projects dir is missing/unreadable, the filesystem is
-	// unavailable — never read that as "the user deleted everything". Use ReadDir, not
-	// Stat, so an unreadable (not just absent) root is also caught.
-	if _, err := os.ReadDir(projectsDir); err != nil {
-		ing.log.Warn("purge skipped: projects dir unavailable", "dir", projectsDir, "err", err)
-		return nil
+	// Determine which source roots are currently available (ReadDir, so an unreadable
+	// root counts as unavailable too).
+	roots := append([]string{projectsDir}, ing.extraRoots()...)
+	var avail []string
+	for _, r := range roots {
+		if r == "" {
+			continue
+		}
+		if _, err := os.ReadDir(r); err != nil {
+			ing.log.Warn("purge: source root unavailable, preserving its rows", "root", r, "err", err)
+			continue
+		}
+		avail = append(avail, r)
+	}
+	if len(avail) == 0 {
+		return nil // no root readable — never read that as "the user deleted everything"
 	}
 
 	srcs, err := ing.allSourceFiles()
 	if err != nil {
 		return err
 	}
-	var missing []string
+	// Candidates: tracked files under an available root. Files under a missing root
+	// (or attributable to no current root) are preserved.
+	var candidates []string
 	for _, src := range srcs {
+		if pathUnderAny(src, avail) {
+			candidates = append(candidates, src)
+		}
+	}
+
+	var missing []string
+	for _, src := range candidates {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -566,12 +587,12 @@ func (ing *Ingester) PurgeMissing(ctx context.Context, projectsDir string) error
 	}
 
 	// Safety cap: refuse a purge that is BOTH a large absolute count AND most of the
-	// corpus — that pattern is a filesystem problem, not real deletions. A small number
-	// of genuine deletions (even all sources on a tiny install) still purges.
+	// candidate corpus (files under available roots) — that pattern is a filesystem
+	// problem, not real deletions. A small number of genuine deletions still purges.
 	const minPurgeForCap = 10
-	if len(missing) > minPurgeForCap && len(missing)*2 > len(srcs) {
+	if len(missing) > minPurgeForCap && len(missing)*2 > len(candidates) {
 		ing.log.Warn("purge refused: most sources missing at once, likely a filesystem problem",
-			"missing", len(missing), "total", len(srcs))
+			"missing", len(missing), "candidates", len(candidates))
 		return nil
 	}
 
@@ -611,6 +632,16 @@ func (ing *Ingester) allSourceFiles() ([]string, error) {
 // at a different, re-ingested path (the file was moved/renamed under the same name, e.g. a
 // renamed project dir), deleting by uuid would clobber the live data, so only the stale
 // ingest_state for src is removed. A final re-stat closes the scan->delete TOCTOU window.
+// sessionUUIDForPurge resolves the session uuid for a source path via its owning
+// source adapter (Codex's id is not the filename), falling back to the claude-code
+// filename convention when no source owns the path.
+func (ing *Ingester) sessionUUIDForPurge(src string) string {
+	if s := ing.sourceFor(src); s != nil {
+		return s.SessionIDFromPath(src)
+	}
+	return sessionUUIDFromPath(src)
+}
+
 func (ing *Ingester) purgeSource(src string) error {
 	// Purge only when a fresh stat still confirms the file is gone. Skip on success
 	// (reappeared) AND on any non-ErrNotExist error (permission/IO) — those don't prove
@@ -618,7 +649,7 @@ func (ing *Ingester) purgeSource(src string) error {
 	if _, err := os.Stat(src); !errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	uuid := sessionUUIDFromPath(src)
+	uuid := ing.sessionUUIDForPurge(src)
 	tx, err := ing.db.Begin()
 	if err != nil {
 		return err
