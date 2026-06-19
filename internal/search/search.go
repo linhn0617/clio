@@ -50,7 +50,7 @@ func Search(ctx context.Context, database *db.DB, opt Options) ([]Result, error)
 	for rows.Next() {
 		var r Result
 		var bm float64
-		if err := rows.Scan(&r.MessageID, &r.Seq, &r.SessionUUID, &r.ProjectPath, &r.ParentSession, &r.AgentType, &r.Role, &r.TS, &r.Snippet, &bm); err != nil {
+		if err := rows.Scan(&r.MessageID, &r.Seq, &r.SessionUUID, &r.ProjectPath, &r.ParentSession, &r.AgentType, &r.Source, &r.Role, &r.TS, &r.Snippet, &bm); err != nil {
 			return nil, err
 		}
 		r.Score = adjustedScore(bm, r.Role, r.TS)
@@ -104,6 +104,10 @@ func commonFilters(opt Options) (string, []any) {
 		sb.WriteString(` AND m.session_uuid IN (SELECT session_uuid FROM tool_targets WHERE kind='command' AND value LIKE ? ESCAPE '\')`)
 		args = append(args, "%"+db.EscapeLike(opt.Ran)+"%")
 	}
+	if clause, cargs := db.SourceFilter("s.source", opt.Source); clause != "" {
+		sb.WriteString(clause)
+		args = append(args, cargs...)
+	}
 	return sb.String(), args
 }
 
@@ -120,7 +124,7 @@ func hybridQuery(ctx context.Context, database *db.DB, opt Options, long, short 
 	}
 
 	matchExpr := buildMatchQuery(long)
-	q := `SELECT m.id, m.seq, m.session_uuid, COALESCE(s.project_path,''), COALESCE(s.parent_session,''), COALESCE(s.agent_type,''), m.role, COALESCE(m.ts,0),
+	q := `SELECT m.id, m.seq, m.session_uuid, COALESCE(s.project_path,''), COALESCE(s.parent_session,''), COALESCE(s.agent_type,''), COALESCE(s.source,'claude-code'), m.role, COALESCE(m.ts,0),
 		snippet(messages_fts,0,'[',']','…',10), bm25(messages_fts)
 		FROM messages_fts
 		JOIN messages m ON m.id = messages_fts.rowid
@@ -145,7 +149,7 @@ func likeQuery(ctx context.Context, database *db.DB, opt Options) (*sql.Rows, er
 	}
 	where := strings.Join(conds, " AND ")
 	// LIKE has no bm25; emit content as the "snippet" source (trimmed later) and 0 score.
-	q := `SELECT m.id, m.seq, m.session_uuid, COALESCE(s.project_path,''), COALESCE(s.parent_session,''), COALESCE(s.agent_type,''), m.role, COALESCE(m.ts,0),
+	q := `SELECT m.id, m.seq, m.session_uuid, COALESCE(s.project_path,''), COALESCE(s.parent_session,''), COALESCE(s.agent_type,''), COALESCE(s.source,'claude-code'), m.role, COALESCE(m.ts,0),
 		substr(m.content,1,160), 0.0
 		FROM messages m
 		LEFT JOIN sessions s ON s.uuid = m.session_uuid

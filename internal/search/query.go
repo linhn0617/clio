@@ -18,6 +18,7 @@ type Options struct {
 	Tool              string // restrict to sessions that used this tool (exact name)
 	Ran               string // restrict to sessions that ran a command containing this substring
 	MaxPerSession     int    // cap candidates per session in Retrieve (0 = no cap)
+	Source            string // "" / "claude-code" (default) | "codex" | "all"
 }
 
 // Result is one matched message.
@@ -32,6 +33,7 @@ type Result struct {
 	Score         float64
 	ParentSession string // the hit session's parent, when it is a subagent transcript
 	AgentType     string // the hit session's subagent type, when it is a subagent
+	Source        string // the hit session's originating tool: "claude-code" | "codex"
 }
 
 // terms splits a query into terms, honoring double-quoted phrases.

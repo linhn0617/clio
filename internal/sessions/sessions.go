@@ -63,7 +63,7 @@ func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session
 	}
 	filterSQL, filterArgs := listFilters(f)
 	q := `SELECT uuid, COALESCE(project_path,''), COALESCE(title,''), COALESCE(started_at,0), COALESCE(ended_at,0), turn_count,
-		COALESCE(parent_session,''), COALESCE(agent_type,''), COALESCE(source,''),
+		COALESCE(parent_session,''), COALESCE(agent_type,''), COALESCE(source,'claude-code'),
 		(SELECT COUNT(*) FROM sessions sub WHERE sub.parent_session = sessions.uuid)
 		FROM sessions WHERE 1=1` + filterSQL
 	args := append([]any{}, filterArgs...)
