@@ -22,6 +22,11 @@ import (
 // caller treats it as a no-op and lets a later pass re-ingest the fresh bytes.
 var errStaleSnapshot = errors.New("source file changed during ingest")
 
+// errSourceConflict means the session uuid is already owned by a different source
+// tool; the file is refused (no rows written) and the collision is recorded in
+// source_conflicts for diagnostics. The caller treats it as a per-file skip.
+var errSourceConflict = errors.New("session uuid already owned by a different source")
+
 // Ingester writes parsed sessions into the database.
 type Ingester struct {
 	db  *db.DB
@@ -180,8 +185,8 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 		UnparsedLines:   unparsed,
 	})
 	if err != nil {
-		if errors.Is(err, errStaleSnapshot) {
-			return 0, false, nil // changed under us; next pass will re-ingest
+		if errors.Is(err, errStaleSnapshot) || errors.Is(err, errSourceConflict) {
+			return 0, false, nil // changed under us, or refused as a cross-source conflict (recorded for doctor)
 		}
 		return 0, false, err
 	}
@@ -301,7 +306,52 @@ func readCappedLine(r *bufio.Reader, limit int) (data []byte, consumed int, term
 	}
 }
 
+// checkSourceConflict reports whether sess.UUID is already owned by a different
+// source. On conflict it records the collision durably in source_conflicts and
+// returns true (the caller must refuse the ingest). With no conflict it clears any
+// stale conflict row for this file. It runs before the commit transaction opens, so
+// a refused file never writes session/message rows under another tool's uuid. A
+// NULL/empty stored source is treated as claude-code (rows predating migration 0009).
+func (ing *Ingester) checkSourceConflict(uuid, source, sourceFile string) (bool, error) {
+	var existing sql.NullString
+	err := ing.db.QueryRow(`SELECT source FROM sessions WHERE uuid = ?`, uuid).Scan(&existing)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, derr := ing.db.Exec(`DELETE FROM source_conflicts WHERE source_file = ?`, sourceFile)
+		return false, derr
+	}
+	if err != nil {
+		return false, err
+	}
+	existingSrc := existing.String
+	if existingSrc == "" {
+		existingSrc = model.SourceClaudeCode
+	}
+	mySrc := source
+	if mySrc == "" {
+		mySrc = model.SourceClaudeCode
+	}
+	if existingSrc != mySrc {
+		now := time.Now().Unix()
+		if _, derr := ing.db.Exec(`INSERT INTO source_conflicts(source_file, uuid, seen_source, conflicting_source, first_seen_at, last_seen_at)
+			VALUES (?,?,?,?,?,?)
+			ON CONFLICT(source_file) DO UPDATE SET uuid=excluded.uuid, seen_source=excluded.seen_source,
+			conflicting_source=excluded.conflicting_source, last_seen_at=excluded.last_seen_at`,
+			sourceFile, uuid, existingSrc, mySrc, now, now); derr != nil {
+			return false, derr
+		}
+		ing.log.Warn("cross-source uuid conflict; file not indexed", "uuid", uuid, "have", existingSrc, "got", mySrc, "file", sourceFile)
+		return true, nil
+	}
+	_, derr := ing.db.Exec(`DELETE FROM source_conflicts WHERE source_file = ?`, sourceFile)
+	return false, derr
+}
+
 func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Message, excludedToolUses []string, fs FileState) (int, error) {
+	if conflict, err := ing.checkSourceConflict(sess.UUID, sess.Source, fs.SourceFile); err != nil {
+		return 0, err
+	} else if conflict {
+		return 0, errSourceConflict
+	}
 	tx, err := ing.db.Begin()
 	if err != nil {
 		return 0, err

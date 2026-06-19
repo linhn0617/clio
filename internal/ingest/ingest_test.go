@@ -50,6 +50,42 @@ func openTestDB(t *testing.T) *db.DB {
 	return database
 }
 
+func TestIngestRefusesCrossSourceUUIDCollision(t *testing.T) {
+	projects := t.TempDir()
+	// A Claude Code session file whose filename uuid collides with an existing
+	// codex session already in the index.
+	writeSession(t, projects, "-Users-lin-Herd-x", "dup-1", evUser1, evUser2)
+	database := openTestDB(t)
+	if _, err := database.Exec(`INSERT INTO sessions(uuid, source_file, turn_count, source) VALUES ('dup-1','/codex/dup-1.jsonl',0,'codex')`); err != nil {
+		t.Fatal(err)
+	}
+	ing := New(database, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatalf("IngestAll must not hard-error on a per-file conflict: %v", err)
+	}
+	// The pre-existing codex session must be intact: not overwritten, no CC messages attached.
+	var src string
+	if err := database.QueryRow(`SELECT source FROM sessions WHERE uuid='dup-1'`).Scan(&src); err != nil {
+		t.Fatal(err)
+	}
+	if src != "codex" {
+		t.Fatalf("source=%q want codex (the CC ingest must not overwrite a different source)", src)
+	}
+	var msgCount int
+	database.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_uuid='dup-1'`).Scan(&msgCount)
+	if msgCount != 0 {
+		t.Fatalf("got %d messages attached to the codex session, want 0", msgCount)
+	}
+	// The conflict is recorded durably.
+	var conflicts int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM source_conflicts WHERE uuid='dup-1' AND conflicting_source='claude-code' AND seen_source='codex'`).Scan(&conflicts); err != nil {
+		t.Fatal(err)
+	}
+	if conflicts != 1 {
+		t.Fatalf("source_conflicts rows=%d want 1", conflicts)
+	}
+}
+
 func TestIngestRecordsClaudeCodeSource(t *testing.T) {
 	projects := t.TempDir()
 	writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evUser2)
