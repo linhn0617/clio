@@ -12,7 +12,7 @@ import (
 )
 
 // newTest builds a root model for tests with a background context.
-func newTest(database *db.DB) Model { return New(context.Background(), database) }
+func newTest(database *db.DB) Model { return New(context.Background(), database, "") }
 
 // visibleWindow keeps the selected row inside a pane of height h, clamped to ends.
 func TestVisibleWindow(t *testing.T) {
@@ -40,7 +40,7 @@ func TestVisibleWindow(t *testing.T) {
 // New threads the context into every sub-view so their queries are cancellable.
 func TestNewThreadsContext(t *testing.T) {
 	ctx := context.Background()
-	m := New(ctx, nil)
+	m := New(ctx, nil, "")
 	if m.search.ctx != ctx || m.browse.ctx != ctx || m.activity.ctx != ctx || m.ask.ctx != ctx {
 		t.Fatal("New should thread the context into every sub-view")
 	}

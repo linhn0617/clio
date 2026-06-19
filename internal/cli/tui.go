@@ -11,7 +11,8 @@ import (
 )
 
 func newTUICmd() *cobra.Command {
-	return &cobra.Command{
+	var source string
+	cmd := &cobra.Command{
 		Use:   "tui",
 		Short: "Browse and search history in an interactive dashboard",
 		Long: "Launch a full-screen dashboard over your indexed history: live search, recent " +
@@ -21,6 +22,9 @@ func newTUICmd() *cobra.Command {
 			"Search and Ask those keys are query text).",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateSource(source); err != nil {
+				return err
+			}
 			database, err := openForQuery()
 			if err != nil {
 				return err
@@ -32,7 +36,7 @@ func newTUICmd() *cobra.Command {
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
 
-			p := tea.NewProgram(tui.New(ctx, database),
+			p := tea.NewProgram(tui.New(ctx, database, source),
 				tea.WithContext(ctx),
 				tea.WithAltScreen())
 			_, err = p.Run()
@@ -43,4 +47,6 @@ func newTUICmd() *cobra.Command {
 			return nil
 		},
 	}
+	addSourceFlag(cmd, &source)
+	return cmd
 }

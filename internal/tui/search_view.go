@@ -31,6 +31,7 @@ type searchHit struct {
 	snippet       string
 	parentSession string // non-empty when the hit comes from a subagent transcript
 	agentType     string // the subagent's type, when it is a subagent
+	source        string // originating tool: "claude-code" | "codex"
 }
 
 // searchView is the live-search tab: a query, its results, the selection, and a
@@ -38,6 +39,7 @@ type searchHit struct {
 type searchView struct {
 	db            *db.DB
 	ctx           context.Context
+	source        string // source filter: "" / "claude-code" | "codex" | "all"
 	width, height int
 	query         string
 	gen           int  // bumps on each query change; stale ticks/results are dropped
@@ -127,12 +129,12 @@ func (v searchView) Update(msg tea.Msg) (searchView, tea.Cmd) {
 // runSearch queries the index for the current query and returns the hits tagged
 // with generation g (so a stale result can be dropped).
 func (v searchView) runSearch(g int) tea.Cmd {
-	q, database, ctx := v.query, v.db, orBackground(v.ctx)
+	q, database, source, ctx := v.query, v.db, v.source, orBackground(v.ctx)
 	return func() tea.Msg {
 		if database == nil || strings.TrimSpace(q) == "" {
 			return searchResultsMsg{gen: g}
 		}
-		res, err := search.Search(ctx, database, search.Options{Query: q, Limit: searchResultLimit})
+		res, err := search.Search(ctx, database, search.Options{Query: q, Source: source, Limit: searchResultLimit})
 		if err != nil {
 			return searchResultsMsg{gen: g, err: err}
 		}
@@ -147,6 +149,7 @@ func (v searchView) runSearch(g int) tea.Cmd {
 				snippet:       r.Snippet,
 				parentSession: r.ParentSession,
 				agentType:     r.AgentType,
+				source:        r.Source,
 			}
 		}
 		return searchResultsMsg{gen: g, results: hits}
@@ -222,6 +225,9 @@ func (v searchView) renderList(w, h int) string {
 				typ = "subagent"
 			}
 			line = "↳(" + typ + ") " + line
+		}
+		if r.source == "codex" {
+			line = "[codex] " + line
 		}
 		lines = append(lines, runewidth.Truncate(marker+line, w, "…"))
 	}
