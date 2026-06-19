@@ -63,18 +63,19 @@ func openForQuery() (*db.DB, error) {
 		return nil, err
 	}
 	if projects, err := config.ClaudeProjectsDir(); err == nil {
-		if _, statErr := os.Stat(projects); statErr == nil {
-			ing := ingest.New(database, discardLogger())
-			ing.AddCodexSource() // also catch up Codex CLI history, when installed
-			if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
-				stderrLogger().Warn("incremental catch-up failed", "err", err)
-			}
-			if err := ing.PurgeMissing(context.Background(), projects); err != nil {
-				stderrLogger().Warn("catch-up purge failed", "err", err)
-			}
-			if err := ing.BackfillActivity(context.Background()); err != nil {
-				stderrLogger().Warn("activity backfill failed", "err", err)
-			}
+		// Run the catch-up unconditionally (not gated on the Claude dir existing): on a
+		// Codex-only machine ~/.claude/projects is absent, but the Codex source still
+		// has history to ingest. IngestAll/PurgeMissing handle missing roots per-source.
+		ing := ingest.New(database, discardLogger())
+		ing.AddCodexSource() // also catch up Codex CLI history, when installed
+		if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+			stderrLogger().Warn("incremental catch-up failed", "err", err)
+		}
+		if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+			stderrLogger().Warn("catch-up purge failed", "err", err)
+		}
+		if err := ing.BackfillActivity(context.Background()); err != nil {
+			stderrLogger().Warn("activity backfill failed", "err", err)
 		}
 	}
 	return database, nil

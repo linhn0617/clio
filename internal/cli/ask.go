@@ -22,6 +22,7 @@ func newAskCmd() *cobra.Command {
 		limit   int
 		window  int
 		asJSON  bool
+		source  string
 	)
 	cmd := &cobra.Command{
 		Use:   "ask <question>",
@@ -35,6 +36,9 @@ func newAskCmd() *cobra.Command {
 			question := strings.TrimSpace(strings.Join(args, " "))
 			if question == "" {
 				return fmt.Errorf("a question is required")
+			}
+			if err := validateSource(source); err != nil {
+				return err
 			}
 			sinceTS, err := parseSince(since)
 			if err != nil {
@@ -63,6 +67,7 @@ func newAskCmd() *cobra.Command {
 					Since:         sinceTS,
 					MaxSessions:   limit,
 					Window:        window,
+					Source:        source,
 				})
 				if err != nil {
 					return err
@@ -84,6 +89,7 @@ func newAskCmd() *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 0, "Maximum sessions in the bundle (default 6)")
 	cmd.Flags().IntVar(&window, "window", 0, "Dialogue turns to include each side of a match (default 2)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Output the bundle as JSON")
+	addSourceFlag(cmd, &source)
 	return cmd
 }
 

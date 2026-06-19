@@ -69,7 +69,10 @@ type Stats struct {
 func (ing *Ingester) IngestAll(ctx context.Context, projectsDir string, force bool) (Stats, error) {
 	files, err := WalkSessionFiles(projectsDir, ing.log)
 	if err != nil {
-		return Stats{}, err
+		// Don't abort the whole run: other registered sources (e.g. Codex) may still
+		// have files to ingest even when the Claude Code projects dir is unavailable.
+		ing.log.Warn("walk claude projects dir failed; continuing with other sources", "dir", projectsDir, "err", err)
+		files = nil
 	}
 	// Span every registered source: a missing/unavailable extra root (e.g. Codex not
 	// installed) is logged inside extraRoots/WalkSessionFiles, never fatal.
@@ -335,11 +338,17 @@ func readCappedLine(r *bufio.Reader, limit int) (data []byte, consumed int, term
 // stale conflict row for this file. It runs before the commit transaction opens, so
 // a refused file never writes session/message rows under another tool's uuid. A
 // NULL/empty stored source is treated as claude-code (rows predating migration 0009).
-func (ing *Ingester) checkSourceConflict(uuid, source, sourceFile string) (bool, error) {
+// checkSourceConflict runs inside commit's IMMEDIATE transaction (atomic vs racing
+// writers): it reports whether sess.UUID is already owned by a different source. On
+// conflict it records the collision durably in source_conflicts via tx and returns
+// true (the caller commits that record and refuses the file); with no conflict it
+// clears any stale conflict row for this file. A NULL/empty stored source is treated
+// as claude-code (rows predating migration 0009).
+func (ing *Ingester) checkSourceConflict(tx *sql.Tx, uuid, source, sourceFile string) (bool, error) {
 	var existing sql.NullString
-	err := ing.db.QueryRow(`SELECT source FROM sessions WHERE uuid = ?`, uuid).Scan(&existing)
+	err := tx.QueryRow(`SELECT source FROM sessions WHERE uuid = ?`, uuid).Scan(&existing)
 	if errors.Is(err, sql.ErrNoRows) {
-		_, derr := ing.db.Exec(`DELETE FROM source_conflicts WHERE source_file = ?`, sourceFile)
+		_, derr := tx.Exec(`DELETE FROM source_conflicts WHERE source_file = ?`, sourceFile)
 		return false, derr
 	}
 	if err != nil {
@@ -355,7 +364,7 @@ func (ing *Ingester) checkSourceConflict(uuid, source, sourceFile string) (bool,
 	}
 	if existingSrc != mySrc {
 		now := time.Now().Unix()
-		if _, derr := ing.db.Exec(`INSERT INTO source_conflicts(source_file, uuid, seen_source, conflicting_source, first_seen_at, last_seen_at)
+		if _, derr := tx.Exec(`INSERT INTO source_conflicts(source_file, uuid, seen_source, conflicting_source, first_seen_at, last_seen_at)
 			VALUES (?,?,?,?,?,?)
 			ON CONFLICT(source_file) DO UPDATE SET uuid=excluded.uuid, seen_source=excluded.seen_source,
 			conflicting_source=excluded.conflicting_source, last_seen_at=excluded.last_seen_at`,
@@ -365,16 +374,11 @@ func (ing *Ingester) checkSourceConflict(uuid, source, sourceFile string) (bool,
 		ing.log.Warn("cross-source uuid conflict; file not indexed", "uuid", uuid, "have", existingSrc, "got", mySrc, "file", sourceFile)
 		return true, nil
 	}
-	_, derr := ing.db.Exec(`DELETE FROM source_conflicts WHERE source_file = ?`, sourceFile)
+	_, derr := tx.Exec(`DELETE FROM source_conflicts WHERE source_file = ?`, sourceFile)
 	return false, derr
 }
 
 func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Message, excludedToolUses []string, fs FileState) (int, error) {
-	if conflict, err := ing.checkSourceConflict(sess.UUID, sess.Source, fs.SourceFile); err != nil {
-		return 0, err
-	} else if conflict {
-		return 0, errSourceConflict
-	}
 	tx, err := ing.db.Begin()
 	if err != nil {
 		return 0, err
@@ -396,6 +400,18 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 	}
 	if fi.Size() != fs.LastSize || fi.ModTime().UnixNano() != fs.LastMTime {
 		return 0, errStaleSnapshot
+	}
+
+	// Cross-source uuid collision, detected inside the write transaction so it is
+	// atomic against a racing writer: refuse the file (no session/message rows) and
+	// commit only the durable conflict record.
+	if conflict, cerr := ing.checkSourceConflict(tx, sess.UUID, sess.Source, fs.SourceFile); cerr != nil {
+		return 0, cerr
+	} else if conflict {
+		if err := tx.Commit(); err != nil {
+			return 0, err
+		}
+		return 0, errSourceConflict
 	}
 
 	for _, id := range excludedToolUses {

@@ -100,6 +100,24 @@ func writeCodexRollout(t *testing.T, dir, uuid string) {
 	}
 }
 
+func TestIngestAllIngestsCodexWhenClaudeRootMissing(t *testing.T) {
+	missingCC := filepath.Join(t.TempDir(), "does-not-exist") // never created
+	codexRoot := t.TempDir()
+	const uuid = "0199dddd-eeee-7fff-8000-111111111111"
+	writeCodexRollout(t, codexRoot, uuid)
+	database := openTestDB(t)
+	ing := New(database, nil)
+	ing.AddSource(codexSource{root: codexRoot})
+	if _, err := ing.IngestAll(context.Background(), missingCC, false); err != nil {
+		t.Fatalf("IngestAll must not abort when the Claude root is missing: %v", err)
+	}
+	var n int
+	database.QueryRow(`SELECT COUNT(*) FROM sessions WHERE uuid=? AND source='codex'`, uuid).Scan(&n)
+	if n != 1 {
+		t.Fatalf("codex not ingested when the Claude root is missing (n=%d)", n)
+	}
+}
+
 func TestPurgeMissingPreservesUnavailableCodexRoot(t *testing.T) {
 	ccRoot := t.TempDir()
 	codexRoot := t.TempDir()

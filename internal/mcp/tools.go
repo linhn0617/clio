@@ -252,6 +252,7 @@ func handleAsk(database *db.DB, beforeRead func()) func(context.Context, mcp.Cal
 			ProjectPrefix: req.GetString("project", ""),
 			Since:         parseSince(req.GetString("since", "")),
 			MaxSessions:   clamp(req.GetInt("limit", defaultAskSessions), defaultAskSessions, maxAskSessions),
+			Source:        req.GetString("source", "claude-code"),
 		})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
