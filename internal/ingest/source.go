@@ -101,6 +101,10 @@ func (ing *Ingester) extraRoots() []string {
 	return out
 }
 
+// ExtraRoots returns the registered sources' extra roots (beyond the Claude Code
+// projects dir), so the watcher can live-watch every source.
+func (ing *Ingester) ExtraRoots() []string { return ing.extraRoots() }
+
 // AddCodexSource registers the Codex CLI source rooted at ~/.codex/sessions, but only
 // when that directory exists. Codex not being installed is not an error: the source is
 // simply not registered, so nothing is walked, watched, or purged for it.

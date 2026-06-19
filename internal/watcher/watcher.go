@@ -42,7 +42,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 	defer fsw.Close()
 
-	w.addDirsRecursive(fsw, w.projectsDir)
+	w.watchAllRoots(fsw)
 
 	dirty := map[string]struct{}{}
 	var debounce <-chan time.Time
@@ -83,7 +83,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 
 		case <-backstop.C:
 			// Recover any events fsnotify dropped, and pick up new dirs.
-			w.addDirsRecursive(fsw, w.projectsDir)
+			w.watchAllRoots(fsw)
 			if _, err := w.ing.IngestAll(ctx, w.projectsDir, false); err != nil {
 				w.log.Warn("backstop ingest failed", "err", err)
 			}
@@ -110,6 +110,15 @@ func (w *Watcher) handleEvent(fsw *fsnotify.Watcher, ev fsnotify.Event, dirty ma
 		if strings.HasSuffix(ev.Name, ".jsonl") {
 			dirty[ev.Name] = struct{}{}
 		}
+	}
+}
+
+// watchAllRoots watches the Claude Code projects dir plus every registered source's
+// extra root (e.g. ~/.codex/sessions), so new sessions in any source are live-ingested.
+func (w *Watcher) watchAllRoots(fsw *fsnotify.Watcher) {
+	w.addDirsRecursive(fsw, w.projectsDir)
+	for _, r := range w.ing.ExtraRoots() {
+		w.addDirsRecursive(fsw, r)
 	}
 }
 
