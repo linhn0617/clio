@@ -99,7 +99,7 @@ func (v activityView) load() tea.Cmd {
 	}
 	kind := v.currentKind()
 	return func() tea.Msg {
-		ac, err := sessions.ActivityByKind(ctx, database, kind, 0, "", activityListLimit)
+		ac, err := sessions.ActivityByKind(ctx, database, kind, 0, "", "", activityListLimit)
 		return activityLoadedMsg{kind: kind, entries: ac, err: err}
 	}
 }

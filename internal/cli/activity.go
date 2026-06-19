@@ -17,11 +17,15 @@ func newActivityCmd() *cobra.Command {
 		project string
 		limit   int
 		asJSON  bool
+		source  string
 	)
 	cmd := &cobra.Command{
 		Use:   "activity",
 		Short: "Summarize indexed activity (files, commands, tools) grouped by kind",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateSource(source); err != nil {
+				return err
+			}
 			switch by {
 			case "file", "command", "tool", "pattern", "url":
 			default:
@@ -37,7 +41,7 @@ func newActivityCmd() *cobra.Command {
 			}
 			defer database.Close()
 
-			rows, err := sessions.ActivityByKind(cmd.Context(), database, by, sinceTS, project, limit)
+			rows, err := sessions.ActivityByKind(cmd.Context(), database, by, sinceTS, project, source, limit)
 			if err != nil {
 				return err
 			}
@@ -61,5 +65,6 @@ func newActivityCmd() *cobra.Command {
 	cmd.Flags().StringVar(&project, "project", "", "Filter by project path prefix")
 	cmd.Flags().IntVar(&limit, "limit", 30, "Maximum number of rows")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Output JSON")
+	addSourceFlag(cmd, &source)
 	return cmd
 }

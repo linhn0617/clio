@@ -22,12 +22,16 @@ func newSearchCmd() *cobra.Command {
 		touched   string
 		tool      string
 		ran       string
+		source    string
 	)
 	cmd := &cobra.Command{
 		Use:   "search <query>",
 		Short: "Full-text search across all conversations",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateSource(source); err != nil {
+				return err
+			}
 			sinceTS, err := parseSince(since)
 			if err != nil {
 				return err
@@ -48,6 +52,7 @@ func newSearchCmd() *cobra.Command {
 				Touched:           touched,
 				Tool:              tool,
 				Ran:               ran,
+				Source:            source,
 			})
 			if err != nil {
 				return err
@@ -77,5 +82,6 @@ func newSearchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&touched, "touched", "", "Only sessions whose tool calls touched this path prefix")
 	cmd.Flags().StringVar(&tool, "tool", "", "Only sessions that used this tool (exact name)")
 	cmd.Flags().StringVar(&ran, "ran", "", "Only sessions that ran a command containing this substring")
+	addSourceFlag(cmd, &source)
 	return cmd
 }

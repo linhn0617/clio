@@ -222,7 +222,7 @@ func assembleGroup(ctx context.Context, database *db.DB, uuid string, score floa
 	}
 
 	// Citation metadata: exact-uuid resolve returns title/project/ended_at.
-	if meta, err := sessions.ResolvePrefix(ctx, database, uuid); err == nil {
+	if meta, err := sessions.ResolvePrefix(ctx, database, uuid, "all"); err == nil {
 		eg.Title = meta.Title
 		eg.Project = meta.ProjectPath
 		eg.EndedAt = meta.EndedAt

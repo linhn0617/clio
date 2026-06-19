@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/linhn0617/clio/internal/config"
 	"github.com/linhn0617/clio/internal/model"
 )
 
@@ -88,4 +89,19 @@ func (ing *Ingester) extraRoots() []string {
 		out = append(out, roots...)
 	}
 	return out
+}
+
+// AddCodexSource registers the Codex CLI source rooted at ~/.codex/sessions, but only
+// when that directory exists. Codex not being installed is not an error: the source is
+// simply not registered, so nothing is walked, watched, or purged for it.
+func (ing *Ingester) AddCodexSource() {
+	root, err := config.CodexSessionsDir()
+	if err != nil {
+		ing.log.Warn("codex sessions dir unavailable", "err", err)
+		return
+	}
+	if fi, statErr := os.Stat(root); statErr != nil || !fi.IsDir() {
+		return
+	}
+	ing.AddSource(codexSource{root: root})
 }

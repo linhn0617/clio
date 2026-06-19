@@ -64,6 +64,7 @@ func newMCPCmd() *cobra.Command {
 
 			projects, _ := config.ClaudeProjectsDir()
 			ing := ingest.New(rw, log)
+			ing.AddCodexSource() // also ingest Codex CLI history, when installed
 
 			var isLeaderNow atomic.Bool
 			isLeaderNow.Store(isLeader)

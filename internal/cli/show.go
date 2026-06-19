@@ -27,19 +27,23 @@ func newShowCmd() *cobra.Command {
 		jsonFlag         bool
 		limit            int
 		includeSubagents bool
+		source           string
 	)
 	cmd := &cobra.Command{
 		Use:   "show <session-uuid-or-prefix>",
 		Short: "Print a full session",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateSource(source); err != nil {
+				return err
+			}
 			database, err := openForQuery()
 			if err != nil {
 				return err
 			}
 			defer database.Close()
 
-			sess, err := sessions.ResolvePrefix(cmd.Context(), database, args[0])
+			sess, err := sessions.ResolvePrefix(cmd.Context(), database, args[0], source)
 			if err != nil {
 				return err
 			}
@@ -134,6 +138,7 @@ func newShowCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output JSON (alias for --format json)")
 	cmd.Flags().IntVar(&limit, "limit", defaultShowMessages, "Maximum messages to render")
 	cmd.Flags().BoolVar(&includeSubagents, "include-subagents", false, "Inline the transcripts of this session's subagents")
+	addSourceFlag(cmd, &source)
 	return cmd
 }
 

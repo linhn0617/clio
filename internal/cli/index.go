@@ -44,6 +44,7 @@ func newIndexCmd() *cobra.Command {
 
 			log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 			ing := ingest.New(database, log)
+			ing.AddCodexSource() // index Codex CLI history too, when installed
 
 			st, err := ing.IngestAll(cmd.Context(), projects, full)
 			if err != nil {

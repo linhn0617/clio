@@ -21,7 +21,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer d.Close()
-	if _, err := ingest.New(d, nil).IngestAll(context.Background(), projects, false); err != nil {
+	ing := ingest.New(d, nil)
+	ing.AddCodexSource() // ingest Codex CLI history too, when installed
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
 		fmt.Fprintln(os.Stderr, "ingest:", err)
 		os.Exit(1)
 	}

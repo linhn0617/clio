@@ -44,6 +44,7 @@ func newInstallMCPCmd() *cobra.Command {
 					return err
 				}
 				ing := ingest.New(database, stderrLogger())
+				ing.AddCodexSource() // index Codex CLI history too, when installed
 				fmt.Fprintln(os.Stdout, "Indexing your Claude Code history…")
 				st, err := ing.IngestAll(cmd.Context(), projects, false)
 				if err != nil {

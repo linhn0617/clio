@@ -155,7 +155,7 @@ func TestActivityByKind(t *testing.T) {
 	addTarget(t, d, "s1", "file", "/x/a.go")
 	addTarget(t, d, "s1", "file", "/x/b.go")
 	addTarget(t, d, "s1", "tool", "Bash")
-	got, err := ActivityByKind(context.Background(), d, "file", 0, "", 10)
+	got, err := ActivityByKind(context.Background(), d, "file", 0, "", "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestActivityByKindFiltersSinceAndProject(t *testing.T) {
 	}
 
 	since := time.Now().Add(-7 * 24 * time.Hour).Unix()
-	got, err := ActivityByKind(context.Background(), d, "file", since, "", 10)
+	got, err := ActivityByKind(context.Background(), d, "file", since, "", "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestActivityByKindFiltersSinceAndProject(t *testing.T) {
 		t.Fatalf("since filter: got %+v", got)
 	}
 
-	got2, err := ActivityByKind(context.Background(), d, "file", 0, "/proj/b", 10)
+	got2, err := ActivityByKind(context.Background(), d, "file", 0, "/proj/b", "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestGetRecall(t *testing.T) {
 func TestResolvePrefixExact(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "abcdef12-3456", "/p", 1)
-	s, err := ResolvePrefix(context.Background(), d, "abcdef12-3456")
+	s, err := ResolvePrefix(context.Background(), d, "abcdef12-3456", "")
 	if err != nil || s.UUID != "abcdef12-3456" {
 		t.Fatalf("exact resolve failed: %v %+v", err, s)
 	}
@@ -232,7 +232,7 @@ func TestResolvePrefixUnambiguous(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "abcdef12-3456", "/p", 1)
 	addSession(t, d, "ffffffff-0000", "/p", 1)
-	s, err := ResolvePrefix(context.Background(), d, "abc")
+	s, err := ResolvePrefix(context.Background(), d, "abc", "")
 	if err != nil || s.UUID != "abcdef12-3456" {
 		t.Fatalf("prefix resolve failed: %v %+v", err, s)
 	}
@@ -242,14 +242,14 @@ func TestResolvePrefixAmbiguous(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "abc111", "/p", 1)
 	addSession(t, d, "abc222", "/p", 1)
-	if _, err := ResolvePrefix(context.Background(), d, "abc"); err != ErrAmbiguous {
+	if _, err := ResolvePrefix(context.Background(), d, "abc", ""); err != ErrAmbiguous {
 		t.Fatalf("expected ErrAmbiguous, got %v", err)
 	}
 }
 
 func TestResolvePrefixNotFound(t *testing.T) {
 	d := testDB(t)
-	if _, err := ResolvePrefix(context.Background(), d, "nope"); err != ErrNotFound {
+	if _, err := ResolvePrefix(context.Background(), d, "nope", ""); err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
@@ -261,30 +261,30 @@ func TestResolvePrefixExactWinsOverPrefixMatches(t *testing.T) {
 	addSession(t, d, "abcde", "/p", 1)
 
 	// "abc" is itself an exact uuid AND a prefix of two others; exact must win.
-	s, err := ResolvePrefix(context.Background(), d, "abc")
+	s, err := ResolvePrefix(context.Background(), d, "abc", "")
 	if err != nil || s.UUID != "abc" {
 		t.Fatalf("exact-over-prefix: want abc, got %+v err=%v", s, err)
 	}
 	// "abcd" is an exact uuid AND a prefix of "abcde".
-	s, err = ResolvePrefix(context.Background(), d, "abcd")
+	s, err = ResolvePrefix(context.Background(), d, "abcd", "")
 	if err != nil || s.UUID != "abcd" {
 		t.Fatalf("exact-over-prefix: want abcd, got %+v err=%v", s, err)
 	}
 	// "ab" has no exact match but 3 prefix matches → ambiguous.
-	if _, err := ResolvePrefix(context.Background(), d, "ab"); !errors.Is(err, ErrAmbiguous) {
+	if _, err := ResolvePrefix(context.Background(), d, "ab", ""); !errors.Is(err, ErrAmbiguous) {
 		t.Fatalf("want ErrAmbiguous for 'ab', got %v", err)
 	}
 	// Unknown prefix.
-	if _, err := ResolvePrefix(context.Background(), d, "zzz"); !errors.Is(err, ErrNotFound) {
+	if _, err := ResolvePrefix(context.Background(), d, "zzz", ""); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound for 'zzz', got %v", err)
 	}
 	// Full uuid still resolves.
-	s, err = ResolvePrefix(context.Background(), d, "abcde")
+	s, err = ResolvePrefix(context.Background(), d, "abcde", "")
 	if err != nil || s.UUID != "abcde" {
 		t.Fatalf("full-uuid resolve: want abcde, got %+v err=%v", s, err)
 	}
 	// Empty prefix must not panic; just returns an error.
-	if _, err := ResolvePrefix(context.Background(), d, ""); err == nil {
+	if _, err := ResolvePrefix(context.Background(), d, "", ""); err == nil {
 		t.Fatal("empty prefix should return an error")
 	}
 }
@@ -294,14 +294,14 @@ func TestResolvePrefixEscapesUnderscore(t *testing.T) {
 	addSession(t, d, "a_x", "/p", 1)
 	addSession(t, d, "abx", "/p", 1)
 	// Exact "a_x" must resolve to exactly "a_x".
-	s, err := ResolvePrefix(context.Background(), d, "a_x")
+	s, err := ResolvePrefix(context.Background(), d, "a_x", "")
 	if err != nil || s.UUID != "a_x" {
 		t.Fatalf("underscore escape: want a_x, got %+v err=%v", s, err)
 	}
 	// Underscore must be literal, not a single-char wildcard. "a_" has no exact
 	// row; with an unescaped LIKE it would match both "a_x" and "abx" → ambiguous.
 	// With proper escaping it matches only "a_x".
-	s, err = ResolvePrefix(context.Background(), d, "a_")
+	s, err = ResolvePrefix(context.Background(), d, "a_", "")
 	if err != nil || s.UUID != "a_x" {
 		t.Fatalf("underscore wildcard leak: want unique a_x, got %+v err=%v", s, err)
 	}
@@ -312,13 +312,13 @@ func TestResolvePrefixEscapesPercent(t *testing.T) {
 	addSession(t, d, "a%x", "/p", 1)
 	addSession(t, d, "aYx", "/p", 1)
 	// Exact "a%x" must resolve to exactly "a%x".
-	s, err := ResolvePrefix(context.Background(), d, "a%x")
+	s, err := ResolvePrefix(context.Background(), d, "a%x", "")
 	if err != nil || s.UUID != "a%x" {
 		t.Fatalf("percent escape: want a%%x, got %+v err=%v", s, err)
 	}
 	// Percent must be literal. "a%" has no exact row; unescaped it matches both
 	// "a%x" and "aYx" → ambiguous. Escaped it matches only "a%x".
-	s, err = ResolvePrefix(context.Background(), d, "a%")
+	s, err = ResolvePrefix(context.Background(), d, "a%", "")
 	if err != nil || s.UUID != "a%x" {
 		t.Fatalf("percent wildcard leak: want unique a%%x, got %+v err=%v", s, err)
 	}
@@ -436,13 +436,13 @@ func TestActivitySummaryGrouping(t *testing.T) {
 	addSession(t, d, "s1", "/p/a", 1)
 	addMsg(t, d, "s1", 0, "user", "x")
 	since := time.Now().Add(-24 * time.Hour).Unix()
-	if _, err := ActivitySummary(context.Background(), d, since, "project"); err != nil {
+	if _, err := ActivitySummary(context.Background(), d, since, "project", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ActivitySummary(context.Background(), d, since, "day"); err != nil {
+	if _, err := ActivitySummary(context.Background(), d, since, "day", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ActivitySummary(context.Background(), d, since, "bogus"); err == nil {
+	if _, err := ActivitySummary(context.Background(), d, since, "bogus", ""); err == nil {
 		t.Fatal("expected error for invalid group_by")
 	}
 }
@@ -465,7 +465,7 @@ func TestActivitySummaryLocalDay(t *testing.T) {
 		t.Fatal(err)
 	}
 	addMsg(t, d, "s1", 0, "user", "x")
-	buckets, err := ActivitySummary(context.Background(), d, ts-1, "day")
+	buckets, err := ActivitySummary(context.Background(), d, ts-1, "day", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +605,7 @@ func TestActivitySummaryCountsOrphanSubagentsSeparately(t *testing.T) {
 	addMsg(t, d, "agent-1", 0, "user", "a")
 	addMsg(t, d, "agent-2", 0, "user", "b")
 	since := time.Now().Add(-24 * time.Hour).Unix()
-	buckets, err := ActivitySummary(context.Background(), d, since, "project")
+	buckets, err := ActivitySummary(context.Background(), d, since, "project", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -624,7 +624,7 @@ func TestActivitySummaryCountsParentAndChildrenAsOne(t *testing.T) {
 	addMsg(t, d, "agent-C", 0, "user", "child msg")
 
 	since := time.Now().Add(-24 * time.Hour).Unix()
-	buckets, err := ActivitySummary(context.Background(), d, since, "project")
+	buckets, err := ActivitySummary(context.Background(), d, since, "project", "")
 	if err != nil {
 		t.Fatal(err)
 	}

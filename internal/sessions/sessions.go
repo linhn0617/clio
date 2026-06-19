@@ -152,21 +152,27 @@ var (
 	ErrAmbiguous = errors.New("ambiguous session id prefix")
 )
 
-// ResolvePrefix resolves a full uuid or unambiguous prefix to a Session.
-func ResolvePrefix(ctx context.Context, database *db.DB, prefix string) (Session, error) {
-	const cols = `uuid, COALESCE(project_path,''), COALESCE(title,''), COALESCE(started_at,0), COALESCE(ended_at,0), turn_count, COALESCE(parent_session,''), COALESCE(agent_type,'')`
-	// Exact match wins regardless of how many prefixes also match.
+// ResolvePrefix resolves a full uuid or unambiguous prefix to a Session. An exact
+// uuid match is honored regardless of source (an exact id is explicit intent); a
+// prefix match is restricted to the requested source ("" / "claude-code" default),
+// so a short prefix never reaches across tools unless asked.
+func ResolvePrefix(ctx context.Context, database *db.DB, prefix, source string) (Session, error) {
+	const cols = `uuid, COALESCE(project_path,''), COALESCE(title,''), COALESCE(started_at,0), COALESCE(ended_at,0), turn_count, COALESCE(parent_session,''), COALESCE(agent_type,''), COALESCE(source,'claude-code')`
+	// Exact match wins regardless of how many prefixes also match, and regardless of source.
 	var s Session
 	err := database.QueryRowContext(ctx, `SELECT `+cols+` FROM sessions WHERE uuid = ?`, prefix).
-		Scan(&s.UUID, &s.ProjectPath, &s.Title, &s.StartedAt, &s.EndedAt, &s.TurnCount, &s.ParentSession, &s.AgentType)
+		Scan(&s.UUID, &s.ProjectPath, &s.Title, &s.StartedAt, &s.EndedAt, &s.TurnCount, &s.ParentSession, &s.AgentType, &s.Source)
 	switch {
 	case err == nil:
 		return s, nil
 	case !errors.Is(err, sql.ErrNoRows):
 		return Session{}, err
 	}
-	// No exact match: resolve by unique prefix (escaped, cap 2 to detect ambiguity).
-	rows, err := database.QueryContext(ctx, `SELECT `+cols+` FROM sessions WHERE uuid LIKE ? ESCAPE '\' LIMIT 2`, db.EscapeLike(prefix)+"%")
+	// No exact match: resolve by unique prefix (escaped, cap 2 to detect ambiguity),
+	// scoped to the requested source.
+	srcClause, srcArgs := db.SourceFilter("source", source)
+	args := append([]any{db.EscapeLike(prefix) + "%"}, srcArgs...)
+	rows, err := database.QueryContext(ctx, `SELECT `+cols+` FROM sessions WHERE uuid LIKE ? ESCAPE '\'`+srcClause+` LIMIT 2`, args...)
 	if err != nil {
 		return Session{}, err
 	}
@@ -174,7 +180,7 @@ func ResolvePrefix(ctx context.Context, database *db.DB, prefix string) (Session
 	var matches []Session
 	for rows.Next() {
 		var m Session
-		if err := rows.Scan(&m.UUID, &m.ProjectPath, &m.Title, &m.StartedAt, &m.EndedAt, &m.TurnCount, &m.ParentSession, &m.AgentType); err != nil {
+		if err := rows.Scan(&m.UUID, &m.ProjectPath, &m.Title, &m.StartedAt, &m.EndedAt, &m.TurnCount, &m.ParentSession, &m.AgentType, &m.Source); err != nil {
 			return Session{}, err
 		}
 		matches = append(matches, m)
@@ -300,12 +306,13 @@ type ActivityCount struct {
 
 // ActivityByKind returns the most frequent activity values of a kind
 // (file|command|tool|pattern|url), optionally bounded by time and project.
-func ActivityByKind(ctx context.Context, database *db.DB, kind string, since int64, projectPrefix string, limit int) ([]ActivityCount, error) {
+func ActivityByKind(ctx context.Context, database *db.DB, kind string, since int64, projectPrefix, source string, limit int) ([]ActivityCount, error) {
 	if limit <= 0 {
 		limit = 50
 	}
+	srcClause, srcArgs := db.SourceFilter("s.source", source)
 	q := `SELECT tt.value, COUNT(*) FROM tool_targets tt`
-	if projectPrefix != "" {
+	if projectPrefix != "" || srcClause != "" {
 		q += ` JOIN sessions s ON s.uuid = tt.session_uuid`
 	}
 	q += ` WHERE tt.kind = ?`
@@ -317,6 +324,10 @@ func ActivityByKind(ctx context.Context, database *db.DB, kind string, since int
 	if since > 0 {
 		q += ` AND tt.ts >= ?`
 		args = append(args, since)
+	}
+	if srcClause != "" {
+		q += srcClause
+		args = append(args, srcArgs...)
 	}
 	q += ` GROUP BY tt.value ORDER BY COUNT(*) DESC, tt.value LIMIT ?`
 	args = append(args, limit)
@@ -352,11 +363,12 @@ func GetRecall(ctx context.Context, database *db.DB, projectPrefix string, since
 	if err != nil {
 		return Recall{}, err
 	}
-	files, err := ActivityByKind(ctx, database, "file", since, projectPrefix, limitActivity)
+	// Recall is Claude-Code-only by policy: pass the default ("") source.
+	files, err := ActivityByKind(ctx, database, "file", since, projectPrefix, "", limitActivity)
 	if err != nil {
 		return Recall{}, err
 	}
-	commands, err := ActivityByKind(ctx, database, "command", since, projectPrefix, limitActivity)
+	commands, err := ActivityByKind(ctx, database, "command", since, projectPrefix, "", limitActivity)
 	if err != nil {
 		return Recall{}, err
 	}
@@ -371,7 +383,7 @@ type Bucket struct {
 }
 
 // ActivitySummary aggregates activity since a time, grouped by "day" or "project".
-func ActivitySummary(ctx context.Context, database *db.DB, since int64, groupBy string) ([]Bucket, error) {
+func ActivitySummary(ctx context.Context, database *db.DB, since int64, groupBy, source string) ([]Bucket, error) {
 	var keyExpr string
 	switch groupBy {
 	case "project":
@@ -384,13 +396,15 @@ func ActivitySummary(ctx context.Context, database *db.DB, since int64, groupBy 
 	// COALESCE to the parent's uuid only when that parent actually exists (p.uuid),
 	// so a parent + its subagents count once, while orphan subagents of an absent
 	// parent each count on their own.
+	srcClause, srcArgs := db.SourceFilter("s.source", source)
 	q := `SELECT ` + keyExpr + ` AS k, COUNT(DISTINCT COALESCE(p.uuid, s.uuid)), COUNT(m.id)
 		FROM sessions s
 		LEFT JOIN messages m ON m.session_uuid = s.uuid
 		LEFT JOIN sessions p ON p.uuid = s.parent_session
-		WHERE s.ended_at >= ?
+		WHERE s.ended_at >= ?` + srcClause + `
 		GROUP BY k ORDER BY k DESC`
-	rows, err := database.QueryContext(ctx, q, since)
+	args := append([]any{since}, srcArgs...)
+	rows, err := database.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
