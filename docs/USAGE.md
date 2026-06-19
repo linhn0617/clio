@@ -78,7 +78,7 @@ The MCP server exposes five tools / MCP server 提供五個工具：
 |------|---------|------|
 | `search` | Full-text search across all conversations (tool output excluded by default) | 跨所有對話全文搜尋（預設排除 tool output） |
 | `ask` | Cited evidence bundle answering a question (windowed excerpts grouped by session) for Claude to synthesize from | 回答問題的帶引用證據包（依 session 分組的加窗片段），交給 Claude 合成 |
-| `list_sessions` | List sessions by date/project/turn, or file touched / tool used / command run (subagents hidden unless `include_subagents`) | 依日期/專案/turn，或動過的檔／用過的工具／跑過的指令列出 session（除非給 `include_subagents`，否則隱藏子代理） |
+| `list_sessions` | List sessions by date/project/turn, or file touched / tool used / command run (subagent children excluded by default; `include_subagents` includes them) | 依日期/專案/turn，或動過的檔／用過的工具／跑過的指令列出 session（子代理子項預設不列入；`include_subagents` 會列入） |
 | `activity_summary` | Counts by day/project, or most-used files/commands/tools/patterns/URLs | 依天/專案，或最常動的檔/指令/工具/pattern/URL 統計 |
 | `read_session` | Read one session in full, paginated; reports a parent's subagents (`include_subagents` inlines their messages) | 分頁讀取單一 session 全文；回報母體的子代理（`include_subagents` 連訊息一起內嵌） |
 
@@ -250,13 +250,13 @@ Claude Code 的 Task 工具會派出**子代理**（例如 `general-purpose`、`
 - **`clio list`** hides subagents by default and tags a parent with `(+N subagents)`; `--include-subagents` lists them too. (A subagent whose parent isn't in the current listing — filtered out by `--since`/`--project` or past the `--limit` — is still shown, so recent work is never lost.)
 - **`clio show <parent>`** lists the parent's subagents (id · type · title); `--include-subagents` inlines their transcripts (subject to `--limit`). `clio show <agent-id>` reads one subagent, with a header naming its parent and type.
 - **`clio search`** still finds subagent content and labels such hits with `↳<type>`.
-- **TUI Browse** nests subagents under their parent (`Enter` to expand/collapse).
+- **TUI Browse** nests a parent's subagents beneath it (`Enter` to expand/collapse); a subagent whose parent isn't on the current page appears as its own row.
 - **MCP** mirrors this: `list_sessions` and `read_session` take an `include_subagents` parameter, and `search` results carry `parent_session` / `agent_type`.
 
 - **`clio list`**：預設隱藏子代理，並在母 session 標 `(+N subagents)`；`--include-subagents` 連子代理一起列。（若某子代理的母體不在當前清單裡——被 `--since`/`--project` 濾掉或超出 `--limit`——它仍會顯示，近期工作不會遺漏。）
 - **`clio show <母體>`**：列出該母體的子代理（id · 類型 · 標題）；`--include-subagents` 內嵌它們的逐字稿（受 `--limit` 限制）。`clio show <agent-id>` 讀單一子代理，並在開頭標明其母體與類型。
 - **`clio search`**：照樣搜得到子代理內容，並把這類命中標上 `↳<類型>`。
-- **TUI Browse**：把子代理巢狀在母體底下（`Enter` 展開／收合）。
+- **TUI Browse**：把子代理巢狀在母體底下（`Enter` 展開／收合）；母體不在當頁的子代理會自成一列。
 - **MCP**：同步支援 —— `list_sessions`、`read_session` 接受 `include_subagents` 參數，`search` 結果帶 `parent_session` / `agent_type`。
 
 ### `clio activity` — what you worked on / 你做了什麼
