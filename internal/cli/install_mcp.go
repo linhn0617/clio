@@ -26,8 +26,8 @@ func newInstallMCPCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, err := os.Stat(projects); err != nil {
-				return fmt.Errorf("claude projects dir not found at %s: %w", projects, err)
+			if _, err := os.Stat(projects); err != nil && !codexAvailable() {
+				return fmt.Errorf("no sessions to index: neither %s nor a Codex sessions dir exists: %w", projects, err)
 			}
 			dbPath, err := config.DBPath()
 			if err != nil {

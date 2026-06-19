@@ -118,6 +118,36 @@ func TestIngestAllIngestsCodexWhenClaudeRootMissing(t *testing.T) {
 	}
 }
 
+func TestPurgeMissingClearsStaleSourceConflict(t *testing.T) {
+	projects := t.TempDir()
+	ccFile := writeSession(t, projects, "-Users-lin-Herd-x", "dup-2", evUser1, evUser2)
+	database := openTestDB(t)
+	if _, err := database.Exec(`INSERT INTO sessions(uuid, source_file, turn_count, source) VALUES ('dup-2','/codex/dup-2.jsonl',0,'codex')`); err != nil {
+		t.Fatal(err)
+	}
+	ing := New(database, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	database.QueryRow(`SELECT COUNT(*) FROM source_conflicts`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("expected 1 conflict recorded, got %d", n)
+	}
+	// Delete the conflicting transcript; purge must clear its stale conflict record
+	// (a refused file is never in ingest_state, so this is its only cleanup path).
+	if err := os.Remove(ccFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	database.QueryRow(`SELECT COUNT(*) FROM source_conflicts`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("stale conflict not cleared after the file was deleted, got %d", n)
+	}
+}
+
 func TestPurgeMissingPreservesUnavailableCodexRoot(t *testing.T) {
 	ccRoot := t.TempDir()
 	codexRoot := t.TempDir()

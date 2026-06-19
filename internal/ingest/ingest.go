@@ -576,6 +576,11 @@ func (ing *Ingester) PurgeMissing(ctx context.Context, projectsDir string) error
 		return nil // no root readable — never read that as "the user deleted everything"
 	}
 
+	// A refused (conflicting) file has no ingest_state/sessions row, so it never enters
+	// the purge candidate set below; clear its source_conflicts record here if the file
+	// is gone (under an available root), so doctor stops reporting a deleted transcript.
+	ing.purgeStaleConflicts(avail)
+
 	srcs, err := ing.allSourceFiles()
 	if err != nil {
 		return err
@@ -621,6 +626,38 @@ func (ing *Ingester) PurgeMissing(ctx context.Context, projectsDir string) error
 		}
 	}
 	return nil
+}
+
+// purgeStaleConflicts drops source_conflicts rows whose file (under an available root)
+// no longer exists, so doctor doesn't keep reporting a conflict for a deleted
+// transcript. A refused file has no ingest_state/sessions row, so it never reaches the
+// normal purge path; this is its dedicated cleanup. Files under an unavailable root are
+// preserved (the root may just be unmounted).
+func (ing *Ingester) purgeStaleConflicts(availRoots []string) {
+	rows, err := ing.db.Query(`SELECT source_file FROM source_conflicts`)
+	if err != nil {
+		ing.log.Warn("read source_conflicts failed", "err", err)
+		return
+	}
+	var stale []string
+	for rows.Next() {
+		var sf string
+		if rows.Scan(&sf) != nil {
+			continue
+		}
+		if !pathUnderAny(sf, availRoots) {
+			continue
+		}
+		if _, serr := os.Stat(sf); errors.Is(serr, fs.ErrNotExist) {
+			stale = append(stale, sf)
+		}
+	}
+	rows.Close()
+	for _, sf := range stale {
+		if _, err := ing.db.Exec(`DELETE FROM source_conflicts WHERE source_file = ?`, sf); err != nil {
+			ing.log.Warn("clear stale conflict failed", "file", sf, "err", err)
+		}
+	}
 }
 
 func (ing *Ingester) allSourceFiles() ([]string, error) {

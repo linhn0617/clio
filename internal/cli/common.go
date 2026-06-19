@@ -31,6 +31,17 @@ func validateSource(s string) error {
 	}
 }
 
+// codexAvailable reports whether the Codex sessions dir exists, so a Codex-only
+// machine (no ~/.claude/projects) can still bootstrap and index.
+func codexAvailable() bool {
+	dir, err := config.CodexSessionsDir()
+	if err != nil {
+		return false
+	}
+	fi, serr := os.Stat(dir)
+	return serr == nil && fi.IsDir()
+}
+
 func stderrLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 }
