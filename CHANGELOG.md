@@ -5,6 +5,40 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-06-19
+
+clio now indexes **OpenAI Codex CLI** history (`~/.codex/sessions`) alongside Claude
+Code, behind an opt-in `--source` filter. Ingestion became pluggable, so default
+behavior is unchanged — every command stays Claude-Code-only until you ask for more
+with `--source codex` or `--source all`.
+
+### Added
+
+- Codex CLI ingestion: append-only rollout transcripts under `~/.codex/sessions` are
+  indexed as `codex` sessions (project path from the real `cwd`; the API `response_item`
+  stream is authoritative, the duplicate UI event stream skipped, harness wrapper blocks
+  stripped). `clio index` and the MCP server pick them up automatically when Codex is
+  installed — including on Codex-only machines with no `~/.claude/projects`.
+- `--source claude-code|codex|all` (default `claude-code`) on `clio search`, `list`,
+  `show`, `ask`, `activity`, and `clio tui` (launch flag + `[codex]` row labels); the
+  five MCP read tools gain a matching `source` parameter, and results carry their source.
+- A `source` column on sessions; cross-source UUID collisions fail closed — detected
+  inside the ingest transaction, refused without writing rows, and recorded for
+  `clio doctor`.
+
+### Changed
+
+- The ingester is now a pluggable source-adapter SPI: Claude Code ingestion is one
+  adapter (behavior unchanged), Codex another. The file watcher live-watches every
+  source root, and deletion reconciliation is partitioned per root so a
+  temporarily-unavailable source can't purge its index. `clio doctor` is source-aware.
+
+### Notes
+
+- `clio recall` stays Claude-Code-only by design. Codex activity breakdowns
+  (`clio activity --by command --source codex`, `--ran`/`--touched` over Codex) are not
+  extracted yet — a planned follow-up.
+
 ## [0.8.0] - 2026-06-19
 
 Claude Code runs subagents (the Task tool) and stores each one's transcript in its
