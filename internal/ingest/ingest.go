@@ -31,18 +31,28 @@ var errSourceConflict = errors.New("session uuid already owned by a different so
 type Ingester struct {
 	db  *db.DB
 	log *slog.Logger
+	// sources is the registry of ingestion adapters, consulted in order; the
+	// claude-code fallback is last. A file is routed to the first source that owns it.
+	sources []Source
 	// preCommitHook, if non-nil, runs inside commit() just after BEGIN and
 	// before any writes. Tests use it to mutate the on-disk file and exercise
 	// the re-validation guard. Always nil in production.
 	preCommitHook func()
 }
 
-// New returns an Ingester. If log is nil, logging is discarded.
+// New returns an Ingester with the claude-code source registered. If log is nil,
+// logging is discarded.
 func New(database *db.DB, log *slog.Logger) *Ingester {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Ingester{db: database, log: log}
+	return &Ingester{db: database, log: log, sources: []Source{claudeCodeSource{}}}
+}
+
+// AddSource registers an additional ingestion adapter, consulted before the
+// claude-code fallback so its more specific Owns() wins.
+func (ing *Ingester) AddSource(s Source) {
+	ing.sources = append([]Source{s}, ing.sources...)
 }
 
 // Stats summarizes an ingest run.
@@ -61,8 +71,23 @@ func (ing *Ingester) IngestAll(ctx context.Context, projectsDir string, force bo
 	if err != nil {
 		return Stats{}, err
 	}
+	// Span every registered source: a missing/unavailable extra root (e.g. Codex not
+	// installed) is logged inside extraRoots/WalkSessionFiles, never fatal.
+	for _, root := range ing.extraRoots() {
+		more, werr := WalkSessionFiles(root, ing.log)
+		if werr != nil {
+			ing.log.Warn("walk source root failed", "root", root, "err", werr)
+			continue
+		}
+		files = append(files, more...)
+	}
 	var st Stats
+	seen := make(map[string]bool, len(files))
 	for _, f := range files {
+		if seen[f] { // de-dup overlapping roots
+			continue
+		}
+		seen[f] = true
 		if err := ctx.Err(); err != nil {
 			return st, err
 		}
@@ -88,6 +113,10 @@ func (ing *Ingester) IngestAll(ctx context.Context, projectsDir string, force bo
 func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (int, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, false, err
+	}
+	src := ing.sourceFor(path)
+	if src == nil {
+		return 0, false, nil // no source adapter owns this path
 	}
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -143,27 +172,21 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 
 	startSeq := 0
 	if kind == changeIncremental {
-		startSeq, err = ing.maxSeq(sessionUUIDFromPath(path))
+		startSeq, err = ing.maxSeq(src.SessionIDFromPath(path))
 		if err != nil {
 			return 0, false, err
 		}
 		startSeq++
 	}
 
-	parser := NewParser(startSeq)
-	if excluded, err := ing.loadExcludedToolUses(); err != nil {
-		ing.log.Warn("load excluded tool uses failed", "err", err)
-	} else {
-		parser.Seed(excluded)
-	}
-	msgs, sess, consumed, unparsed, err := ing.streamParse(f, startOffset, parser, path)
+	res, err := src.ParseFile(ing, f, startOffset, startSeq, path)
 	if err != nil {
 		return 0, false, err
 	}
-	if consumed == 0 {
+	if res.Consumed == 0 {
 		return 0, false, nil // no complete new line yet
 	}
-	newOffset := startOffset + consumed
+	newOffset := startOffset + res.Consumed
 
 	newTailFP, err := fingerprintAt(f, newOffset)
 	if err != nil {
@@ -174,7 +197,7 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 		return 0, false, err
 	}
 
-	n, err := ing.commit(kind, sess, msgs, parser.ClioToolUseIDs(), FileState{
+	n, err := ing.commit(kind, res.Session, res.Messages, res.ClioIDs, FileState{
 		SourceFile:      path,
 		LastSize:        size,
 		LastMTime:       mtime,
@@ -182,7 +205,7 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 		TailFingerprint: newTailFP,
 		HeadFingerprint: newHeadFP,
 		LastIngestedAt:  time.Now().Unix(),
-		UnparsedLines:   unparsed,
+		UnparsedLines:   res.Unparsed,
 	})
 	if err != nil {
 		if errors.Is(err, errStaleSnapshot) || errors.Is(err, errSourceConflict) {

@@ -86,6 +86,16 @@ func TestIngestRefusesCrossSourceUUIDCollision(t *testing.T) {
 	}
 }
 
+func TestSourceForRoutesToClaudeCodeFallback(t *testing.T) {
+	ing := New(openTestDB(t), nil)
+	if src := ing.sourceFor("/x/abc.jsonl"); src == nil || src.Name() != "claude-code" {
+		t.Fatalf("expected the claude-code fallback for a .jsonl path, got %v", src)
+	}
+	if src := ing.sourceFor("/x/not-a-transcript.txt"); src != nil {
+		t.Fatalf("expected no owner for a non-.jsonl path, got %v", src.Name())
+	}
+}
+
 func TestIngestRecordsClaudeCodeSource(t *testing.T) {
 	projects := t.TempDir()
 	writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evUser2)
