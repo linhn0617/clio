@@ -43,6 +43,8 @@ func TestCodexExtractTargets(t *testing.T) {
 		{"shell no -c flag joins argv", "shell", `{"command":["weird","arg1"]}`, []model.ToolTarget{tool("shell"), cmd("weird arg1")}},
 		{"shell -c with no script -> tool-only", "shell", `{"command":["bash","-c"]}`, []model.ToolTarget{tool("shell")}},
 		{"shell -lc whitespace script -> tool-only", "shell", `{"command":["bash","-lc","   "]}`, []model.ToolTarget{tool("shell")}},
+		{"shell non-shell argv0 joins (no -abc false positive)", "shell", `{"command":["weird","-abc","payload"]}`, []model.ToolTarget{tool("shell"), cmd("weird -abc payload")}},
+		{"shell interpreter with no command flag joins", "shell", `{"command":["bash","script.sh"]}`, []model.ToolTarget{tool("shell"), cmd("bash script.sh")}},
 		{"view_image", "view_image", `{"path":"/repo/diagram.png"}`, []model.ToolTarget{tool("view_image"), file("/repo/diagram.png")}},
 		{"update_plan tool-only", "update_plan", `{"plan":[{"status":"pending","step":"x"}]}`, []model.ToolTarget{tool("update_plan")}},
 		{"write_stdin tool-only", "write_stdin", `{"session_id":1,"chars":"y"}`, []model.ToolTarget{tool("write_stdin")}},

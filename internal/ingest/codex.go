@@ -328,21 +328,38 @@ func codexShellCommand(raw json.RawMessage) string {
 		return strings.TrimSpace(s)
 	}
 	var argv []string
-	if json.Unmarshal(raw, &argv) != nil {
+	if json.Unmarshal(raw, &argv) != nil || len(argv) == 0 {
 		return ""
 	}
-	for i := 0; i < len(argv); i++ {
-		if isShellCommandFlag(argv[i]) {
-			// The script is the element after the command flag. A command flag with no
-			// usable following element is a malformed/scriptless invocation: yield no
-			// command rather than falling back to the wrapper argv.
-			if i+1 < len(argv) {
-				return strings.TrimSpace(argv[i+1])
+	// Only parse a script-after-flag when argv is actually launching a shell (always
+	// ["bash","-lc",script] in the corpus); otherwise the joined argv is the best command
+	// text. This keeps a non-shell flag like "-abc" from being misread as a command flag.
+	if isShellInterpreter(argv[0]) {
+		for i := 1; i < len(argv); i++ {
+			if isShellCommandFlag(argv[i]) {
+				// A command flag with no usable following element is a malformed /
+				// scriptless invocation: yield no command, not the wrapper argv.
+				if i+1 < len(argv) {
+					return strings.TrimSpace(argv[i+1])
+				}
+				return ""
 			}
-			return ""
 		}
 	}
 	return strings.TrimSpace(strings.Join(argv, " "))
+}
+
+// isShellInterpreter reports whether arg names a shell (optionally path-qualified) —
+// i.e. argv[0] of a `bash -lc <script>`-style invocation.
+func isShellInterpreter(arg string) bool {
+	if i := strings.LastIndexByte(arg, '/'); i >= 0 {
+		arg = arg[i+1:]
+	}
+	switch arg {
+	case "bash", "sh", "zsh", "dash", "ksh":
+		return true
+	}
+	return false
 }
 
 // isShellCommandFlag reports whether f is a shell "run this command" flag: -c, or a
