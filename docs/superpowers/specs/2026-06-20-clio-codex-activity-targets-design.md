@@ -71,9 +71,12 @@ func codexCommandTarget(name string, args json.RawMessage) (kind, value string, 
 
 Mapping:
 - `exec_command` → (`command`, `cmd`) where `cmd` is a non-empty string.
-- `shell` → (`command`, script) where the `command` array is `["bash","-lc", script]`. If the
-  array doesn't match that shape (defensive, for future Codex versions / other shells), fall
-  back to `strings.Join(command, " ")`. Recognize both `-lc` and `-c`.
+- `shell` → (`command`, script). The `command` array is the shell argv (always
+  `["bash","-lc", script]` in the corpus). Extract robustly: scan argv for the shell command
+  flag — an element equal to `-c`, or a combined short flag that ends in `c` (e.g. `-lc`,
+  `-ic`) — and take the **next** element as the script. This survives `["/bin/bash","-lc",X]`,
+  `["bash","-l","-c",X]`, and extra flags (codex P2). Only if no such flag is found, fall back
+  to `strings.Join(command, " ")`.
 - `view_image` → (`file`, `path`) where `path` is a non-empty string.
 - everything else (`write_stdin`, `update_plan`, `_*`, unknown) → ok=false.
 
@@ -82,9 +85,12 @@ Mapping:
 ```go
 func codexExtractTargets(name string, args json.RawMessage) []model.ToolTarget
 ```
-- Mirrors the shared `extractTargets` contract: first fact is always `{TargetTool, name}`
-  (empty name ⇒ nil).
-- If `codexCommandTarget` returns ok, append `{kind, capValue(redactString(value))}`.
+- Mirrors the shared `extractTargets` contract **fully**: `name == ""` ⇒ nil; a name with the
+  `clioMCPToolPrefix` (clio's own MCP tools) ⇒ nil — so clio never indexes its own MCP traffic,
+  even if clio is registered as an MCP server inside Codex too (codex P2, mirrors activity.go:33).
+  Otherwise the first fact is always `{TargetTool, name}`.
+- If `codexCommandTarget` returns ok, append `{kind, capValue(redactString(value))}` — redact
+  **before** cap, the same order as the Claude path.
 - Value is redacted (args are unredacted here — `p.Arguments` comes from the parsed envelope,
   not the redacted `raw`) and capped at `maxTargetValueBytes` (512B), identical to the Claude path.
 
@@ -98,9 +104,15 @@ Replace with a Codex-aware summary derived from the same helper:
 kind, value, ok := codexCommandTarget(p.Name, args)
 summary := ""
 if ok {
-    summary = redactString(firstLine(value, 200))
+    summary = firstLine(redactString(value), 200) // redact BEFORE truncating
 }
 ```
+- **Redaction order matters (codex P1).** Redact the *full* value first, then take the first
+  line / cap. Truncating first (as the shared `toolUseSummary` does) can slice through a secret
+  so the redaction regex no longer matches, leaking a partial token into `messages.content` /
+  `tool_calls.params_summary` / FTS. The new Codex path redacts first. The pre-existing
+  truncate-then-redact order in `toolUseSummary` (parser.go:168, Claude path) is a *separate*
+  pre-existing issue, **out of scope here** and flagged to the maintainer (§7).
 - Message `Content` becomes `strings.TrimSpace(p.Name + " " + summary)` (e.g.
   `exec_command git status --short`); `ToolCall.ParamsSummary` carries the same — so `clio show`
   and the FTS content for that message now show the actual command/file.
@@ -137,8 +149,17 @@ Codex test fixture from #5-A.
 
 ### 6.2 Unit — `codexExtractTargets` / `codexCommandTarget`
 Table-driven: each tool name + representative args → expected `[]ToolTarget` (tool fact
-first; command/file fact where applicable; tool-only for the rest). Includes the defensive
-`shell` fallback (non-`bash -lc` array) and the apply_patch-as-command case.
+first; command/file fact where applicable; tool-only for the rest). Cases:
+- `exec_command` → command; `shell` `["bash","-lc",X]` → command (`X`).
+- `shell` argv variants `["/bin/bash","-lc",X]` and `["bash","-l","-c",X]` → command (`X`), **not**
+  the wrapper argv (codex P2).
+- `shell` with no `-c`/`-lc` flag → `strings.Join` fallback.
+- `view_image` → file (`path`); `write_stdin` / `update_plan` / `_fetch_pr` / unknown → tool-only.
+- A `clioMCPToolPrefix` name (`mcp__clio__*`) → nil (codex P2).
+- apply_patch-as-command (`cmd` is an `apply_patch` heredoc) → command (capped).
+- **Redaction (codex P1): a command/path carrying a secret pattern → both the target value and
+  the derived summary are fully redacted, with no partial leak even when the secret sits past
+  byte 200.**
 
 ### 6.3 Ingest + query end-to-end
 Parse the fixture through `codexSource.ParseFile`, commit into a temp DB, then assert:
@@ -153,8 +174,18 @@ Parse the fixture through `codexSource.ParseFile`, commit into a temp DB, then a
 - Any change to Claude Code extraction, `activityField`, or `BackfillActivity`.
 - A dedicated Codex backfill routine (use `clio index --full`).
 - `update_plan` step text, `write_stdin` content, or PR-MCP args as targets.
+- **Flagged, not fixed:** `toolUseSummary` (parser.go:168) truncates before redacting — a
+  pre-existing partial-secret-leak risk on the **Claude** path. The new Codex summary avoids it
+  (§4.3); fixing the shared helper is a separate change, deferred.
 
 ## 8. Downstream workflow
 openspec change (`validate --strict`) → TDD (this spec) → codex review of the real diff
 (multi-round to clean) → Claude `/review` → PR (await authorization) → merge → openspec
 archive → release v0.9.1 (CHANGELOG + README×2 version bump + tag → release.yml).
+
+## 9. Codex design-review log
+- **Round 1 (2026-06-20):** 1 P1 + 2 P2 — summary redaction order (P1), missing
+  `clioMCPToolPrefix` exclusion (P2), weak `shell` argv parsing (P2). All three addressed in §4.
+  Codex independently confirmed the read path is already source-aware (query layer needs no
+  change) and that `index --full` hard-deletes `tool_targets` before re-insert (no stale/double
+  rows).
