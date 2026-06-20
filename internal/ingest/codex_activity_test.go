@@ -41,6 +41,8 @@ func TestCodexExtractTargets(t *testing.T) {
 		{"shell split -l -c", "shell", `{"command":["bash","-l","-c","echo hi"]}`, []model.ToolTarget{tool("shell"), cmd("echo hi")}},
 		{"shell string form (legacy fixture)", "shell", `{"command":"ls"}`, []model.ToolTarget{tool("shell"), cmd("ls")}},
 		{"shell no -c flag joins argv", "shell", `{"command":["weird","arg1"]}`, []model.ToolTarget{tool("shell"), cmd("weird arg1")}},
+		{"shell -c with no script -> tool-only", "shell", `{"command":["bash","-c"]}`, []model.ToolTarget{tool("shell")}},
+		{"shell -lc whitespace script -> tool-only", "shell", `{"command":["bash","-lc","   "]}`, []model.ToolTarget{tool("shell")}},
 		{"view_image", "view_image", `{"path":"/repo/diagram.png"}`, []model.ToolTarget{tool("view_image"), file("/repo/diagram.png")}},
 		{"update_plan tool-only", "update_plan", `{"plan":[{"status":"pending","step":"x"}]}`, []model.ToolTarget{tool("update_plan")}},
 		{"write_stdin tool-only", "write_stdin", `{"session_id":1,"chars":"y"}`, []model.ToolTarget{tool("write_stdin")}},
@@ -152,5 +154,18 @@ func TestCodexActivityTargetsEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(content, "git status --short") {
 		t.Fatalf("tool_use content %q does not include the command (summary fix)", content)
+	}
+
+	// clio's own MCP traffic from Codex must not be indexed (mirror the Claude path:
+	// skip the tool_use and its matching tool_result).
+	var clioMsgs int
+	database.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_uuid=? AND content LIKE 'mcp__clio__%'`, codexActivityUUID).Scan(&clioMsgs)
+	if clioMsgs != 0 {
+		t.Fatalf("clio MCP tool_use indexed for codex: want 0, got %d", clioMsgs)
+	}
+	var clioResults int
+	database.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_uuid=? AND content LIKE '%CLIO_MCP_RESULT_SHOULD_NOT_BE_INDEXED%'`, codexActivityUUID).Scan(&clioResults)
+	if clioResults != 0 {
+		t.Fatalf("clio MCP tool_result indexed for codex: want 0, got %d", clioResults)
 	}
 }

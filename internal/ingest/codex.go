@@ -74,6 +74,7 @@ type codexPayload struct {
 	Summary   json.RawMessage `json:"summary"`   // reasoning: block array
 	Name      string          `json:"name"`      // function_call
 	Arguments string          `json:"arguments"` // function_call: JSON string
+	CallID    string          `json:"call_id"`   // function_call / function_call_output
 	Output    json.RawMessage `json:"output"`    // function_call_output: string or blocks
 	ID        string          `json:"id"`        // session_meta
 	CWD       string          `json:"cwd"`       // session_meta / turn_context
@@ -95,6 +96,7 @@ func (s codexSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, sta
 	var msgs []model.Message
 	var consumed, unparsed int64
 	seq := startSeq
+	skipped := map[string]bool{} // call_ids of skipped clio MCP calls, so their outputs drop too
 
 	add := func(ts int64, role, content, raw string, tcs []model.ToolCall, targets []model.ToolTarget) {
 		content = strings.TrimSpace(content)
@@ -193,11 +195,22 @@ func (s codexSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, sta
 					add(ts, model.RoleThinking, text, raw, nil, nil)
 				}
 			case "function_call":
+				// Skip clio's own MCP traffic entirely (call + its output), mirroring the
+				// Claude path, so clio never indexes its own MCP calls/results.
+				if strings.HasPrefix(p.Name, clioMCPToolPrefix) {
+					if p.CallID != "" {
+						skipped[p.CallID] = true
+					}
+					continue
+				}
 				args := json.RawMessage(p.Arguments)
 				summary := codexToolSummary(p.Name, args)
 				add(ts, model.RoleToolUse, strings.TrimSpace(p.Name+" "+summary), raw,
 					[]model.ToolCall{{ToolName: p.Name, ParamsSummary: summary}}, codexExtractTargets(p.Name, args))
 			case "function_call_output":
+				if p.CallID != "" && skipped[p.CallID] {
+					continue
+				}
 				add(ts, model.RoleToolResult, codexOutputText(p.Output), raw, nil, nil)
 			}
 		}
@@ -318,11 +331,15 @@ func codexShellCommand(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &argv) != nil {
 		return ""
 	}
-	for i := 0; i+1 < len(argv); i++ {
+	for i := 0; i < len(argv); i++ {
 		if isShellCommandFlag(argv[i]) {
-			if v := strings.TrimSpace(argv[i+1]); v != "" {
-				return v
+			// The script is the element after the command flag. A command flag with no
+			// usable following element is a malformed/scriptless invocation: yield no
+			// command rather than falling back to the wrapper argv.
+			if i+1 < len(argv) {
+				return strings.TrimSpace(argv[i+1])
 			}
+			return ""
 		}
 	}
 	return strings.TrimSpace(strings.Join(argv, " "))

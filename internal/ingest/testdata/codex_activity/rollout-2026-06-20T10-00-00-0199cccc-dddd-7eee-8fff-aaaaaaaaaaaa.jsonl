@@ -4,3 +4,5 @@
 {"timestamp":"2026-06-20T10:00:03Z","type":"response_item","payload":{"type":"function_call","name":"view_image","arguments":"{\"path\":\"/repo/diagram.png\"}","call_id":"c3"}}
 {"timestamp":"2026-06-20T10:00:04Z","type":"response_item","payload":{"type":"function_call","name":"update_plan","arguments":"{\"plan\":[{\"status\":\"pending\",\"step\":\"do x\"}]}","call_id":"c4"}}
 {"timestamp":"2026-06-20T10:00:05Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"export OPENAI_API_KEY=sk-DEADBEEFDEADBEEFDEADBEEF99\"}","call_id":"c5"}}
+{"timestamp":"2026-06-20T10:00:06Z","type":"response_item","payload":{"type":"function_call","name":"mcp__clio__search","arguments":"{\"query\":\"auth\"}","call_id":"c6"}}
+{"timestamp":"2026-06-20T10:00:07Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c6","output":"CLIO_MCP_RESULT_SHOULD_NOT_BE_INDEXED"}}
