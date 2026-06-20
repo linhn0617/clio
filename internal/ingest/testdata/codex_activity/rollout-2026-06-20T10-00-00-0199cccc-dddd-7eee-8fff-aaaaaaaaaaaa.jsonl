@@ -6,3 +6,5 @@
 {"timestamp":"2026-06-20T10:00:05Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"export OPENAI_API_KEY=sk-DEADBEEFDEADBEEFDEADBEEF99\"}","call_id":"c5"}}
 {"timestamp":"2026-06-20T10:00:06Z","type":"response_item","payload":{"type":"function_call","name":"mcp__clio__search","arguments":"{\"query\":\"auth\"}","call_id":"c6"}}
 {"timestamp":"2026-06-20T10:00:07Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c6","output":"CLIO_MCP_RESULT_SHOULD_NOT_BE_INDEXED"}}
+{"timestamp":"2026-06-20T10:00:08Z","type":"response_item","payload":{"type":"function_call","name":"mcp__clio__read_session","arguments":"{\"id\":\"x\"}","call_id":""}}
+{"timestamp":"2026-06-20T10:00:09Z","type":"response_item","payload":{"type":"function_call_output","call_id":"","output":"CLIO_MCP_EMPTYID_RESULT_SHOULD_NOT_BE_INDEXED"}}

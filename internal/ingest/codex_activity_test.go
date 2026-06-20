@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/linhn0617/clio/internal/model"
 	"github.com/linhn0617/clio/internal/sessions"
@@ -76,7 +77,7 @@ func TestCodexExtractTargetsRedactsSecret(t *testing.T) {
 }
 
 // TestCodexToolSummaryRedactsBeforeTruncate proves the summary redacts the full
-// value BEFORE truncating: a secret straddling the 200-rune firstLine boundary
+// value BEFORE truncating: a secret straddling the 200-byte firstLine boundary
 // would leak as a partial (regex-missed) token under a truncate-first order.
 func TestCodexToolSummaryRedactsBeforeTruncate(t *testing.T) {
 	cmd := strings.Repeat("a", 190) + " sk-DEADBEEFDEADBEEFDEADBEEF99"
@@ -125,6 +126,17 @@ func TestCodexActivityTargetsEndToEnd(t *testing.T) {
 			t.Fatalf("command %q not surfaced by ActivityByKind(codex); got %v", want, gotCmds)
 		}
 	}
+	// The secret command must survive as a redacted-but-nonempty command target
+	// (guards against over-redaction silently dropping the whole value).
+	redactedSeen := false
+	for v := range gotCmds {
+		if strings.Contains(v, "OPENAI_API_KEY") && strings.Contains(v, "REDACTED") {
+			redactedSeen = true
+		}
+	}
+	if !redactedSeen {
+		t.Fatalf("redacted secret command not surfaced (over-redaction dropped it?); got %v", gotCmds)
+	}
 
 	def, err := sessions.ActivityByKind(ctx, database, "command", 0, "", "", 50)
 	if err != nil {
@@ -150,6 +162,21 @@ func TestCodexActivityTargetsEndToEnd(t *testing.T) {
 		t.Fatalf("view_image path not surfaced as a codex file target; got %v", files)
 	}
 
+	// The always-emitted tool fact must persist and surface for the codex source.
+	tools, err := sessions.ActivityByKind(ctx, database, "tool", 0, "", "codex", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotTools := map[string]bool{}
+	for _, tt := range tools {
+		gotTools[tt.Value] = true
+	}
+	for _, want := range []string{"exec_command", "shell", "view_image", "update_plan"} {
+		if !gotTools[want] {
+			t.Fatalf("tool %q not surfaced by ActivityByKind(tool, codex); got %v", want, gotTools)
+		}
+	}
+
 	var content string
 	if err := database.QueryRow(`SELECT content FROM messages WHERE session_uuid=? AND role='tool_use' AND content LIKE 'exec_command git%' LIMIT 1`, codexActivityUUID).Scan(&content); err != nil {
 		t.Fatalf("no tool_use message with the command summary: %v", err)
@@ -169,5 +196,23 @@ func TestCodexActivityTargetsEndToEnd(t *testing.T) {
 	database.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_uuid=? AND content LIKE '%CLIO_MCP_RESULT_SHOULD_NOT_BE_INDEXED%'`, codexActivityUUID).Scan(&clioResults)
 	if clioResults != 0 {
 		t.Fatalf("clio MCP tool_result indexed for codex: want 0, got %d", clioResults)
+	}
+	// A clio MCP call + output that both lack a call_id must also be dropped
+	// (matches the Claude path, which has no call_id-presence guard).
+	var clioEmptyID int
+	database.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_uuid=? AND content LIKE '%CLIO_MCP_EMPTYID_RESULT%'`, codexActivityUUID).Scan(&clioEmptyID)
+	if clioEmptyID != 0 {
+		t.Fatalf("clio MCP output with empty call_id leaked into the index: want 0, got %d", clioEmptyID)
+	}
+}
+
+// TestCodexToolSummaryValidUTF8 ensures the summary is valid UTF-8 even when a
+// multibyte rune straddles the firstLine byte boundary (firstLine cuts on bytes).
+func TestCodexToolSummaryValidUTF8(t *testing.T) {
+	cmd := strings.Repeat("a", 199) + "中" // 中 is 3 bytes; the 200-byte cut splits it
+	args, _ := json.Marshal(map[string]string{"cmd": cmd})
+	got := codexToolSummary("exec_command", json.RawMessage(args))
+	if !utf8.ValidString(got) {
+		t.Fatalf("summary is not valid UTF-8: %q", got)
 	}
 }

@@ -196,11 +196,11 @@ func (s codexSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, sta
 				}
 			case "function_call":
 				// Skip clio's own MCP traffic entirely (call + its output), mirroring the
-				// Claude path, so clio never indexes its own MCP calls/results.
+				// Claude path, so clio never indexes its own MCP calls/results. No call_id
+				// presence guard: the Claude path has none either, and keying on "" still
+				// drops a matching empty-id output (only ever crafted/corrupt input).
 				if strings.HasPrefix(p.Name, clioMCPToolPrefix) {
-					if p.CallID != "" {
-						skipped[p.CallID] = true
-					}
+					skipped[p.CallID] = true
 					continue
 				}
 				args := json.RawMessage(p.Arguments)
@@ -208,7 +208,7 @@ func (s codexSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, sta
 				add(ts, model.RoleToolUse, strings.TrimSpace(p.Name+" "+summary), raw,
 					[]model.ToolCall{{ToolName: p.Name, ParamsSummary: summary}}, codexExtractTargets(p.Name, args))
 			case "function_call_output":
-				if p.CallID != "" && skipped[p.CallID] {
+				if skipped[p.CallID] {
 					continue
 				}
 				add(ts, model.RoleToolResult, codexOutputText(p.Output), raw, nil, nil)
@@ -388,7 +388,9 @@ func codexExtractTargets(name string, args json.RawMessage) []model.ToolTarget {
 // survives as a partial (regex-missed) token. Empty for tool-only calls.
 func codexToolSummary(name string, args json.RawMessage) string {
 	if _, value, ok := codexCommandTarget(name, args); ok {
-		return firstLine(redactString(value), 200)
+		// firstLine caps on bytes; trim any rune split at the cap so the summary
+		// (and the message content built from it) stays valid UTF-8.
+		return trimToValidUTF8(firstLine(redactString(value), 200))
 	}
 	return ""
 }
