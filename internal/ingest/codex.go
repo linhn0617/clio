@@ -194,9 +194,9 @@ func (s codexSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, sta
 				}
 			case "function_call":
 				args := json.RawMessage(p.Arguments)
-				summary := toolUseSummary(args)
+				summary := codexToolSummary(p.Name, args)
 				add(ts, model.RoleToolUse, strings.TrimSpace(p.Name+" "+summary), raw,
-					[]model.ToolCall{{ToolName: p.Name, ParamsSummary: summary}}, extractTargets(p.Name, args))
+					[]model.ToolCall{{ToolName: p.Name, ParamsSummary: summary}}, codexExtractTargets(p.Name, args))
 			case "function_call_output":
 				add(ts, model.RoleToolResult, codexOutputText(p.Output), raw, nil, nil)
 			}
@@ -261,6 +261,102 @@ func isCodexWrapper(t string) bool {
 		}
 	}
 	return false
+}
+
+// codexCommandTarget returns the domain activity fact (command or file) for a Codex
+// tool call, or ok=false for tool-only calls. The returned value is raw; callers redact it.
+//   - exec_command → its `cmd` string.
+//   - shell        → the executed script in its `command` argv (see codexShellCommand).
+//   - view_image   → its `path`.
+func codexCommandTarget(name string, args json.RawMessage) (kind, value string, ok bool) {
+	switch name {
+	case "exec_command":
+		var a struct {
+			Cmd string `json:"cmd"`
+		}
+		if json.Unmarshal(args, &a) == nil {
+			if v := strings.TrimSpace(a.Cmd); v != "" {
+				return model.TargetCommand, v, true
+			}
+		}
+	case "shell":
+		var a struct {
+			Command json.RawMessage `json:"command"`
+		}
+		if json.Unmarshal(args, &a) == nil {
+			if v := codexShellCommand(a.Command); v != "" {
+				return model.TargetCommand, v, true
+			}
+		}
+	case "view_image":
+		var a struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal(args, &a) == nil {
+			if v := strings.TrimSpace(a.Path); v != "" {
+				return model.TargetFile, v, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// codexShellCommand extracts the executed script from a Codex `shell` command value,
+// which is either a plain string or an argv array (always ["bash","-lc",script] in the
+// corpus). For an argv array it returns the element after the shell command flag (-c,
+// or a combined short flag ending in c such as -lc); if no such flag is present it joins
+// the argv. Empty string if nothing usable.
+func codexShellCommand(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return strings.TrimSpace(s)
+	}
+	var argv []string
+	if json.Unmarshal(raw, &argv) != nil {
+		return ""
+	}
+	for i := 0; i+1 < len(argv); i++ {
+		if isShellCommandFlag(argv[i]) {
+			if v := strings.TrimSpace(argv[i+1]); v != "" {
+				return v
+			}
+		}
+	}
+	return strings.TrimSpace(strings.Join(argv, " "))
+}
+
+// isShellCommandFlag reports whether f is a shell "run this command" flag: -c, or a
+// combined short flag ending in c (-lc, -ic, …). Long options (--config) are excluded.
+func isShellCommandFlag(f string) bool {
+	return f == "-c" || (len(f) >= 2 && f[0] == '-' && f[1] != '-' && strings.HasSuffix(f, "c"))
+}
+
+// codexExtractTargets turns one Codex function_call into activity facts: a `tool` fact
+// (the tool name) plus a domain fact (command/file) when the call provides one. It
+// mirrors the shared extractTargets contract — empty names and clio's own MCP tools
+// yield nothing. Values are redacted then capped, like the Claude path.
+func codexExtractTargets(name string, args json.RawMessage) []model.ToolTarget {
+	if name == "" || strings.HasPrefix(name, clioMCPToolPrefix) {
+		return nil
+	}
+	out := []model.ToolTarget{{Kind: model.TargetTool, Value: name}}
+	if kind, value, ok := codexCommandTarget(name, args); ok {
+		out = append(out, model.ToolTarget{Kind: kind, Value: capValue(redactString(value))})
+	}
+	return out
+}
+
+// codexToolSummary is the short, human-facing summary of a Codex tool call: the command
+// or file it acted on. It redacts the FULL value before truncating, so a secret never
+// survives as a partial (regex-missed) token. Empty for tool-only calls.
+func codexToolSummary(name string, args json.RawMessage) string {
+	if _, value, ok := codexCommandTarget(name, args); ok {
+		return firstLine(redactString(value), 200)
+	}
+	return ""
 }
 
 // codexOutputText flattens a function_call_output payload (a bare string, or blocks).
