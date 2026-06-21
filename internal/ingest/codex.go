@@ -74,6 +74,7 @@ type codexPayload struct {
 	Summary   json.RawMessage `json:"summary"`   // reasoning: block array
 	Name      string          `json:"name"`      // function_call
 	Arguments string          `json:"arguments"` // function_call: JSON string
+	CallID    string          `json:"call_id"`   // function_call / function_call_output
 	Output    json.RawMessage `json:"output"`    // function_call_output: string or blocks
 	ID        string          `json:"id"`        // session_meta
 	CWD       string          `json:"cwd"`       // session_meta / turn_context
@@ -95,6 +96,7 @@ func (s codexSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, sta
 	var msgs []model.Message
 	var consumed, unparsed int64
 	seq := startSeq
+	skipped := map[string]bool{} // call_ids of skipped clio MCP calls, so their outputs drop too
 
 	add := func(ts int64, role, content, raw string, tcs []model.ToolCall, targets []model.ToolTarget) {
 		content = strings.TrimSpace(content)
@@ -193,11 +195,22 @@ func (s codexSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, sta
 					add(ts, model.RoleThinking, text, raw, nil, nil)
 				}
 			case "function_call":
+				// Skip clio's own MCP traffic entirely (call + its output), mirroring the
+				// Claude path, so clio never indexes its own MCP calls/results. No call_id
+				// presence guard: the Claude path has none either, and keying on "" still
+				// drops a matching empty-id output (only ever crafted/corrupt input).
+				if strings.HasPrefix(p.Name, clioMCPToolPrefix) {
+					skipped[p.CallID] = true
+					continue
+				}
 				args := json.RawMessage(p.Arguments)
-				summary := toolUseSummary(args)
+				summary := codexToolSummary(p.Name, args)
 				add(ts, model.RoleToolUse, strings.TrimSpace(p.Name+" "+summary), raw,
-					[]model.ToolCall{{ToolName: p.Name, ParamsSummary: summary}}, extractTargets(p.Name, args))
+					[]model.ToolCall{{ToolName: p.Name, ParamsSummary: summary}}, codexExtractTargets(p.Name, args))
 			case "function_call_output":
+				if skipped[p.CallID] {
+					continue
+				}
 				add(ts, model.RoleToolResult, codexOutputText(p.Output), raw, nil, nil)
 			}
 		}
@@ -261,6 +274,125 @@ func isCodexWrapper(t string) bool {
 		}
 	}
 	return false
+}
+
+// codexCommandTarget returns the domain activity fact (command or file) for a Codex
+// tool call, or ok=false for tool-only calls. The returned value is raw; callers redact it.
+//   - exec_command → its `cmd` string.
+//   - shell        → the executed script in its `command` argv (see codexShellCommand).
+//   - view_image   → its `path`.
+func codexCommandTarget(name string, args json.RawMessage) (kind, value string, ok bool) {
+	switch name {
+	case "exec_command":
+		var a struct {
+			Cmd string `json:"cmd"`
+		}
+		if json.Unmarshal(args, &a) == nil {
+			if v := strings.TrimSpace(a.Cmd); v != "" {
+				return model.TargetCommand, v, true
+			}
+		}
+	case "shell":
+		var a struct {
+			Command json.RawMessage `json:"command"`
+		}
+		if json.Unmarshal(args, &a) == nil {
+			if v := codexShellCommand(a.Command); v != "" {
+				return model.TargetCommand, v, true
+			}
+		}
+	case "view_image":
+		var a struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal(args, &a) == nil {
+			if v := strings.TrimSpace(a.Path); v != "" {
+				return model.TargetFile, v, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// codexShellCommand extracts the executed script from a Codex `shell` command value,
+// which is either a plain string or an argv array (always ["bash","-lc",script] in the
+// corpus). For an argv array it returns the element after the shell command flag (-c,
+// or a combined short flag ending in c such as -lc); if no such flag is present it joins
+// the argv. Empty string if nothing usable.
+func codexShellCommand(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return strings.TrimSpace(s)
+	}
+	var argv []string
+	if json.Unmarshal(raw, &argv) != nil || len(argv) == 0 {
+		return ""
+	}
+	// Only parse a script-after-flag when argv is actually launching a shell (always
+	// ["bash","-lc",script] in the corpus); otherwise the joined argv is the best command
+	// text. This keeps a non-shell flag like "-abc" from being misread as a command flag.
+	if isShellInterpreter(argv[0]) {
+		for i := 1; i < len(argv); i++ {
+			if isShellCommandFlag(argv[i]) {
+				// A command flag with no usable following element is a malformed /
+				// scriptless invocation: yield no command, not the wrapper argv.
+				if i+1 < len(argv) {
+					return strings.TrimSpace(argv[i+1])
+				}
+				return ""
+			}
+		}
+	}
+	return strings.TrimSpace(strings.Join(argv, " "))
+}
+
+// isShellInterpreter reports whether arg names a shell (optionally path-qualified) —
+// i.e. argv[0] of a `bash -lc <script>`-style invocation.
+func isShellInterpreter(arg string) bool {
+	if i := strings.LastIndexByte(arg, '/'); i >= 0 {
+		arg = arg[i+1:]
+	}
+	switch arg {
+	case "bash", "sh", "zsh", "dash", "ksh":
+		return true
+	}
+	return false
+}
+
+// isShellCommandFlag reports whether f is a shell "run this command" flag: -c, or a
+// combined short flag ending in c (-lc, -ic, …). Long options (--config) are excluded.
+func isShellCommandFlag(f string) bool {
+	return f == "-c" || (len(f) >= 2 && f[0] == '-' && f[1] != '-' && strings.HasSuffix(f, "c"))
+}
+
+// codexExtractTargets turns one Codex function_call into activity facts: a `tool` fact
+// (the tool name) plus a domain fact (command/file) when the call provides one. It
+// mirrors the shared extractTargets contract — empty names and clio's own MCP tools
+// yield nothing. Values are redacted then capped, like the Claude path.
+func codexExtractTargets(name string, args json.RawMessage) []model.ToolTarget {
+	if name == "" || strings.HasPrefix(name, clioMCPToolPrefix) {
+		return nil
+	}
+	out := []model.ToolTarget{{Kind: model.TargetTool, Value: name}}
+	if kind, value, ok := codexCommandTarget(name, args); ok {
+		out = append(out, model.ToolTarget{Kind: kind, Value: capValue(redactString(value))})
+	}
+	return out
+}
+
+// codexToolSummary is the short, human-facing summary of a Codex tool call: the command
+// or file it acted on. It redacts the FULL value before truncating, so a secret never
+// survives as a partial (regex-missed) token. Empty for tool-only calls.
+func codexToolSummary(name string, args json.RawMessage) string {
+	if _, value, ok := codexCommandTarget(name, args); ok {
+		// firstLine caps on bytes; trim any rune split at the cap so the summary
+		// (and the message content built from it) stays valid UTF-8.
+		return trimToValidUTF8(firstLine(redactString(value), 200))
+	}
+	return ""
 }
 
 // codexOutputText flattens a function_call_output payload (a bare string, or blocks).

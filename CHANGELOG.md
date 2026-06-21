@@ -5,6 +5,30 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-06-21
+
+Follow-up to v0.9.0: Codex tool activity is now extracted, so the activity surfaces
+work for Codex the way they already do for Claude Code.
+
+### Added
+
+- Codex activity targets: `function_call` records now produce structured `command`,
+  `file`, and `tool` activity facts, so `clio activity --by command|file|tool --source
+  codex` and `clio list --ran/--touched --source codex` surface Codex work.
+  `exec_command` and `shell` (the `bash -lc` script) become commands, `view_image`
+  becomes a file. Codex tool-use rows also now show the actual command in `clio show`
+  and full-text search, instead of only the tool name.
+
+### Notes
+
+- Existing Codex sessions indexed by v0.9.0 gain these targets on the next
+  `clio index --full` (a full reindex re-derives activity for already-indexed files).
+- clio still never indexes its own MCP traffic, and command/file values are
+  secret-redacted before storage. `clio recall` stays Claude-Code-only by design.
+- Codex edits made through an `apply_patch` heredoc inside a shell command are recorded
+  as the command (not yet as individual file targets); `--by file --source codex`
+  currently reflects `view_image` paths.
+
 ## [0.9.0] - 2026-06-19
 
 clio now indexes **OpenAI Codex CLI** history (`~/.codex/sessions`) alongside Claude
