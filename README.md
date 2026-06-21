@@ -26,16 +26,15 @@ You *could* `grep ~/.claude/projects/*.jsonl` — but that's exactly what clio i
 
 **1. Install the binary**
 
-**Prebuilt (recommended)** — download the asset for your platform from the [latest release](https://github.com/linhn0617/clio/releases/latest) (current: [**v0.9.1**](https://github.com/linhn0617/clio/releases/tag/v0.9.1); macOS/Linux `amd64`+`arm64`, Windows `amd64`), put it on your `PATH`, and verify it against `SHASUMS256.txt`. This repo is private, so download while signed in to GitHub.
+**Prebuilt (recommended)** — download the asset for your platform from the [latest release](https://github.com/linhn0617/clio/releases/latest) (current: [**v0.9.1**](https://github.com/linhn0617/clio/releases/tag/v0.9.1); macOS/Linux `amd64`+`arm64`, Windows `amd64`), put it on your `PATH`, and verify it against `SHASUMS256.txt`.
 
 **Or with `go install`:**
 
 ```
-export GOPRIVATE=github.com/linhn0617/*   # private repo: set once
 go install github.com/linhn0617/clio/cmd/clio@v0.9.1   # or @latest for the newest
 ```
 
-This drops `clio` into `$(go env GOPATH)/bin` — make sure that's on your `PATH`, and that your git/GitHub auth can clone the private repo.
+This drops `clio` into `$(go env GOPATH)/bin` — make sure that's on your `PATH`.
 
 **2. Index your history and register the MCP server**
 
