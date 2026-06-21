@@ -23,21 +23,19 @@ are shared; prose is given in both languages.
 **Prebuilt (recommended)** — download the asset for your platform from the
 [latest release](https://github.com/linhn0617/clio/releases/latest)
 (macOS/Linux `amd64`+`arm64`, Windows `amd64`), put it on your `PATH`, verify
-against `SHASUMS256.txt`. This repo is private, so download while signed in to GitHub.
+against `SHASUMS256.txt`.
 
 **預編譯（推薦）** —— 從 [latest release](https://github.com/linhn0617/clio/releases/latest)
 下載你平台的檔案（macOS/Linux `amd64`+`arm64`、Windows `amd64`），放進 `PATH`，
-用 `SHASUMS256.txt` 驗證。此 repo 為 private，請在登入 GitHub 狀態下下載。
+用 `SHASUMS256.txt` 驗證。
 
 **Or via `go install`** / **或用 `go install`：**
 
 ```bash
-export GOPRIVATE=github.com/linhn0617/*   # private repo: set once / 設定一次
 go install github.com/linhn0617/clio/cmd/clio@latest
 ```
 
-Make sure `$(go env GOPATH)/bin` is on your `PATH`, and your git/GitHub auth can
-clone the private repo. Verify / 確認：
+Make sure `$(go env GOPATH)/bin` is on your `PATH`. Verify / 確認：
 
 ```bash
 clio --version
@@ -374,7 +372,6 @@ EN:
 |---|---|
 | CJK/short query finds nothing / 中文或短詞搜不到 | 1–2 chars fall back to substring scan; add more characters or quote a phrase. / 1–2 字會走子字串掃描，多打幾字或用引號。 |
 | clio tools not in Claude Code / Claude Code 裡沒有 clio 工具 | Run `clio install-mcp` and **restart** Claude Code; check with `/mcp`; run `clio doctor`. / 跑 `clio install-mcp` 並**重開**；用 `/mcp` 確認；`clio doctor` 檢查。 |
-| `go install` fails (private repo) / `go install` 失敗 | Set `GOPRIVATE=github.com/linhn0617/*` and ensure git/GitHub auth can clone. / 設 `GOPRIVATE` 且 git 能認證 clone。 |
 | Index looks stale / wrong / 索引看起來舊或怪 | `clio index` (incremental) or `clio index --full` (rebuild); `clio doctor` to diagnose. / `clio index` 或 `clio index --full`；`clio doctor` 診斷。 |
 
 ---
