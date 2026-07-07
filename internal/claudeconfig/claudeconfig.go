@@ -1,9 +1,12 @@
 // Package claudeconfig safely edits ~/.claude.json's mcpServers section using a
 // read-modify-atomic-write cycle with a backup, so a crash or malformed write
-// can never corrupt the user's main Claude Code config.
+// can never corrupt the user's main Claude Code config. A successful,
+// content-changing mutation also leaves a persistent <file>.bak of the
+// pre-mutation content so the user can manually recover the previous version.
 package claudeconfig
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -132,23 +135,19 @@ func mutateLocked(configPath string, fn func(map[string]any) error) error {
 		return fmt.Errorf("refusing to write invalid JSON: %w", err)
 	}
 
-	// Back up an existing config first.
-	backup := configPath + ".bak"
-	backupCreated := false
-	if existing, rerr := os.ReadFile(configPath); rerr == nil {
-		if werr := os.WriteFile(backup, existing, 0o600); werr != nil {
-			return fmt.Errorf("write backup: %w", werr)
+	// Capture the pre-mutation file (if any) up front. We deliberately do NOT
+	// write <config>.bak yet — it is only persisted after the atomic rename
+	// below has succeeded, so a failed write can never create, update, or
+	// otherwise touch a .bak file (see TestBackupNotWrittenOnRenameFailure /
+	// TestPriorBackupUnaffectedByLaterFailedWrite).
+	existing, rerr := os.ReadFile(configPath)
+	existed := rerr == nil
+	origMode := fs.FileMode(0o600)
+	if existed {
+		if info, serr := os.Stat(configPath); serr == nil {
+			origMode = info.Mode().Perm()
 		}
-		backupCreated = true
 	}
-	// The atomic rename keeps the original intact on failure, so a backup we wrote
-	// is redundant on every exit. Only remove the backup this call created — never
-	// a pre-existing unrelated <config>.bak.
-	defer func() {
-		if backupCreated {
-			os.Remove(backup)
-		}
-	}()
 
 	// Atomic write: temp file in the same dir, fsync, rename.
 	dir := filepath.Dir(configPath)
@@ -181,6 +180,29 @@ func mutateLocked(configPath string, fn func(map[string]any) error) error {
 	if dirF, derr := os.Open(dir); derr == nil {
 		_ = dirF.Sync()
 		dirF.Close()
+	}
+
+	// Persist a manual-recovery backup of the pre-mutation content, but only
+	// when this write actually changed the file. A no-op rerun (idempotent
+	// install) must not clobber an existing .bak with content identical to the
+	// current file — that would destroy the one prior version the user could
+	// still recover. A first-ever install (existed == false) has nothing to
+	// back up.
+	if existed && !bytes.Equal(existing, out) {
+		backup := configPath + ".bak"
+		if err := os.WriteFile(backup, existing, origMode); err != nil {
+			// debt: the primary write above already succeeded (config is
+			// committed) but we still return an error here, so a caller that
+			// retries on error could end up re-deriving a different backup
+			// baseline. Not handled: acceptable for now since this only
+			// triggers on a backup-specific I/O failure (e.g. disk full)
+			// right after a successful write, which is rare; revisit if that
+			// turns out to happen in practice.
+			return fmt.Errorf("write backup: %w", err)
+		}
+		if err := os.Chmod(backup, origMode); err != nil {
+			return fmt.Errorf("chmod backup: %w", err)
+		}
 	}
 
 	return nil

@@ -92,18 +92,89 @@ func TestRemoveServerKeepsOthers(t *testing.T) {
 	}
 }
 
-func TestNoBackupLeftBehindOnSuccess(t *testing.T) {
+// TestBackupPersistsAfterSuccessfulChange pins the current, intended behavior
+// (2026-07): a successful mutation that actually changes an existing file's
+// content leaves a persistent <file>.bak the user can manually restore from —
+// it is written after the atomic rename succeeds and is not cleaned up. This
+// replaced the old "backup is a transient safety net, always removed" design.
+func TestBackupPersistsAfterSuccessfulChange(t *testing.T) {
 	p := filepath.Join(t.TempDir(), ".claude.json")
-	os.WriteFile(p, []byte(`{"mcpServers":{}}`), 0o600)
+	orig := []byte(`{"mcpServers":{}}`)
+	if err := os.WriteFile(p, orig, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddServer(p, "clio", ServerEntry{Command: "clio"}); err != nil {
+		t.Fatal(err)
+	}
+	bak := p + ".bak"
+	got, err := os.ReadFile(bak)
+	if err != nil {
+		t.Fatalf("expected a persistent .bak after a content-changing success, got: %v", err)
+	}
+	if string(got) != string(orig) {
+		t.Fatalf(".bak content = %q, want original content %q", got, orig)
+	}
+	info, err := os.Stat(bak)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf(".bak mode = %v, want to match original file's mode 0640", info.Mode().Perm())
+	}
+}
+
+// TestBackupNotUpdatedOnNoopRerun guards against an idempotent rerun silently
+// clobbering the one persisted backup: a no-op call (content unchanged) must
+// leave a pre-existing .bak completely alone, otherwise "previous version" and
+// "current version" collapse into the same content and the backup is useless.
+func TestBackupNotUpdatedOnNoopRerun(t *testing.T) {
+	p := filepath.Join(t.TempDir(), ".claude.json")
+	orig := []byte(`{"mcpServers":{}}`)
+	if err := os.WriteFile(p, orig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddServer(p, "clio", ServerEntry{Command: "clio"}); err != nil {
+		t.Fatal(err)
+	}
+	bak := p + ".bak"
+	firstBackup, err := os.ReadFile(bak)
+	if err != nil {
+		t.Fatalf("expected .bak after first (content-changing) call: %v", err)
+	}
+
+	// Second call is a no-op: "clio" is already present with the same entry.
+	if err := AddServer(p, "clio", ServerEntry{Command: "clio"}); err != nil {
+		t.Fatal(err)
+	}
+	secondBackup, err := os.ReadFile(bak)
+	if err != nil {
+		t.Fatalf(".bak disappeared after a no-op rerun: %v", err)
+	}
+	if string(secondBackup) != string(firstBackup) {
+		t.Fatalf("no-op rerun changed .bak content; before=%q after=%q", firstBackup, secondBackup)
+	}
+	if string(secondBackup) != string(orig) {
+		t.Fatalf(".bak must still hold the pre-first-change original; got %q, want %q", secondBackup, orig)
+	}
+}
+
+// TestNoBackupWhenOriginalDidNotExist covers the "first-ever install" case:
+// there is no prior version to back up, so no .bak is created.
+func TestNoBackupWhenOriginalDidNotExist(t *testing.T) {
+	p := filepath.Join(t.TempDir(), ".claude.json")
 	if err := AddServer(p, "clio", ServerEntry{Command: "clio"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(p + ".bak"); !os.IsNotExist(err) {
-		t.Fatal("backup should be removed after a successful write")
+		t.Fatal("no .bak should be created when the original file did not exist")
 	}
 }
 
-func TestBackupRemovedOnRenameFailure(t *testing.T) {
+// TestBackupNotWrittenOnRenameFailure ensures a failed write neither leaves a
+// misleading .bak (content identical to the still-unchanged current file) nor
+// disturbs any legitimate .bak a prior successful run already persisted: the
+// backup is only ever written after the atomic rename has succeeded.
+func TestBackupNotWrittenOnRenameFailure(t *testing.T) {
 	p := filepath.Join(t.TempDir(), ".claude.json")
 	if err := os.WriteFile(p, []byte(`{"mcpServers":{"other":{"command":"x"}}}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -115,11 +186,48 @@ func TestBackupRemovedOnRenameFailure(t *testing.T) {
 		t.Fatal("expected error from forced rename failure")
 	}
 	if _, err := os.Stat(p + ".bak"); !os.IsNotExist(err) {
-		t.Fatal(".bak must be removed on a failed write")
+		t.Fatal("a failed write must not create a .bak")
 	}
 	after, _ := os.ReadFile(p)
 	if string(after) != string(orig) {
 		t.Fatalf("original config changed; before=%q after=%q", orig, after)
+	}
+}
+
+// TestPriorBackupUnaffectedByLaterFailedWrite covers the second half of the
+// failure-path requirement: a .bak persisted by an earlier successful,
+// content-changing run must survive untouched when a later mutation on the
+// same file fails at the rename step.
+func TestPriorBackupUnaffectedByLaterFailedWrite(t *testing.T) {
+	p := filepath.Join(t.TempDir(), ".claude.json")
+	orig := []byte(`{"mcpServers":{}}`)
+	if err := os.WriteFile(p, orig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// First call: succeeds and changes content, so it persists a .bak.
+	if err := AddServer(p, "clio", ServerEntry{Command: "clio"}); err != nil {
+		t.Fatal(err)
+	}
+	bak := p + ".bak"
+	before, err := os.ReadFile(bak)
+	if err != nil {
+		t.Fatalf("expected .bak after first call: %v", err)
+	}
+
+	// Second call: a content-changing mutation (adds a different server) that
+	// then fails at the rename step.
+	renameFile = func(string, string) error { return fmt.Errorf("forced rename failure") }
+	t.Cleanup(func() { renameFile = os.Rename })
+	if err := AddServer(p, "other", ServerEntry{Command: "other-bin"}); err == nil {
+		t.Fatal("expected error from forced rename failure")
+	}
+
+	after, err := os.ReadFile(bak)
+	if err != nil {
+		t.Fatalf("prior .bak was removed by a later failed write: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("prior .bak content changed by a later failed write; before=%q after=%q", before, after)
 	}
 }
 
