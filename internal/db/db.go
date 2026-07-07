@@ -90,7 +90,7 @@ func Open(path string) (*DB, error) {
 // OpenReadOnly opens the database without running migrations, for query-only use
 // (e.g. CLI deferring to a running MCP writer).
 func OpenReadOnly(path string) (*DB, error) {
-	dsn := "file:" + path + "?_pragma=busy_timeout(3000)&_pragma=journal_mode(WAL)&mode=ro"
+	dsn := "file:" + path + "?_pragma=busy_timeout(3000)&mode=ro"
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite (ro): %w", err)

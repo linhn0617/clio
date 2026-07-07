@@ -54,9 +54,9 @@ func newAskCmd() *cobra.Command {
 			}
 			if _, statErr := os.Stat(dbPath); statErr == nil {
 				// Like search/list/show: a quick incremental catch-up so the answer
-				// reflects the latest sessions; openForQuery defers to a live MCP
+				// reflects the latest sessions; openAndCatchUp defers to a live MCP
 				// server (opens read-only) to avoid write contention.
-				database, err := openForQuery()
+				database, err := openAndCatchUp()
 				if err != nil {
 					return err
 				}

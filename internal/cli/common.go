@@ -15,6 +15,11 @@ import (
 	"github.com/linhn0617/clio/internal/lock"
 )
 
+// osExecutable resolves the running binary's path; overridable in tests so
+// install-mcp/install-hook can be exercised without depending on the go test
+// binary's actual path (which is never named "clio").
+var osExecutable = os.Executable
+
 // addSourceFlag registers the shared --source flag (which agent tool's history to
 // read), defaulting to Claude Code so existing behavior is unchanged.
 func addSourceFlag(cmd *cobra.Command, p *string) {
@@ -50,11 +55,11 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// openForQuery opens the database for a read-mostly CLI command and performs a
+// openAndCatchUp opens the database for a read-mostly CLI command and performs a
 // quick incremental catch-up so results reflect the latest sessions. When a
 // live MCP leader is detected via the lock file, the CLI defers to it and
 // opens the database read-only instead of running its own catch-up.
-func openForQuery() (*db.DB, error) {
+func openAndCatchUp() (*db.DB, error) {
 	dbPath, err := config.DBPath()
 	if err != nil {
 		return nil, err
@@ -77,8 +82,7 @@ func openForQuery() (*db.DB, error) {
 		// Run the catch-up unconditionally (not gated on the Claude dir existing): on a
 		// Codex-only machine ~/.claude/projects is absent, but the Codex source still
 		// has history to ingest. IngestAll/PurgeMissing handle missing roots per-source.
-		ing := ingest.New(database, discardLogger())
-		ing.AddCodexSource() // also catch up Codex CLI history, when installed
+		ing := ingest.NewWithBuiltinSources(database, discardLogger())
 		if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
 			stderrLogger().Warn("incremental catch-up failed", "err", err)
 		}

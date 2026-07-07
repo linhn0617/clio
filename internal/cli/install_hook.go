@@ -23,7 +23,7 @@ func newInstallHookCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			exe, err := os.Executable()
+			exe, err := osExecutable()
 			if err != nil || exe == "" {
 				exe = "clio" // fall back to PATH lookup
 			}

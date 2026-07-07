@@ -105,10 +105,13 @@ func (ing *Ingester) extraRoots() []string {
 // projects dir), so the watcher can live-watch every source.
 func (ing *Ingester) ExtraRoots() []string { return ing.extraRoots() }
 
-// AddCodexSource registers the Codex CLI source rooted at ~/.codex/sessions, but only
+// addCodexSource registers the Codex CLI source rooted at ~/.codex/sessions, but only
 // when that directory exists. Codex not being installed is not an error: the source is
-// simply not registered, so nothing is walked, watched, or purged for it.
-func (ing *Ingester) AddCodexSource() {
+// simply not registered, so nothing is walked, watched, or purged for it. Unexported:
+// production callers get this via NewWithBuiltinSources; tests inject a codexSource
+// with a controlled root directly via AddSource, so a second, real-environment
+// registration here would risk pulling in the host's actual ~/.codex/sessions.
+func (ing *Ingester) addCodexSource() {
 	root, err := config.CodexSessionsDir()
 	if err != nil {
 		ing.log.Warn("codex sessions dir unavailable", "err", err)

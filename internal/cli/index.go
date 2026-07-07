@@ -19,8 +19,11 @@ func newIndexCmd() *cobra.Command {
 		Use:   "index",
 		Short: "Scan and index Claude Code session history",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// A running MCP server is the sole writer and keeps the index
-			// current; don't open a second writer against the same DB.
+			// A running MCP leader keeps the index current, so there is
+			// nothing for us to do. It is not strictly the sole writer
+			// (follower MCP processes also catch-up ingest before reads);
+			// concurrent writers are serialized by WAL + busy_timeout,
+			// and ingest is idempotent.
 			if lockPath, err := config.LockPath(); err == nil && lock.IsHeld(lockPath) {
 				fmt.Fprintln(os.Stdout, "clio mcp is running and keeping the index current — nothing to do.")
 				return nil
@@ -43,8 +46,7 @@ func newIndexCmd() *cobra.Command {
 			defer database.Close()
 
 			log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-			ing := ingest.New(database, log)
-			ing.AddCodexSource() // index Codex CLI history too, when installed
+			ing := ingest.NewWithBuiltinSources(database, log)
 
 			st, err := ing.IngestAll(cmd.Context(), projects, full)
 			if err != nil {

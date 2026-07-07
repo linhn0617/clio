@@ -41,12 +41,26 @@ type Ingester struct {
 }
 
 // New returns an Ingester with the claude-code source registered. If log is nil,
-// logging is discarded.
+// logging is discarded. Tests use New directly to keep full control over which
+// extra sources (if any) get registered, via AddSource. Production entry points
+// should use NewWithBuiltinSources instead, so they never have to individually
+// remember to register optional sources like Codex.
 func New(database *db.DB, log *slog.Logger) *Ingester {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &Ingester{db: database, log: log, sources: []Source{claudeCodeSource{}}}
+}
+
+// NewWithBuiltinSources returns an Ingester with every built-in source registered:
+// claude-code always, plus codex when its sessions directory exists. This is the
+// composition root for CLI/MCP entry points — they call this instead of New, so
+// adding a future built-in source only requires a change here, not at every call
+// site.
+func NewWithBuiltinSources(database *db.DB, log *slog.Logger) *Ingester {
+	ing := New(database, log)
+	ing.addCodexSource()
+	return ing
 }
 
 // AddSource registers an additional ingestion adapter, consulted before the

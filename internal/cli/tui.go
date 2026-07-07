@@ -25,7 +25,7 @@ func newTUICmd() *cobra.Command {
 			if err := validateSource(source); err != nil {
 				return err
 			}
-			database, err := openForQuery()
+			database, err := openAndCatchUp()
 			if err != nil {
 				return err
 			}

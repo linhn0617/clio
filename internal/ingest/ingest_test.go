@@ -188,6 +188,76 @@ func TestSourceForRoutesToClaudeCodeFallback(t *testing.T) {
 	}
 }
 
+// TestNewWithBuiltinSourcesRegistersCodexWhenDirExists pins the composition-root
+// contract: production entry points call NewWithBuiltinSources once instead of
+// New + a per-call-site AddCodexSource, and still get codex registered whenever
+// its sessions dir is present.
+func TestNewWithBuiltinSourcesRegistersCodexWhenDirExists(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ing := NewWithBuiltinSources(openTestDB(t), nil)
+	var haveClaude, haveCodex bool
+	for _, s := range ing.sources {
+		switch s.Name() {
+		case "claude-code":
+			haveClaude = true
+		case "codex":
+			haveCodex = true
+		}
+	}
+	if !haveClaude || !haveCodex {
+		t.Fatalf("expected both claude-code and codex sources registered, have claude=%v codex=%v", haveClaude, haveCodex)
+	}
+}
+
+// TestNewWithBuiltinSourcesSkipsCodexWhenDirMissing preserves AddCodexSource's
+// original "only when the dir exists" conditional now that it's folded into the
+// composition root: no dir means no codex source, not an error.
+func TestNewWithBuiltinSourcesSkipsCodexWhenDirMissing(t *testing.T) {
+	home := t.TempDir() // .codex/sessions never created
+	t.Setenv("HOME", home)
+	ing := NewWithBuiltinSources(openTestDB(t), nil)
+	for _, s := range ing.sources {
+		if s.Name() == "codex" {
+			t.Fatalf("codex source must not be registered when its sessions dir is absent")
+		}
+	}
+}
+
+// TestNewWithBuiltinSourcesIngestsBothSources is the end-to-end pin: a single
+// IngestAll after NewWithBuiltinSources must ingest both a claude-code session
+// under projectsDir and a codex rollout under the (env-controlled)
+// ~/.codex/sessions — no caller-side AddCodexSource call required.
+func TestNewWithBuiltinSourcesIngestsBothSources(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	codexDir := filepath.Join(home, ".codex", "sessions")
+	const codexUUID = "0199eeee-ffff-7000-8000-222222222222"
+	writeCodexRollout(t, codexDir, codexUUID)
+
+	projects := t.TempDir()
+	writeSession(t, projects, "-Users-lin-Herd-x", "sess-builtin", evUser1, evUser2)
+
+	database := openTestDB(t)
+	ing := NewWithBuiltinSources(database, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+
+	var n int
+	database.QueryRow(`SELECT COUNT(*) FROM sessions WHERE uuid=? AND source='claude-code'`, "sess-builtin").Scan(&n)
+	if n != 1 {
+		t.Fatalf("claude-code session not ingested via NewWithBuiltinSources (n=%d)", n)
+	}
+	database.QueryRow(`SELECT COUNT(*) FROM sessions WHERE uuid=? AND source='codex'`, codexUUID).Scan(&n)
+	if n != 1 {
+		t.Fatalf("codex session not ingested via NewWithBuiltinSources (n=%d)", n)
+	}
+}
+
 func TestIngestRecordsClaudeCodeSource(t *testing.T) {
 	projects := t.TempDir()
 	writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evUser2)

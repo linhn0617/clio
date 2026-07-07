@@ -34,7 +34,7 @@ func newListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			database, err := openForQuery()
+			database, err := openAndCatchUp()
 			if err != nil {
 				return err
 			}

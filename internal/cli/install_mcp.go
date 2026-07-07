@@ -43,8 +43,7 @@ func newInstallMCPCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				ing := ingest.New(database, stderrLogger())
-				ing.AddCodexSource() // index Codex CLI history too, when installed
+				ing := ingest.NewWithBuiltinSources(database, stderrLogger())
 				fmt.Fprintln(os.Stdout, "Indexing your Claude Code history…")
 				st, err := ing.IngestAll(cmd.Context(), projects, false)
 				if err != nil {
@@ -60,7 +59,7 @@ func newInstallMCPCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			exe, err := os.Executable()
+			exe, err := osExecutable()
 			if err != nil || exe == "" {
 				exe = "clio" // fall back to PATH lookup
 			}

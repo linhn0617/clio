@@ -18,7 +18,7 @@ func TestOpenForQueryDefersToLiveLeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Seed the index so openForQuery doesn't error on "no index".
+	// Seed the index so openAndCatchUp doesn't error on "no index".
 	seed, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -38,10 +38,10 @@ func TestOpenForQueryDefersToLiveLeader(t *testing.T) {
 	if !lock.IsHeld(lockPath) {
 		t.Fatal("lock should read as held while a live leader exists")
 	}
-	// openForQuery should defer to the leader and return a usable RO handle.
-	d, err := openForQuery()
+	// openAndCatchUp should defer to the leader and return a usable RO handle.
+	d, err := openAndCatchUp()
 	if err != nil {
-		t.Fatalf("openForQuery: %v", err)
+		t.Fatalf("openAndCatchUp: %v", err)
 	}
 	defer d.Close()
 }
