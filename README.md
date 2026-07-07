@@ -44,7 +44,7 @@ clio install-mcp
 
 This does two things, in order:
 1. Builds the full index from `~/.claude/projects/` (shows progress).
-2. Only if indexing succeeds, registers clio in `~/.claude.json` — atomically, with a `.bak` backup, preserving your other MCP servers.
+2. Only if indexing succeeds, registers clio in `~/.claude.json` — atomically, preserving your other MCP servers and leaving a `.bak` of the previous version for manual recovery.
 
 **3. Restart Claude Code**
 
@@ -98,7 +98,8 @@ When registered via `clio install-mcp`, Claude Code can call:
 ## Privacy
 
 - Read-only access to `~/.claude/projects/`; original files are never modified.
-- Secret patterns (API keys, tokens, private keys, `.env` lines) are redacted at ingest time, in both the searchable text and the stored raw event.
+- Secret redaction is pattern-based and best-effort: high-signal shapes (API keys, tokens, private keys, `.env` lines) are redacted at ingest time, in both the searchable text and the stored raw event. Free-form secrets that match no known pattern are not caught.
+- Registering clio as an MCP server is an all-or-nothing grant: any client you register it with can read your entire indexed history through its tools.
 - All data stays on your machine; no telemetry, no cloud sync. The database lives at `~/Library/Application Support/clio/db.sqlite` (macOS) or `~/.local/share/clio/db.sqlite` (Linux), with `0600` permissions.
 
 ## License

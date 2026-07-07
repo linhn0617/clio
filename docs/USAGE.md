@@ -51,12 +51,13 @@ clio install-mcp
 ```
 
 EN: Builds the full index from `~/.claude/projects/` (with progress), then — only
-if indexing succeeds — registers clio in `~/.claude.json` atomically (with a `.bak`
-backup, preserving your other MCP servers). Then **restart Claude Code**.
+if indexing succeeds — registers clio in `~/.claude.json` atomically (preserving
+your other MCP servers, and leaving a `.bak` of the previous version for manual
+recovery). Then **restart Claude Code**.
 
 中文：從 `~/.claude/projects/` 建立完整索引（顯示進度），**只有索引成功**才把 clio
-atomic 寫進 `~/.claude.json`（留 `.bak` 備份、保留你其他的 MCP server）。接著
-**重開 Claude Code**。
+atomic 寫進 `~/.claude.json`（保留你其他的 MCP server，並留下改寫前版本的 `.bak`
+供手動復原）。接著**重開 Claude Code**。
 
 ---
 

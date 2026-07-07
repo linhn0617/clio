@@ -44,7 +44,7 @@ clio install-mcp
 
 它依序做兩件事：
 1. 從 `~/.claude/projects/` 建立完整索引（顯示進度）。
-2. 只有索引成功後，才把 clio 註冊進 `~/.claude.json` —— 採 atomic 寫入、留 `.bak` 備份、保留你其他的 MCP server。
+2. 只有索引成功後，才把 clio 註冊進 `~/.claude.json` —— 採 atomic 寫入、保留你其他的 MCP server，並留下改寫前版本的 `.bak` 供手動復原。
 
 **3. 重開 Claude Code**
 
@@ -98,7 +98,8 @@ clio doctor                     # 健康檢查
 ## 隱私
 
 - 對 `~/.claude/projects/` 唯讀；絕不修改你的原始檔。
-- ingest 時會 redact secret pattern（API key、token、private key、`.env` 行），可搜尋文字與儲存的原始事件都會處理。
+- secret redaction 是 pattern 比對、盡力而為：ingest 時會遮蔽高信號形狀（API key、token、private key、`.env` 行），可搜尋文字與儲存的原始事件都會處理；不符合已知 pattern 的自由文字密碼不會被攔到。
+- 把 clio 註冊為 MCP server 是全有或全無的授權：任何註冊了它的 client 都能透過工具讀到你完整的已索引歷史。
 - 所有資料留在本機；無遙測、無雲端同步。資料庫位於 `~/Library/Application Support/clio/db.sqlite`（macOS）或 `~/.local/share/clio/db.sqlite`（Linux），權限 `0600`。
 
 ## 授權
