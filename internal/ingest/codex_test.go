@@ -64,6 +64,48 @@ func TestCodexSourceIngest(t *testing.T) {
 	}
 }
 
+// TestCodexSourceIngestSessionMetaMismatch covers a Codex rollout file whose
+// session_meta.id disagrees with the filename uuid (corruption, or a
+// session_meta carried over from a different run). The filename uuid is
+// canonical: the file must still be indexed under it, not dropped.
+func TestCodexSourceIngestSessionMetaMismatch(t *testing.T) {
+	const mismatchUUID = "0199bbbb-cccc-7ddd-8eee-111111111111"
+
+	database := openTestDB(t)
+	ing := New(database, nil)
+	ing.AddSource(codexSource{root: "testdata/codex"})
+	emptyCC := t.TempDir()
+	if _, err := ing.IngestAll(context.Background(), emptyCC, false); err != nil {
+		t.Fatal(err)
+	}
+
+	var src, pp string
+	if err := database.QueryRow(`SELECT source, COALESCE(project_path,'') FROM sessions WHERE uuid=?`, mismatchUUID).Scan(&src, &pp); err != nil {
+		t.Fatalf("codex session with mismatched session_meta.id not indexed under filename uuid: %v", err)
+	}
+	if src != "codex" {
+		t.Fatalf("source=%q want codex", src)
+	}
+	if pp != "/Users/dev/otherproj" {
+		t.Fatalf("project_path=%q want /Users/dev/otherproj (from session_meta cwd)", pp)
+	}
+
+	var userContent string
+	if err := database.QueryRow(`SELECT content FROM messages WHERE session_uuid=? AND role='user'`, mismatchUUID).Scan(&userContent); err != nil {
+		t.Fatalf("user message not indexed under filename uuid: %v", err)
+	}
+	if userContent != "mismatched session_meta id should not drop this file" {
+		t.Fatalf("user content=%q want 'mismatched session_meta id should not drop this file'", userContent)
+	}
+
+	// The mismatched session_meta.id must never appear as a session uuid.
+	var n int
+	database.QueryRow(`SELECT COUNT(*) FROM sessions WHERE uuid='0199bbbb-cccc-7ddd-8eee-222222222222'`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("session_meta.id must not be used as session uuid when it mismatches the filename; found %d rows", n)
+	}
+}
+
 func TestCodexSessionIDFromPath(t *testing.T) {
 	s := codexSource{}
 	got := s.SessionIDFromPath("/x/.codex/sessions/2026/06/19/rollout-2026-06-19T10-00-00-0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee.jsonl")

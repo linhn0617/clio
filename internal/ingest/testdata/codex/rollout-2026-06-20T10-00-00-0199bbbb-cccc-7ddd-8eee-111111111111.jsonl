@@ -1,0 +1,3 @@
+{"timestamp":"2026-06-20T10:00:00Z","type":"session_meta","payload":{"id":"0199bbbb-cccc-7ddd-8eee-222222222222","timestamp":"2026-06-20T10:00:00Z","cwd":"/Users/dev/otherproj","cli_version":"0.1.0"}}
+{"timestamp":"2026-06-20T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"mismatched session_meta id should not drop this file"}]}}
+{"timestamp":"2026-06-20T10:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"acknowledged"}]}}

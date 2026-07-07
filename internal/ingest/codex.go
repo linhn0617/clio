@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -87,7 +86,8 @@ type codexBlock struct {
 
 // ParseFile parses a Codex rollout file from startOffset into a session and messages.
 // The response_item stream is authoritative; the event_msg stream is skipped to avoid
-// double-counting. The filename uuid is verified against session_meta.id.
+// double-counting. The filename uuid is canonical: if session_meta.id disagrees,
+// the mismatch is logged and the filename uuid wins so the file still gets indexed.
 func (s codexSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, startSeq int, path string) (parseResult, error) {
 	if _, err := f.Seek(startOffset, io.SeekStart); err != nil {
 		return parseResult{}, err
@@ -163,9 +163,12 @@ func (s codexSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, sta
 		case "session_meta":
 			if p.ID != "" {
 				if sess.UUID != "" && p.ID != sess.UUID {
-					return parseResult{}, fmt.Errorf("codex session id mismatch: filename %q vs session_meta %q", sess.UUID, p.ID)
+					// Filename uuid is canonical: keep it and skip this record's id
+					// instead of dropping the whole file from the index.
+					ing.log.Warn("codex session id mismatch; keeping filename uuid", "file", path, "filename_uuid", sess.UUID, "session_meta_id", p.ID)
+				} else {
+					sess.UUID = p.ID
 				}
-				sess.UUID = p.ID
 			}
 			if sess.ProjectPath == "" && p.CWD != "" {
 				sess.ProjectPath = p.CWD
