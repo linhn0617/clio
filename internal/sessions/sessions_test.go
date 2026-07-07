@@ -436,14 +436,58 @@ func TestActivitySummaryGrouping(t *testing.T) {
 	addSession(t, d, "s1", "/p/a", 1)
 	addMsg(t, d, "s1", 0, "user", "x")
 	since := time.Now().Add(-24 * time.Hour).Unix()
-	if _, err := ActivitySummary(context.Background(), d, since, "project", ""); err != nil {
+	if _, err := ActivitySummary(context.Background(), d, since, "project", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ActivitySummary(context.Background(), d, since, "day", ""); err != nil {
+	if _, err := ActivitySummary(context.Background(), d, since, "day", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ActivitySummary(context.Background(), d, since, "bogus", ""); err == nil {
+	if _, err := ActivitySummary(context.Background(), d, since, "bogus", "", ""); err == nil {
 		t.Fatal("expected error for invalid group_by")
+	}
+}
+
+// ActivitySummary must filter by project prefix under both "project" and "day"
+// grouping, matching ActivityByKind's semantics — a project filter must not be
+// silently ignored (the tool declares a `project` param, so silently returning
+// all-project data is a correctness bug, not just a missing feature).
+func TestActivitySummaryFiltersByProject(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p/a", 1)
+	addSession(t, d, "s2", "/p/b", 1)
+	addMsg(t, d, "s1", 0, "user", "x")
+	addMsg(t, d, "s2", 0, "user", "y")
+	since := time.Now().Add(-24 * time.Hour).Unix()
+
+	// group_by=project: only the matching project's bucket should appear.
+	buckets, err := ActivitySummary(context.Background(), d, since, "project", "/p/a", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 1 || buckets[0].Key != "/p/a" {
+		t.Fatalf("project filter should scope to /p/a only, got %+v", buckets)
+	}
+
+	// group_by=day: the bucket's session count must exclude the other project.
+	dayBuckets, err := ActivitySummary(context.Background(), d, since, "day", "/p/a", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for _, b := range dayBuckets {
+		total += b.Sessions
+	}
+	if total != 1 {
+		t.Fatalf("day grouping with project filter should count 1 session, got %d across %+v", total, dayBuckets)
+	}
+
+	// Empty project prefix must not filter (unchanged default behavior).
+	all, err := ActivitySummary(context.Background(), d, since, "project", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("empty project filter should not filter, got %+v", all)
 	}
 }
 
@@ -465,7 +509,7 @@ func TestActivitySummaryLocalDay(t *testing.T) {
 		t.Fatal(err)
 	}
 	addMsg(t, d, "s1", 0, "user", "x")
-	buckets, err := ActivitySummary(context.Background(), d, ts-1, "day", "")
+	buckets, err := ActivitySummary(context.Background(), d, ts-1, "day", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +649,7 @@ func TestActivitySummaryCountsOrphanSubagentsSeparately(t *testing.T) {
 	addMsg(t, d, "agent-1", 0, "user", "a")
 	addMsg(t, d, "agent-2", 0, "user", "b")
 	since := time.Now().Add(-24 * time.Hour).Unix()
-	buckets, err := ActivitySummary(context.Background(), d, since, "project", "")
+	buckets, err := ActivitySummary(context.Background(), d, since, "project", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -624,7 +668,7 @@ func TestActivitySummaryCountsParentAndChildrenAsOne(t *testing.T) {
 	addMsg(t, d, "agent-C", 0, "user", "child msg")
 
 	since := time.Now().Add(-24 * time.Hour).Unix()
-	buckets, err := ActivitySummary(context.Background(), d, since, "project", "")
+	buckets, err := ActivitySummary(context.Background(), d, since, "project", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

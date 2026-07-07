@@ -382,8 +382,10 @@ type Bucket struct {
 	Messages int
 }
 
-// ActivitySummary aggregates activity since a time, grouped by "day" or "project".
-func ActivitySummary(ctx context.Context, database *db.DB, since int64, groupBy, source string) ([]Bucket, error) {
+// ActivitySummary aggregates activity since a time, grouped by "day" or "project",
+// optionally bounded to sessions whose project_path starts with projectPrefix
+// (matching ActivityByKind's prefix-filter semantics).
+func ActivitySummary(ctx context.Context, database *db.DB, since int64, groupBy, projectPrefix, source string) ([]Bucket, error) {
 	var keyExpr string
 	switch groupBy {
 	case "project":
@@ -401,9 +403,15 @@ func ActivitySummary(ctx context.Context, database *db.DB, since int64, groupBy,
 		FROM sessions s
 		LEFT JOIN messages m ON m.session_uuid = s.uuid
 		LEFT JOIN sessions p ON p.uuid = s.parent_session
-		WHERE s.ended_at >= ?` + srcClause + `
+		WHERE s.ended_at >= ?`
+	args := []any{since}
+	if projectPrefix != "" {
+		q += ` AND s.project_path LIKE ? ESCAPE '\'`
+		args = append(args, db.EscapeLike(projectPrefix)+"%")
+	}
+	q += srcClause + `
 		GROUP BY k ORDER BY k DESC`
-	args := append([]any{since}, srcArgs...)
+	args = append(args, srcArgs...)
 	rows, err := database.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err

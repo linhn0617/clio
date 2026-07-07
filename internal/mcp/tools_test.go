@@ -205,6 +205,38 @@ func TestHandleActivitySummary(t *testing.T) {
 	}
 }
 
+// The MCP tool declares a `project` param (server.go) but ActivitySummary used to
+// ignore it for day/project grouping, silently returning all-project data. Verify
+// the filter actually scopes the result for both groupings.
+func TestHandleActivitySummaryFiltersByProject(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p/a")
+	addSession(t, d, "s2", "/p/b")
+	addMsg(t, d, "s1", 0, "user", "x")
+	addMsg(t, d, "s2", 0, "user", "y")
+
+	rProject := call(t, handleActivitySummary(d, nil), map[string]any{"group_by": "project", "project": "/p/a"})
+	mProject := resultJSON(t, rProject)
+	bucketsProject := mProject["buckets"].([]any)
+	if len(bucketsProject) != 1 {
+		t.Fatalf("group_by=project with project filter should return 1 bucket, got %+v", bucketsProject)
+	}
+	if key := bucketsProject[0].(map[string]any)["Key"]; key != "/p/a" {
+		t.Fatalf("bucket key = %v, want /p/a", key)
+	}
+
+	rDay := call(t, handleActivitySummary(d, nil), map[string]any{"group_by": "day", "project": "/p/a"})
+	mDay := resultJSON(t, rDay)
+	bucketsDay := mDay["buckets"].([]any)
+	total := 0
+	for _, b := range bucketsDay {
+		total += int(b.(map[string]any)["Sessions"].(float64))
+	}
+	if total != 1 {
+		t.Fatalf("group_by=day with project filter should count 1 session total, got %d across %+v", total, bucketsDay)
+	}
+}
+
 func TestHandleActivitySummaryRejectsBadGroupBy(t *testing.T) {
 	d := testDB(t)
 	r := call(t, handleActivitySummary(d, nil), map[string]any{"group_by": "week"})

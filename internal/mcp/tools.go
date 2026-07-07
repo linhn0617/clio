@@ -131,7 +131,7 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 		source := req.GetString("source", "claude-code")
 		switch groupBy {
 		case "day", "project":
-			buckets, err := sessions.ActivitySummary(ctx, database, since, groupBy, source)
+			buckets, err := sessions.ActivitySummary(ctx, database, since, groupBy, req.GetString("project", ""), source)
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
