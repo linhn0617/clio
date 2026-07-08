@@ -5,6 +5,41 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-07-08
+
+Hardening release from a full-repo review: two correctness fixes, a persistent
+config backup, install-command test coverage, and CI/release gates.
+
+### Added
+
+- Persistent `.bak` recovery point: after `install-mcp` / `install-hook` /
+  `uninstall-*` successfully changes `~/.claude.json` or settings, the previous
+  version is kept as `<file>.bak` (matching permissions) for manual recovery.
+  No-op reruns don't overwrite an existing backup; failed writes leave no
+  misleading one.
+- Test coverage for the install commands' config mutations: existing config
+  preserved, idempotent reruns, write-failure safety, malformed JSON refused,
+  uninstall removes only clio's entries.
+- Dependabot (gomod + github-actions, weekly).
+
+### Fixed
+
+- `activity_summary` (MCP) silently ignored its `project` filter for the
+  `day` (default) and `project` groupings — it now filters by project-path
+  prefix like the other groupings.
+- A Codex rollout file whose `session_meta.id` disagreed with the filename
+  uuid was rejected and never indexed (with the watcher re-logging the error
+  every 60s); it now warns once and indexes under the filename uuid.
+
+### Changed
+
+- Built-in ingest sources are registered from a single composition root
+  (`NewWithBuiltinSources`) instead of at every entry point, so a missed
+  call site can no longer silently drop a source.
+- CI runs the race detector; releases run vet+test before building.
+- Privacy docs now state redaction is pattern-based and best-effort, and that
+  registering the MCP server grants access to the entire indexed history.
+
 ## [0.9.1] - 2026-06-21
 
 Follow-up to v0.9.0: Codex tool activity is now extracted, so the activity surfaces
