@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -98,13 +99,42 @@ func load(configPath string) (map[string]any, error) {
 		return map[string]any{}, nil
 	}
 	var root map[string]any
-	if err := json.Unmarshal(data, &root); err != nil {
+	if err := unmarshalPreservingNumbers(data, &root); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", configPath, err)
 	}
 	if root == nil { // file was the literal `null` → treat as an empty config
 		return map[string]any{}, nil
 	}
 	return root, nil
+}
+
+// unmarshalPreservingNumbers parses data like json.Unmarshal into a
+// map[string]any tree, except every JSON number decodes as a json.Number
+// (its exact literal text, e.g. "9007199254740993") instead of float64.
+//
+// This matters because ~/.claude.json and settings.json are shared with
+// other tools that may write integers beyond 2^53 (ids, timestamps, token
+// counts) or high-precision decimals. float64 cannot represent those
+// exactly, so decoding into plain map[string]any and re-marshaling — which
+// is what every mutate() call does, even for keys it never touches — would
+// silently corrupt them. json.Number is a string under the hood, and
+// encoding/json re-emits its exact literal on Marshal, so values round-trip
+// byte-for-byte through a read-modify-write cycle. json.Decoder applies
+// UseNumber() recursively to nested maps/slices, so this covers the whole
+// tree, not just the top level.
+func unmarshalPreservingNumbers(data []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	// Reject trailing non-whitespace garbage after the top-level value, to
+	// match json.Unmarshal's stricter behavior (a bare Decoder would
+	// otherwise silently ignore it).
+	if err := dec.Decode(new(struct{})); err != io.EOF {
+		return fmt.Errorf("invalid character after top-level value")
+	}
+	return nil
 }
 
 // mutate serializes the read-modify-write across processes (Unix flock) so concurrent
@@ -116,6 +146,14 @@ func mutate(configPath string, fn func(map[string]any) error) error {
 }
 
 // mutateLocked loads, applies fn, and writes back atomically with a backup.
+//
+// Known limitation: re-marshaling root (a map[string]any) sorts top-level
+// (and every nested-object) key alphabetically — encoding/json's documented
+// behavior for map types — so a mutation reorders unrelated keys even though
+// it changes no values. Values themselves (including large integers and
+// high-precision decimals; see unmarshalPreservingNumbers) survive
+// byte-for-byte. Preserving original key order would need a custom encoder
+// or an ordered-map dependency; not done here (see docs/USAGE.md §7).
 func mutateLocked(configPath string, fn func(map[string]any) error) error {
 	root, err := load(configPath)
 	if err != nil {
@@ -131,7 +169,7 @@ func mutateLocked(configPath string, fn func(map[string]any) error) error {
 	}
 	// Verify our own output parses before touching anything on disk.
 	var verify map[string]any
-	if err := json.Unmarshal(out, &verify); err != nil {
+	if err := unmarshalPreservingNumbers(out, &verify); err != nil {
 		return fmt.Errorf("refusing to write invalid JSON: %w", err)
 	}
 

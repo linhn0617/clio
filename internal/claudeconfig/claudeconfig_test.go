@@ -1,6 +1,7 @@
 package claudeconfig
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -231,6 +232,40 @@ func TestPriorBackupUnaffectedByLaterFailedWrite(t *testing.T) {
 	}
 }
 
+// TestMutatePreservesLargeIntegersAndHighPrecisionDecimals is a regression
+// test for a P1 data-corruption bug: unmarshaling ~/.claude.json into
+// map[string]any decoded every JSON number as float64, so any integer beyond
+// 2^53 (e.g. an id, timestamp, or token count written by some other tool)
+// silently lost precision on the next clio mutation (install-mcp,
+// install-hook, uninstall). It must round-trip through an unrelated mutation
+// (AddServer) byte-for-byte for the untouched numeric fields.
+func TestMutatePreservesLargeIntegersAndHighPrecisionDecimals(t *testing.T) {
+	p := filepath.Join(t.TempDir(), ".claude.json")
+	// 9007199254740993 == 2^53 + 1, the smallest positive integer float64
+	// cannot represent exactly (it would round to ...992). The ids array pins
+	// that UseNumber also reaches numbers nested inside JSON arrays.
+	orig := `{"mcpServers":{},"someTool":{"id":9007199254740993,"score":0.1234567890123456789,"ids":[9007199254740995]}}`
+	if err := os.WriteFile(p, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddServer(p, "clio", ServerEntry{Command: "clio"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("9007199254740993")) {
+		t.Fatalf("large integer was mangled during an unrelated mutation; got:\n%s", data)
+	}
+	if !bytes.Contains(data, []byte("0.1234567890123456789")) {
+		t.Fatalf("high-precision decimal was mangled during an unrelated mutation; got:\n%s", data)
+	}
+	if !bytes.Contains(data, []byte("9007199254740995")) {
+		t.Fatalf("large integer inside a JSON array was mangled during an unrelated mutation; got:\n%s", data)
+	}
+}
+
 func TestAddServerRefusesMalformedExisting(t *testing.T) {
 	p := filepath.Join(t.TempDir(), ".claude.json")
 	bad := `{"mcpServers": {"other": {"command":"x"}` // truncated, invalid JSON
@@ -244,6 +279,26 @@ func TestAddServerRefusesMalformedExisting(t *testing.T) {
 	after, _ := os.ReadFile(p)
 	if string(after) != bad {
 		t.Fatalf("malformed config was modified; before=%q after=%q", bad, string(after))
+	}
+}
+
+func TestAddServerRefusesTrailingGarbage(t *testing.T) {
+	// unmarshalPreservingNumbers uses a json.Decoder, which unlike
+	// json.Unmarshal stops at the first top-level value; the explicit
+	// second-Decode EOF check is what rejects trailing garbage. Pin it.
+	for _, bad := range []string{`{"a":1}xyz`, `{"a":1}{"b":2}`} {
+		t.Run(bad, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), ".claude.json")
+			if err := os.WriteFile(p, []byte(bad), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := AddServer(p, "clio", ServerEntry{Command: "clio"}); err == nil {
+				t.Fatal("expected error on config with trailing garbage")
+			}
+			if after, _ := os.ReadFile(p); string(after) != bad {
+				t.Fatalf("malformed config was modified; before=%q after=%q", bad, string(after))
+			}
+		})
 	}
 }
 
