@@ -5,6 +5,47 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-14
+
+Retrieval-quality and diagnostics release, driven by an adversarial
+cross-model review (GPT) of the v0.10.0 audit: readable snippets on both
+query paths, honest doctor verdicts, lossless config rewrites, clean
+session titles, and per-source evidence attribution.
+
+### Fixed
+
+- `clio doctor` no longer under-reports: reconciliation lag (unindexed
+  bytes) and detected rewrites now fail the check; same-size rewrites
+  (equal size, changed mtime) are detected; coverage is compared per
+  source, so Codex rows can't mask a Claude gap; a Codex-only install is
+  no longer warned about the missing Claude projects directory.
+- Config rewrites (`install-mcp` / `install-hook` / `uninstall-*`)
+  preserve numeric fidelity: integers above 2^53 and high-precision
+  decimals round-trip byte-exact instead of being silently rounded
+  through float64. (Alphabetical key reordering remains and is now a
+  documented known limitation.)
+- FTS search snippets widen from 10 trigram tokens (~12 chars) to 64,
+  and the short-query LIKE fallback now windows around the first match
+  (CJK-safe) instead of always returning the first 160 characters —
+  which could omit the matched term entirely.
+- `clio ask` no longer merges terms into an unmatchable phrase when the
+  question contains an embedded unmatched double quote (common when
+  asking about code): terms pass to retrieval as a structured slice.
+- Session titles skip Claude Code harness boilerplate
+  (`<local-command-caveat>`, `<task-notification>`, `[Request
+  interrupted`) and use the first substantive user message instead.
+  Existing sessions pick up cleaned titles on the next
+  `clio index --full`.
+- `clio tui --source codex|all` now applies the source filter in the
+  Ask tab (it silently queried claude-code before), and the tab bar and
+  input headers no longer overflow narrow terminals.
+
+### Added
+
+- Evidence groups from `ask` carry their source; the MCP `ask` response
+  always includes it and the CLI shows a `[source]` tag under
+  `--source all`, matching `search`.
+
 ## [0.10.0] - 2026-07-08
 
 Hardening release from a full-repo review: two correctness fixes, a persistent
