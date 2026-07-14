@@ -31,19 +31,35 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 	}
 
 	var availRoots []string
-	if _, err := os.Stat(projectsDir); err != nil {
+
+	// The Codex source root is optional: report it only when present, and treat its
+	// absence as "not installed", never a failure. Resolved up front because whether
+	// it's present changes how a missing Claude projects dir is judged below.
+	codexDir, codexDirErr := config.CodexSessionsDir()
+	codexPresent := false
+	if codexDirErr == nil {
+		if _, serr := os.Stat(codexDir); serr == nil {
+			codexPresent = true
+		}
+	}
+
+	claudePresent := false
+	if _, err := os.Stat(projectsDir); err == nil {
+		claudePresent = true
+	}
+	if ok, note := claudeDirStatus(claudePresent, codexPresent); !ok {
 		add("claude projects dir", false, fmt.Sprintf("not found: %s", projectsDir))
-	} else {
+	} else if claudePresent {
 		add("claude projects dir", true, projectsDir)
 		availRoots = append(availRoots, projectsDir)
+	} else {
+		// Missing, but a supported configuration (e.g. Codex-only install): still
+		// reported so the absence is visible, but not as a warning.
+		add("claude projects dir", true, fmt.Sprintf("not found (%s): %s", note, projectsDir))
 	}
-	// The Codex source root is optional: report it only when present, and treat its
-	// absence as "not installed", never a failure.
-	if codexDir, err := config.CodexSessionsDir(); err == nil {
-		if _, serr := os.Stat(codexDir); serr == nil {
-			add("codex sessions dir", true, codexDir)
-			availRoots = append(availRoots, codexDir)
-		}
+	if codexPresent {
+		add("codex sessions dir", true, codexDir)
+		availRoots = append(availRoots, codexDir)
 	}
 
 	// DB integrity.
@@ -80,15 +96,19 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 	// under a currently-unavailable source root are "preserved" (kept by design),
 	// reported separately from genuinely missing files so a stale index isn't read
 	// as healthy and an unmounted root isn't read as deletions.
-	missing, preserved, truncated, lag, rerr := reconcile(database, availRoots)
+	missing, preserved, truncated, rewritten, lag, rerr := reconcile(database, availRoots)
 	if rerr != nil {
 		add("source reconciliation", false, rerr.Error())
 	} else {
-		detail := fmt.Sprintf("%d missing/unreadable files, %d truncated, %d with new unindexed bytes", missing, truncated, lag)
+		detail := fmt.Sprintf("%d missing/unreadable files, %d truncated, %d same-size rewrite(s) needing re-ingest, %d with new unindexed bytes",
+			missing, truncated, rewritten, lag)
 		if preserved > 0 {
 			detail += fmt.Sprintf(", %d preserved (source root unavailable)", preserved)
 		}
-		add("source reconciliation", missing == 0 && truncated == 0, detail)
+		// Every category above is a real discrepancy between the index and its source
+		// files: none of them may be silently treated as healthy, or doctor would
+		// report OK/exit 0 while the detail text itself lists live problems.
+		add("source reconciliation", missing == 0 && truncated == 0 && rewritten == 0 && lag == 0, detail)
 	}
 
 	// Cross-source uuid conflicts: files refused at ingest because their uuid is
@@ -144,13 +164,14 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 		add("file permissions", false, "not 0600: "+strings.Join(badPerms, ", "))
 	}
 
-	// Ingest coverage: files on disk vs files in ingest_state.
-	if files, err := ingest.WalkSessionFiles(projectsDir, nil); err == nil {
-		var tracked int
-		if serr := database.QueryRow(`SELECT count(*) FROM ingest_state`).Scan(&tracked); serr != nil {
-			add("ingest coverage", false, serr.Error())
+	// Ingest coverage: files on disk vs files in ingest_state, partitioned per source
+	// root so a well-covered source (e.g. Codex, with many tracked rows) cannot mask a
+	// coverage gap in another (e.g. Claude Code files never ingested).
+	if len(availRoots) > 0 {
+		if ok, detail, cerr := coverageBySource(database, availRoots); cerr != nil {
+			add("ingest coverage", false, cerr.Error())
 		} else {
-			add("ingest coverage", len(files) <= tracked, fmt.Sprintf("%d files on disk, %d tracked", len(files), tracked))
+			add("ingest coverage", ok, detail)
 		}
 	}
 
@@ -172,17 +193,17 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 	return out
 }
 
-func reconcile(database *db.DB, availRoots []string) (missing, preserved, truncated, lag int, err error) {
-	rows, qerr := database.Query(`SELECT source_file, last_size, last_byte_offset FROM ingest_state`)
+func reconcile(database *db.DB, availRoots []string) (missing, preserved, truncated, rewritten, lag int, err error) {
+	rows, qerr := database.Query(`SELECT source_file, last_size, last_mtime, last_byte_offset FROM ingest_state`)
 	if qerr != nil {
-		return 0, 0, 0, 0, qerr
+		return 0, 0, 0, 0, 0, qerr
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var path string
-		var lastSize, offset int64
-		if serr := rows.Scan(&path, &lastSize, &offset); serr != nil {
-			return 0, 0, 0, 0, serr
+		var lastSize, lastMtime, offset int64
+		if serr := rows.Scan(&path, &lastSize, &lastMtime, &offset); serr != nil {
+			return 0, 0, 0, 0, 0, serr
 		}
 		fi, statErr := os.Stat(path)
 		if statErr != nil {
@@ -200,11 +221,77 @@ func reconcile(database *db.DB, availRoots []string) (missing, preserved, trunca
 		switch {
 		case fi.Size() < lastSize:
 			truncated++
+		case fi.Size() == lastSize && fi.ModTime().UnixNano() != lastMtime:
+			// Same size, different mtime: ingest's own classifyChange
+			// (internal/ingest/incremental.go) treats this as a full rewrite, never
+			// an append — a same-size content swap that a size-only check can't see.
+			rewritten++
 		case fi.Size() > offset:
 			lag++
 		}
 	}
-	return missing, preserved, truncated, lag, rows.Err()
+	return missing, preserved, truncated, rewritten, lag, rows.Err()
+}
+
+// coverageBySource compares on-disk session files to tracked ingest_state rows,
+// partitioned per source root, so a source with heavy coverage (e.g. many tracked
+// Codex rows) cannot mask a coverage gap in a different source (e.g. Claude Code files
+// never ingested). ingest_state has no source column, so membership is decided by path
+// prefix against each root, mirroring reconcile's underAnyDir.
+func coverageBySource(database *db.DB, roots []string) (ok bool, detail string, err error) {
+	rows, qerr := database.Query(`SELECT source_file FROM ingest_state`)
+	if qerr != nil {
+		return false, "", qerr
+	}
+	defer rows.Close()
+	var tracked []string
+	for rows.Next() {
+		var path string
+		if serr := rows.Scan(&path); serr != nil {
+			return false, "", serr
+		}
+		tracked = append(tracked, path)
+	}
+	if rerr := rows.Err(); rerr != nil {
+		return false, "", rerr
+	}
+
+	ok = true
+	var parts []string
+	for _, root := range roots {
+		files, werr := ingest.WalkSessionFiles(root, nil)
+		if werr != nil {
+			ok = false
+			parts = append(parts, fmt.Sprintf("%s: walk error: %s", filepath.Base(root), werr.Error()))
+			continue
+		}
+		var n int
+		for _, p := range tracked {
+			if underAnyDir(p, []string{root}) {
+				n++
+			}
+		}
+		if len(files) > n {
+			ok = false
+		}
+		parts = append(parts, fmt.Sprintf("%s: %d on disk, %d tracked", filepath.Base(root), len(files), n))
+	}
+	return ok, strings.Join(parts, "; "), nil
+}
+
+// claudeDirStatus judges the ~/.claude/projects presence check. Its absence is only a
+// genuine problem when no other source is available: a Codex-only install (no Claude
+// Code projects dir, Codex present) is a supported configuration and must not warn.
+// note explains a non-warning absence for the caller's detail text; empty when present
+// or when the absence is a real failure.
+func claudeDirStatus(present, codexPresent bool) (ok bool, note string) {
+	if present {
+		return true, ""
+	}
+	if codexPresent {
+		return true, "codex-only install, supported"
+	}
+	return false, ""
 }
 
 // underAnyDir reports whether path lies within any of roots.
