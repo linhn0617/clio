@@ -55,7 +55,7 @@ func TestWriteAnswerMarksHitsAndCites(t *testing.T) {
 			},
 		}},
 	}
-	writeAnswer(&buf, ans)
+	writeAnswer(&buf, ans, "claude-code")
 	out := buf.String()
 
 	if !strings.Contains(out, "abcdef12") || !strings.Contains(out, "Auth fix") || !strings.Contains(out, "proj") {
@@ -71,8 +71,44 @@ func TestWriteAnswerMarksHitsAndCites(t *testing.T) {
 
 func TestWriteAnswerEmptyIsFriendly(t *testing.T) {
 	var buf bytes.Buffer
-	writeAnswer(&buf, ask.Answer{Question: "anything"})
+	writeAnswer(&buf, ask.Answer{Question: "anything"}, "claude-code")
 	if !strings.Contains(buf.String(), "no relevant history") {
 		t.Fatalf("empty-answer message missing: %q", buf.String())
+	}
+}
+
+// Guards the codex P2: ask --source all must tag each group's citation header
+// with its originating tool so a cross-provider excerpt can be attributed —
+// without this, two sessions from different tools are visually indistinguishable.
+func TestWriteAnswerTagsSourceWhenSourceIsAll(t *testing.T) {
+	var buf bytes.Buffer
+	ans := ask.Answer{
+		Question: "q",
+		Groups: []ask.EvidenceGroup{
+			{SessionUUID: "cc00000000000000", Title: "cc session", Project: "/p", Source: "claude-code"},
+			{SessionUUID: "cx00000000000000", Title: "codex session", Project: "/p", Source: "codex"},
+		},
+	}
+	writeAnswer(&buf, ans, "all")
+	out := buf.String()
+	if !strings.Contains(out, "[claude-code]") {
+		t.Fatalf("expected claude-code source tag in source=all output: %q", out)
+	}
+	if !strings.Contains(out, "[codex]") {
+		t.Fatalf("expected codex source tag in source=all output: %q", out)
+	}
+}
+
+// A single-source query (the common case) must not clutter every citation header
+// with a redundant tag — every group already shares the requested source.
+func TestWriteAnswerOmitsSourceTagWhenNotAll(t *testing.T) {
+	var buf bytes.Buffer
+	ans := ask.Answer{
+		Question: "q",
+		Groups:   []ask.EvidenceGroup{{SessionUUID: "cc00000000000000", Title: "cc session", Project: "/p", Source: "claude-code"}},
+	}
+	writeAnswer(&buf, ans, "claude-code")
+	if strings.Contains(buf.String(), "[claude-code]") {
+		t.Fatalf("source tag should be omitted for a single-source query: %q", buf.String())
 	}
 }

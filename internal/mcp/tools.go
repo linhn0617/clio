@@ -269,6 +269,7 @@ func handleAsk(database *db.DB, beforeRead func()) func(context.Context, mcp.Cal
 			Title       string    `json:"title"`
 			Project     string    `json:"project"`
 			EndedAt     string    `json:"ended_at"`
+			Source      string    `json:"source"`
 			Excerpts    []excerpt `json:"excerpts"`
 		}
 		groups := make([]group, 0, len(ans.Groups))
@@ -277,7 +278,7 @@ func handleAsk(database *db.DB, beforeRead func()) func(context.Context, mcp.Cal
 			for _, e := range g.Excerpts {
 				ex = append(ex, excerpt{e.Seq, tsString(e.TS), e.Role, e.Text, e.IsHit})
 			}
-			groups = append(groups, group{g.SessionUUID, g.Title, g.Project, tsString(g.EndedAt), ex})
+			groups = append(groups, group{g.SessionUUID, g.Title, g.Project, tsString(g.EndedAt), g.Source, ex})
 		}
 		return mcp.NewToolResultJSON(map[string]any{
 			"question": ans.Question,

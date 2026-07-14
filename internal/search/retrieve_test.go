@@ -16,7 +16,7 @@ func TestRetrieveAnyTermMatchesEitherTerm(t *testing.T) {
 	addMsg(t, d, "s1", 0, "assistant", "we fixed the authentication race", now)  // "authentication"
 	addMsg(t, d, "s1", 1, "assistant", "the database migration was tricky", now) // "migration"
 
-	cands, err := Retrieve(context.Background(), d, Options{Query: "authentication migration", Limit: 10})
+	cands, err := Retrieve(context.Background(), d, terms("authentication migration"), Options{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestRetrieveIncludesShortTermsInMixedQuery(t *testing.T) {
 	addMsg(t, d, "s1", 0, "assistant", "the authentication layer is solid", now) // long "authentication"
 	addMsg(t, d, "s1", 1, "assistant", "we use go for the worker", now)          // short "go" only
 
-	cands, err := Retrieve(context.Background(), d, Options{Query: "authentication go", Limit: 10})
+	cands, err := Retrieve(context.Background(), d, terms("authentication go"), Options{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestRetrieveShortTermRanksByMatchCount(t *testing.T) {
 	addMsg(t, d, "s1", 0, "user", "ab cd here", old)   // matches both "ab" and "cd"
 	addMsg(t, d, "s1", 1, "user", "ab only here", now) // matches "ab" only, but newer
 
-	cands, err := Retrieve(context.Background(), d, Options{Query: "ab cd", Limit: 10})
+	cands, err := Retrieve(context.Background(), d, terms("ab cd"), Options{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestRetrieveFTSTierRanksBeforeLikeOnly(t *testing.T) {
 	addMsg(t, d, "s1", 0, "user", "the authentication design notes", now-100000) // FTS: "authentication", older
 	addMsg(t, d, "s1", 1, "user", "go ci ab here", now)                          // LIKE-only: go/ci/ab, newer, 3 matches
 
-	cands, err := Retrieve(context.Background(), d, Options{Query: "authentication go ci ab", Limit: 10})
+	cands, err := Retrieve(context.Background(), d, terms("authentication go ci ab"), Options{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestRetrieveCapsPerSession(t *testing.T) {
 	}
 	addMsg(t, d, "other", 0, "user", "authentication summary", now-1000)
 
-	cands, err := Retrieve(context.Background(), d, Options{Query: "authentication", Limit: 50, MaxPerSession: 3})
+	cands, err := Retrieve(context.Background(), d, terms("authentication"), Options{Limit: 50, MaxPerSession: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestRetrieveBothTierHitOutranksLongOnly(t *testing.T) {
 	addMsg(t, d, "s1", 0, "user", "authentication only here", now)   // long term only
 	addMsg(t, d, "s1", 1, "user", "authentication and go here", now) // long + short "go"
 
-	cands, err := Retrieve(context.Background(), d, Options{Query: "authentication go", Limit: 10})
+	cands, err := Retrieve(context.Background(), d, terms("authentication go"), Options{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestRetrievePopulatesSeq(t *testing.T) {
 	now := time.Now().Unix()
 	addMsg(t, d, "s1", 5, "assistant", "unique zzzmarker here", now)
 
-	cands, err := Retrieve(context.Background(), d, Options{Query: "zzzmarker", Limit: 10})
+	cands, err := Retrieve(context.Background(), d, terms("zzzmarker"), Options{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}

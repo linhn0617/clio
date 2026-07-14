@@ -3,7 +3,6 @@ package ask
 import (
 	"context"
 	"sort"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/linhn0617/clio/internal/db"
@@ -47,6 +46,7 @@ type EvidenceGroup struct {
 	Project     string    `json:"project"`
 	EndedAt     int64     `json:"ended_at"`
 	Score       float64   `json:"score"`
+	Source      string    `json:"source"` // originating tool: "claude-code" | "codex"
 	Excerpts    []Excerpt `json:"excerpts"`
 }
 
@@ -85,8 +85,10 @@ func Ask(ctx context.Context, database *db.DB, opt Options) (Answer, error) {
 	// these to sessions, and a pool that is too small lets one session repeating the
 	// query terms across many turns starve other relevant sessions out of the result.
 	pool := max(opt.MaxSessions*40, minCandidatePool)
-	cands, err := search.Retrieve(ctx, database, search.Options{
-		Query:         strings.Join(terms, " "),
+	// terms is passed directly (not joined into a query string): see Retrieve's doc
+	// comment for why joining-then-reparsing breaks on a term with an internal
+	// unmatched quote.
+	cands, err := search.Retrieve(ctx, database, terms, search.Options{
 		Since:         opt.Since,
 		ProjectPrefix: opt.ProjectPrefix,
 		Limit:         pool,
@@ -223,11 +225,12 @@ func assembleGroup(ctx context.Context, database *db.DB, uuid string, score floa
 		})
 	}
 
-	// Citation metadata: exact-uuid resolve returns title/project/ended_at.
+	// Citation metadata: exact-uuid resolve returns title/project/ended_at/source.
 	if meta, err := sessions.ResolvePrefix(ctx, database, uuid, "all"); err == nil {
 		eg.Title = meta.Title
 		eg.Project = meta.ProjectPath
 		eg.EndedAt = meta.EndedAt
+		eg.Source = meta.Source
 	}
 	return eg, nil
 }

@@ -29,23 +29,30 @@ type Candidate struct {
 	FTS         bool
 }
 
-// Retrieve runs an any-term (OR) match over the query terms and returns candidate
-// hits ranked by adjusted score (bm25 + recency/role). A message matching ANY term
+// Retrieve runs an any-term (OR) match over queryTerms and returns candidate hits
+// ranked by adjusted score (bm25 + recency/role). A message matching ANY term
 // qualifies — unlike Search, which ANDs all terms — preserving recall for the
 // many-term queries a natural-language question produces. Long terms (>=3 runes)
 // drive an FTS OR match and short terms an OR of substring LIKEs; both run and
 // their hits merge (dedup by session+seq, keeping the higher score), so a short
 // discriminator (a 2-rune CJK word, "go", "v2") still contributes to recall in a
 // mixed query rather than being dropped.
-func Retrieve(ctx context.Context, database *db.DB, opt Options) ([]Candidate, error) {
+//
+// queryTerms is a pre-split term slice, not a query string: callers (ask) already
+// extract discrete terms, and joining them into one string for Retrieve to
+// re-split via terms() (which honors double quotes) let a term with an internal
+// unmatched quote — e.g. a pasted code fragment like `foo("bar` — swallow every
+// following term into a single, near-unmatchable FTS phrase. Passing the slice
+// directly removes that join-then-reparse seam. opt.Query is unused here (Search
+// still parses it via terms()).
+func Retrieve(ctx context.Context, database *db.DB, queryTerms []string, opt Options) ([]Candidate, error) {
 	if opt.Limit <= 0 {
 		opt.Limit = 60
 	}
-	ts := terms(opt.Query)
-	if len(ts) == 0 {
+	if len(queryTerms) == 0 {
 		return nil, nil
 	}
-	long, short := partitionTerms(ts)
+	long, short := partitionTerms(queryTerms)
 
 	type key struct {
 		sess string

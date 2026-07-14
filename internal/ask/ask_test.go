@@ -213,6 +213,27 @@ func TestAskNoMatchIsEmpty(t *testing.T) {
 	}
 }
 
+// TestAskEmbeddedQuoteDoesNotSwallowLaterTerms guards the codex P2: a term with an
+// internal unmatched double quote (e.g. a pasted code fragment like `foo("bar`)
+// must not, once joined into one query string and re-split by search's
+// quote-aware tokenizer, swallow every following term into one near-unmatchable
+// FTS phrase. ask now hands retrieve the already-split term slice directly, so
+// "marker" — a separate, unrelated term in the question — must still retrieve a
+// message that contains only "marker" and nothing resembling the merged phrase.
+func TestAskEmbeddedQuoteDoesNotSwallowLaterTerms(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p", "t")
+	addMsg(t, d, "s1", 0, "user", "here is a unique marker for the test")
+
+	ans, err := Ask(context.Background(), d, Options{Question: `foo("bar marker`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ans.Groups) == 0 {
+		t.Fatalf(`embedded-quote term swallowed "marker" into an unmatchable joined phrase; got 0 groups`)
+	}
+}
+
 func TestAskRanksStrongerSessionFirst(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "weak", "/p", "weak")

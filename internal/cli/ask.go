@@ -80,7 +80,7 @@ func newAskCmd() *cobra.Command {
 				enc.SetIndent("", "  ")
 				return enc.Encode(ans)
 			}
-			writeAnswer(os.Stdout, ans)
+			writeAnswer(os.Stdout, ans, source)
 			return nil
 		},
 	}
@@ -96,15 +96,23 @@ func newAskCmd() *cobra.Command {
 // writeAnswer renders the evidence bundle as a readable, grouped digest: a
 // citation header per session, then its windowed excerpts with matched lines
 // marked. No prose answer is produced — that is the caller's to synthesize.
-func writeAnswer(w io.Writer, ans ask.Answer) {
+// source is the --source value the bundle was queried with; the citation header
+// is tagged with each group's originating tool only when source is "all" —
+// otherwise every group shares the same (requested) source and the tag is noise,
+// matching how `clio search`'s text output omits it for a single-source query.
+func writeAnswer(w io.Writer, ans ask.Answer, source string) {
 	if len(ans.Groups) == 0 {
 		fmt.Fprintln(w, "no relevant history found")
 		return
 	}
 	fmt.Fprintf(w, "clio ask — %q\n", ans.Question)
 	for _, g := range ans.Groups {
-		fmt.Fprintf(w, "\n[%s] %s  ·  %s  ·  %s\n",
-			shortID(g.SessionUUID), oneLine(g.Title, 60), trimProject(g.Project), formatTS(g.EndedAt))
+		tag := ""
+		if source == "all" && g.Source != "" {
+			tag = "  [" + g.Source + "]"
+		}
+		fmt.Fprintf(w, "\n[%s] %s  ·  %s  ·  %s%s\n",
+			shortID(g.SessionUUID), oneLine(g.Title, 60), trimProject(g.Project), formatTS(g.EndedAt), tag)
 		for _, e := range g.Excerpts {
 			marker := "    "
 			if e.IsHit {
