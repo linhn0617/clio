@@ -146,8 +146,28 @@ func parseTS(s string) int64 {
 	return t.Unix()
 }
 
+// harnessXMLWrapperTags are Claude Code harness-injected XML-ish elements
+// (e.g. <local-command-caveat>...</local-command-caveat>) that, when they
+// open a user message, carry no session-identifying content by themselves.
+var harnessXMLWrapperTags = []string{
+	"local-command-caveat",
+	"task-notification",
+}
+
+// harnessBracketPrefixes are bracket-style harness markers, e.g.
+// "[Request interrupted by user]".
+var harnessBracketPrefixes = []string{
+	"[Request interrupted",
+}
+
 // titleFrom derives a short session title from the first user text, stripping
-// Claude Code command wrappers like <command-name>/init</command-name>.
+// Claude Code command wrappers like <command-name>/init</command-name> and
+// skipping pure harness boilerplate (caveat banners, task notifications,
+// interrupt markers) that carries no session-identifying content. If a
+// boilerplate wrapper is followed by real text in the same message, the
+// wrapper is stripped and the real text is used instead. If a message is
+// nothing but boilerplate, titleFrom returns "" so the caller (ingest.go)
+// keeps looking at the next user message for the session title.
 func titleFrom(s string) string {
 	s = strings.TrimSpace(s)
 	if strings.HasPrefix(s, "<command-") {
@@ -157,12 +177,46 @@ func titleFrom(s string) string {
 			}
 		}
 	}
+	if rest, matched := stripHarnessBoilerplate(s); matched {
+		if rest == "" {
+			return ""
+		}
+		s = rest
+	}
 	const max = 100
 	if utf8.RuneCountInString(s) > max {
 		r := []rune(s)
 		return string(r[:max])
 	}
 	return s
+}
+
+// stripHarnessBoilerplate reports whether s begins with a known Claude Code
+// harness-injected wrapper (XML-ish element or bracket marker) and, if so,
+// returns the text remaining after that wrapper (which may be empty when the
+// wrapper is the entire message).
+func stripHarnessBoilerplate(s string) (rest string, matched bool) {
+	for _, tag := range harnessXMLWrapperTags {
+		open := "<" + tag
+		if !strings.HasPrefix(s, open) {
+			continue
+		}
+		closeTag := "</" + tag + ">"
+		if idx := strings.Index(s, closeTag); idx >= 0 {
+			return strings.TrimSpace(s[idx+len(closeTag):]), true
+		}
+		return "", true // no close tag found: treat the whole thing as boilerplate
+	}
+	for _, prefix := range harnessBracketPrefixes {
+		if !strings.HasPrefix(s, prefix) {
+			continue
+		}
+		if idx := strings.IndexByte(s, ']'); idx >= 0 {
+			return strings.TrimSpace(s[idx+1:]), true
+		}
+		return "", true
+	}
+	return "", false
 }
 
 // toolUseSummary builds a compact "key fields" string for a tool invocation.
