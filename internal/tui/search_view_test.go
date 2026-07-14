@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/sessions"
@@ -52,6 +53,16 @@ func addSession(t *testing.T, d *db.DB, uuid, project string) {
 	t.Helper()
 	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, ended_at, turn_count) VALUES (?,?,?,?,1)`,
 		uuid, project, uuid+".jsonl", time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// addSessionWithSource is addSession plus an explicit originating-tool source
+// ("claude-code" | "codex"), for tests that need to exercise the source filter.
+func addSessionWithSource(t *testing.T, d *db.DB, uuid, project, source string) {
+	t.Helper()
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, ended_at, turn_count, source) VALUES (?,?,?,?,1,?)`,
+		uuid, project, uuid+".jsonl", time.Now().Unix(), source); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -337,5 +348,25 @@ func TestSearchViewStatusShowsError(t *testing.T) {
 	v := searchView{width: 80, height: 24, err: errors.New("boom")}
 	if !strings.Contains(v.View(), "boom") {
 		t.Fatalf("status line should surface the error: %q", v.View())
+	}
+}
+
+// A narrow terminal must not let the query header row overflow the terminal
+// width — a long query should be clamped like every other rendered row.
+func TestSearchViewHeaderNarrowNoOverflow(t *testing.T) {
+	v := searchView{width: 20, height: 10, query: strings.Repeat("x", 50)}
+	line := strings.SplitN(v.View(), "\n", 2)[0]
+	if w := runewidth.StringWidth(line); w > 20 {
+		t.Fatalf("search header exceeds terminal width 20 (got %d): %q", w, line)
+	}
+}
+
+// Even a 1-column terminal must not overflow: the "…" ellipsis is itself
+// width 2, so the header needs an empty tail there (like masterDetail).
+func TestSearchViewHeaderWidth1NoOverflow(t *testing.T) {
+	v := searchView{width: 1, height: 10, query: strings.Repeat("x", 50)}
+	line := strings.SplitN(v.View(), "\n", 2)[0]
+	if w := runewidth.StringWidth(line); w > 1 {
+		t.Fatalf("search header exceeds terminal width 1 (got %d): %q", w, line)
 	}
 }

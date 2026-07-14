@@ -59,11 +59,20 @@ func masterDetail(width, height int, renderList func(w, h int) string, preview, 
 	for i, ln := range lines {
 		lines[i] = runewidth.Truncate(ln, w, "")
 	}
-	// The "…" ellipsis is itself width 2, so it can't fit (and would overflow) a
-	// 1-cell terminal; drop to an empty tail there, like the body rows.
-	statusTail := "…"
-	if w < 2 {
-		statusTail = ""
+	return strings.Join(lines, "\n") + "\n" + clampRow(status, w)
+}
+
+// clampRow truncates one rendered row (a header, status, or tab bar) to the
+// terminal width; width ≤ 0 means unsized and falls back to the default 80.
+// The "…" ellipsis is itself width 2, so it can't fit (and would overflow) a
+// 1-cell terminal; drop to an empty tail there, like masterDetail's body rows.
+func clampRow(row string, width int) string {
+	if width <= 0 {
+		width = 80
 	}
-	return strings.Join(lines, "\n") + "\n" + runewidth.Truncate(status, w, statusTail)
+	tail := "…"
+	if width < 2 {
+		tail = ""
+	}
+	return runewidth.Truncate(row, width, tail)
 }

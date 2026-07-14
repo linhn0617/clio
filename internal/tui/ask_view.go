@@ -19,6 +19,7 @@ import (
 type askView struct {
 	db            *db.DB
 	ctx           context.Context
+	source        string // source filter: "" / "claude-code" | "codex" | "all"
 	width, height int
 	query         string
 	gen           int    // bumps on each submit/edit; stale answers are dropped
@@ -90,12 +91,12 @@ func (v askView) Update(msg tea.Msg) (askView, tea.Cmd) {
 // runAsk builds the evidence bundle for the current question, tagged with
 // generation g and the question it answers so a stale answer can be dropped.
 func (v askView) runAsk(g int) tea.Cmd {
-	q, database, ctx := v.query, v.db, orBackground(v.ctx)
+	q, database, source, ctx := v.query, v.db, v.source, orBackground(v.ctx)
 	return func() tea.Msg {
 		if database == nil || strings.TrimSpace(q) == "" {
 			return askAnswerMsg{gen: g, question: q}
 		}
-		ans, err := ask.Ask(ctx, database, ask.Options{Question: q})
+		ans, err := ask.Ask(ctx, database, ask.Options{Question: q, Source: source})
 		return askAnswerMsg{gen: g, question: q, groups: ans.Groups, err: err}
 	}
 }
@@ -103,7 +104,7 @@ func (v askView) runAsk(g int) tea.Cmd {
 // View renders the question prompt above the master-detail layout: the evidence
 // groups on the left, the selected group's excerpts on the right.
 func (v askView) View() string {
-	header := "? " + v.query
+	header := clampRow("? "+v.query, v.width)
 	body := masterDetail(v.width, max(v.height-1, 1), v.renderList, v.renderExcerpts(), v.statusLine())
 	return header + "\n" + body
 }

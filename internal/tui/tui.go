@@ -46,7 +46,7 @@ func New(ctx context.Context, database *db.DB, source string) Model {
 		search:   searchView{db: database, ctx: ctx, source: source},
 		browse:   browseView{db: database, ctx: ctx, source: source},
 		activity: activityView{db: database, ctx: ctx, source: source},
-		ask:      askView{db: database, ctx: ctx},
+		ask:      askView{db: database, ctx: ctx, source: source},
 	}
 }
 
@@ -143,8 +143,7 @@ func (m Model) tabBar() string {
 			b.WriteString("  " + n)
 		}
 	}
-	b.WriteString("\n")
-	return b.String()
+	return clampRow(b.String(), m.width) + "\n"
 }
 
 func (m Model) activeView() string {

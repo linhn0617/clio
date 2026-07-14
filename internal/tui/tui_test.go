@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/sessions"
@@ -179,6 +180,25 @@ func TestRootClampsTinyHeight(t *testing.T) {
 	m := step(t, newTest(nil), tea.WindowSizeMsg{Width: 80, Height: 1})
 	if m.search.height != 1 {
 		t.Fatalf("sub-view height should clamp to 1 at terminal height 1, got %d", m.search.height)
+	}
+}
+
+// A narrow terminal must not let the tab bar overflow the terminal width.
+func TestRootTabBarNarrowNoOverflow(t *testing.T) {
+	m := step(t, newTest(nil), tea.WindowSizeMsg{Width: 20, Height: 24})
+	line := strings.SplitN(m.View(), "\n", 2)[0]
+	if w := runewidth.StringWidth(line); w > 20 {
+		t.Fatalf("tab bar exceeds terminal width 20 (got %d): %q", w, line)
+	}
+}
+
+// Even a 1-column terminal must not overflow: the "…" ellipsis is itself
+// width 2, so the tab bar needs an empty tail there (like masterDetail).
+func TestRootTabBarWidth1NoOverflow(t *testing.T) {
+	m := step(t, newTest(nil), tea.WindowSizeMsg{Width: 1, Height: 24})
+	line := strings.SplitN(m.View(), "\n", 2)[0]
+	if w := runewidth.StringWidth(line); w > 1 {
+		t.Fatalf("tab bar exceeds terminal width 1 (got %d): %q", w, line)
 	}
 }
 

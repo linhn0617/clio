@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/linhn0617/clio/internal/ask"
 )
@@ -44,6 +45,27 @@ func TestAskViewRunAskQueries(t *testing.T) {
 	}
 	if am.err != nil || len(am.groups) != 1 || am.groups[0].SessionUUID != "s1" {
 		t.Fatalf("ask result wrong: %+v err=%v", am.groups, am.err)
+	}
+}
+
+// runAsk scopes the query to the view's source filter, so `clio tui --source
+// codex` actually asks over codex history instead of silently falling back to
+// the claude-code default.
+func TestAskViewRunAskUsesSource(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "cc1", "/p") // defaults to claude-code (NULL source column)
+	addMsg(t, d, "cc1", 0, "user", "the authentication module design")
+	addSessionWithSource(t, d, "cx1", "/p", "codex")
+	addMsg(t, d, "cx1", 0, "user", "the authentication module design")
+
+	v := askView{db: d, query: "authentication", gen: 1, source: "codex"}
+	msg := v.runAsk(1)()
+	am, ok := msg.(askAnswerMsg)
+	if !ok {
+		t.Fatalf("runAsk should emit askAnswerMsg, got %T", msg)
+	}
+	if am.err != nil || len(am.groups) != 1 || am.groups[0].SessionUUID != "cx1" {
+		t.Fatalf("askView with source=codex should only match codex sessions: %+v err=%v", am.groups, am.err)
 	}
 }
 
@@ -166,5 +188,25 @@ func TestAskViewEditedQueryHidesStaleAnswer(t *testing.T) {
 	v, _ = qUpdate(t, v, runes("x")) // query -> "authx", diverges from answered
 	if strings.Contains(v.View(), "Auth design") {
 		t.Fatalf("after editing the query, the stale answer should be hidden: %q", v.View())
+	}
+}
+
+// A narrow terminal must not let the question header row overflow the
+// terminal width — a long question should be clamped like every other row.
+func TestAskViewHeaderNarrowNoOverflow(t *testing.T) {
+	v := askView{width: 20, height: 10, query: strings.Repeat("x", 50)}
+	line := strings.SplitN(v.View(), "\n", 2)[0]
+	if w := runewidth.StringWidth(line); w > 20 {
+		t.Fatalf("ask header exceeds terminal width 20 (got %d): %q", w, line)
+	}
+}
+
+// Even a 1-column terminal must not overflow: the "…" ellipsis is itself
+// width 2, so the header needs an empty tail there (like masterDetail).
+func TestAskViewHeaderWidth1NoOverflow(t *testing.T) {
+	v := askView{width: 1, height: 10, query: strings.Repeat("x", 50)}
+	line := strings.SplitN(v.View(), "\n", 2)[0]
+	if w := runewidth.StringWidth(line); w > 1 {
+		t.Fatalf("ask header exceeds terminal width 1 (got %d): %q", w, line)
 	}
 }
