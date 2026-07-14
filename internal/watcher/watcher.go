@@ -17,6 +17,10 @@ import (
 	"github.com/linhn0617/clio/internal/ingest"
 )
 
+// debounceWindow is really a batch window: ingest fires 500ms after the
+// FIRST dirty event, not 500ms after the last one (no trailing-edge reset).
+// A sustained burst is handled as successive 500ms batches, with the 60s
+// backstop sweep as the safety net.
 const debounceWindow = 500 * time.Millisecond
 
 // backstopPeriod is a var so tests can shorten the reconcile/purge interval.

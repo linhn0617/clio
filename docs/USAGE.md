@@ -322,14 +322,19 @@ EN:
 - **MCP server not running**: each CLI command does a quick incremental catch-up
   before querying. Run `clio index` to force one; `clio index --full` rebuilds.
 - Short queries (1–2 chars, e.g. most CJK words) fall back to a substring scan,
-  since the trigram FTS index needs 3+ characters.
+  since the trigram FTS index needs 3+ characters. Note the asymmetry with
+  `clio ask`: ask extracts terms from your question and deliberately drops a
+  lone CJK character (too broad to be useful evidence), so a single-character
+  ask finds nothing — use `clio search` for single-character lookups.
 
 中文：
 - **MCP server 執行中**（Claude Code 開著）：file watcher 即時 ingest 新活動，不用手動跑。
 - **MCP server 沒在跑**：每個 CLI 指令查詢前會做快速增量補抓。可用 `clio index` 強制；
   `clio index --full` 從頭重建。
 - 短查詢（1–2 字，例如多數中文詞）會 fallback 到子字串掃描，因為 trigram FTS 索引
-  需要 3 字以上。
+  需要 3 字以上。注意與 `clio ask` 的不對稱：ask 從問題抽取關鍵詞時會刻意丟棄
+  單一漢字（範圍太廣、不構成有用證據），所以單字的 ask 查不到東西——單字查詢
+  請用 `clio search`。
 
 ---
 
@@ -356,6 +361,13 @@ EN:
 - Secret patterns (API keys, tokens, private keys, `.env` lines) are redacted at
   ingest, in both searchable text and the stored raw event.
 - All local; no telemetry, no cloud sync.
+- `install-mcp`/`install-hook`/`uninstall-*` *do* rewrite `~/.claude.json` /
+  `~/.claude/settings.json` (read-modify-atomic-write, with a `.bak` of the
+  pre-mutation content — see above). Values are preserved exactly, including
+  integers and decimals written by other tools, but re-serializing a JSON
+  object always sorts its keys alphabetically, so unrelated top-level (and
+  nested-object) keys may appear reordered after a mutation even though
+  their values are untouched.
 
 中文：
 - DB 位於 `~/Library/Application Support/clio/db.sqlite`（macOS）或
@@ -364,6 +376,11 @@ EN:
 - ingest 時遮蔽機密（API key、token、private key、`.env` 行），可搜尋文字與儲存的
   原始事件都會處理。
 - 全部本機；無遙測、無雲端同步。
+- `install-mcp`/`install-hook`/`uninstall-*` **會**改寫 `~/.claude.json` /
+  `~/.claude/settings.json`（read-modify-atomic-write，並保留改動前內容的
+  `.bak`，見上）。數值本身會完整保留（含其他工具寫入的大整數與小數），但
+  re-serialize JSON object 時 key 一律按字母排序，所以改動後不相關的
+  top-level（與巢狀 object 的）key 順序可能會變，即使其值完全沒被動到。
 
 ---
 
