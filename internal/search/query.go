@@ -89,3 +89,91 @@ func quotedTerms(terms []string) []string {
 func buildMatchQuery(terms []string) string {
 	return strings.Join(quotedTerms(terms), " ")
 }
+
+// likeSnippetWindow is the total rune length of a LIKE-fallback snippet.
+const likeSnippetWindow = 160
+
+// likeSnippetBefore is how many runes of context windowSnippet keeps before
+// the first matched term, when there is enough content on both sides.
+const likeSnippetBefore = 60
+
+// windowSnippet returns a roughly likeSnippetWindow-rune slice of content,
+// centered on the first occurrence of any term, with an ellipsis marking
+// either edge when the window doesn't start/end at the content's edge. If no
+// term position is found (shouldn't happen given the caller's AND'd LIKE
+// predicate, but kept safe to call standalone), it falls back to a leading
+// window, matching the previous substr(1,160) behavior. Operates on runes
+// throughout so multi-byte UTF-8 (e.g. CJK) is never split mid-character.
+func windowSnippet(content string, terms []string) string {
+	runes := []rune(content)
+	if len(runes) <= likeSnippetWindow {
+		return content
+	}
+
+	start := 0
+	if pos := firstTermRunePos(content, terms); pos >= 0 {
+		start = pos - likeSnippetBefore
+		if start < 0 {
+			start = 0
+		}
+	}
+	end := start + likeSnippetWindow
+	if end > len(runes) {
+		end = len(runes)
+		start = end - likeSnippetWindow
+		if start < 0 {
+			start = 0
+		}
+	}
+
+	snippet := string(runes[start:end])
+	if start > 0 {
+		snippet = "…" + snippet
+	}
+	if end < len(runes) {
+		snippet = snippet + "…"
+	}
+	return snippet
+}
+
+// firstTermRunePos returns the rune index of the earliest occurrence of any
+// term in content (the minimum over all terms that occur at all), or -1 if
+// none occurs. Case-folding is ASCII-only via asciiLower, matching SQLite's
+// own default LIKE case-insensitivity (which likeQuery relies on and is
+// itself ASCII-only) rather than full Unicode case-folding.
+func firstTermRunePos(content string, terms []string) int {
+	lc := asciiLower(content)
+	best := -1
+	for _, t := range terms {
+		if t == "" {
+			continue
+		}
+		idx := strings.Index(lc, asciiLower(t))
+		if idx < 0 {
+			continue
+		}
+		if best < 0 || idx < best {
+			best = idx
+		}
+	}
+	if best < 0 {
+		return -1
+	}
+	return utf8.RuneCountInString(content[:best])
+}
+
+// asciiLower lowercases only ASCII letters (A-Z), leaving every other byte
+// untouched. Safe on arbitrary UTF-8: continuation and lead bytes of
+// multi-byte sequences are always >= 0x80 so this never rewrites or
+// misaligns them, and because ASCII bytes map 1:1 to ASCII bytes, byte
+// offsets into the result line up exactly with byte offsets into the input
+// (needed by firstTermRunePos's content[:best] slice).
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
+}

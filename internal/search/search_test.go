@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/linhn0617/clio/internal/db"
 )
@@ -571,5 +572,104 @@ func TestSearchZeroTermQuery(t *testing.T) {
 		if len(res) != 0 {
 			t.Errorf("query %q (IncludeToolOutput) expected empty results, got %d", q, len(res))
 		}
+	}
+}
+
+// TestSearchFTSSnippetHasReadableContext guards against the trigram-tokenizer
+// snippet bug: messages_fts tokenizes as trigram, so snippet()'s token-count
+// argument is ~1 char of context per token, not ~1 word. At the old value (10)
+// the ~12-char window doesn't even fit the 14-char matched word "authentication"
+// whole, let alone any neighboring context — it comes back as a mid-word
+// fragment. At 64 tokens (~66 chars) the window should comfortably fit the
+// matched word plus a word of context on each side.
+func TestSearchFTSSnippetHasReadableContext(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p/one")
+	now := time.Now().Unix()
+	content := "the team discussed authentication overhaul today and then " +
+		strings.Repeat("continued talking about various unrelated other topics for a very long time to pad this message out well past the token window so truncation kicks in reliably. ", 3)
+	addMsg(t, d, "s1", 0, "user", content, now)
+
+	res, err := Search(context.Background(), d, Options{Query: "authentication", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("expected 1 hit, got %d: %+v", len(res), res)
+	}
+	snip := res[0].Snippet
+	if !strings.Contains(snip, "authentication") {
+		t.Fatalf("snippet should contain the full matched word (not a mid-word fragment), got %q", snip)
+	}
+	if !strings.Contains(snip, "discussed") || !strings.Contains(snip, "overhaul") {
+		t.Fatalf("snippet should carry readable context on both sides of the match, got %q", snip)
+	}
+	if utf8.RuneCountInString(snip) < 30 {
+		t.Fatalf("snippet too short to be readable context: %q", snip)
+	}
+}
+
+// TestSearchLikeSnippetCentersOnHit guards against the LIKE-fallback snippet
+// bug: likeQuery used to always emit substr(content,1,160) regardless of
+// where the matched term actually occurred, so a hit past the 160th char
+// produced a snippet that didn't contain the match at all. The matched term
+// here sits well past the first 200 chars.
+func TestSearchLikeSnippetCentersOnHit(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p/one")
+	now := time.Now().Unix()
+	padding := strings.Repeat("filler ", 40) // 280 ASCII runes, no term in it
+	content := padding + "找到關鍵字在這裡" + strings.Repeat(" more filler text", 10)
+	if utf8.RuneCountInString(padding) < 200 {
+		t.Fatalf("test setup: padding too short: %d runes", utf8.RuneCountInString(padding))
+	}
+	addMsg(t, d, "s1", 0, "user", content, now)
+
+	// 2-char CJK term: below the 3-rune long/short cutoff, forces the LIKE path.
+	res, err := Search(context.Background(), d, Options{Query: "關鍵", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("expected 1 hit, got %d: %+v", len(res), res)
+	}
+	snip := res[0].Snippet
+	if !strings.Contains(snip, "關鍵") {
+		t.Fatalf("snippet must contain the matched term, got %q", snip)
+	}
+	if !strings.HasPrefix(snip, "…") {
+		t.Fatalf("snippet should be marked as truncated at the start (match is far past char 160), got %q", snip)
+	}
+	if !strings.HasSuffix(snip, "…") {
+		t.Fatalf("snippet should be marked as truncated at the end, got %q", snip)
+	}
+}
+
+// TestSearchLikeSnippetCJKRuneBoundary uses dense CJK content (no ASCII
+// spaces) on both sides of the match so that any byte-based (rather than
+// rune-based) window slicing would corrupt a multi-byte UTF-8 sequence at
+// the window edge.
+func TestSearchLikeSnippetCJKRuneBoundary(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p/one")
+	now := time.Now().Unix()
+	before := strings.Repeat("填充內容測試文字", 30) // 240 CJK runes, no term
+	after := strings.Repeat("後續補充說明文字", 30)  // 240 CJK runes, no term
+	content := before + "驗證" + after
+	addMsg(t, d, "s1", 0, "user", content, now)
+
+	res, err := Search(context.Background(), d, Options{Query: "驗證", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("expected 1 hit, got %d: %+v", len(res), res)
+	}
+	snip := res[0].Snippet
+	if !utf8.ValidString(snip) {
+		t.Fatalf("snippet corrupted a multi-byte rune at the window edge: %q", snip)
+	}
+	if !strings.Contains(snip, "驗證") {
+		t.Fatalf("snippet must contain the matched term, got %q", snip)
 	}
 }

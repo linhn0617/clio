@@ -36,7 +36,8 @@ func Search(ctx context.Context, database *db.DB, opt Options) ([]Result, error)
 		rows *sql.Rows
 		err  error
 	)
-	if len(long) > 0 {
+	isLike := len(long) == 0
+	if !isLike {
 		rows, err = hybridQuery(ctx, database, opt, long, short)
 	} else {
 		rows, err = likeQuery(ctx, database, opt)
@@ -52,6 +53,12 @@ func Search(ctx context.Context, database *db.DB, opt Options) ([]Result, error)
 		var bm float64
 		if err := rows.Scan(&r.MessageID, &r.Seq, &r.SessionUUID, &r.ProjectPath, &r.ParentSession, &r.AgentType, &r.Source, &r.Role, &r.TS, &r.Snippet, &bm); err != nil {
 			return nil, err
+		}
+		if isLike {
+			// likeQuery emits the raw message content (see its comment); window it
+			// here in Go so the snippet is centered on the actual hit instead of
+			// always being the first 160 chars (which may not contain the match).
+			r.Snippet = windowSnippet(r.Snippet, ts)
 		}
 		r.Score = adjustedScore(bm, r.Role, r.TS)
 		results = append(results, r)
@@ -124,8 +131,12 @@ func hybridQuery(ctx context.Context, database *db.DB, opt Options, long, short 
 	}
 
 	matchExpr := buildMatchQuery(long)
+	// messages_fts tokenizes as trigram, so a "token" here is ~1 char, not a word;
+	// 10 (the old value) yields ~12 chars of snippet — a mid-word fragment with no
+	// usable context. 64 is SQLite's hard max for snippet()'s token-count argument
+	// and is enough to recover a readable window around the match.
 	q := `SELECT m.id, m.seq, m.session_uuid, COALESCE(s.project_path,''), COALESCE(s.parent_session,''), COALESCE(s.agent_type,''), COALESCE(s.source,'claude-code'), m.role, COALESCE(m.ts,0),
-		snippet(messages_fts,0,'[',']','…',10), bm25(messages_fts)
+		snippet(messages_fts,0,'[',']','…',64), bm25(messages_fts)
 		FROM messages_fts
 		JOIN messages m ON m.id = messages_fts.rowid
 		LEFT JOIN sessions s ON s.uuid = m.session_uuid
@@ -148,9 +159,12 @@ func likeQuery(ctx context.Context, database *db.DB, opt Options) (*sql.Rows, er
 		args = append(args, "%"+db.EscapeLike(t)+"%")
 	}
 	where := strings.Join(conds, " AND ")
-	// LIKE has no bm25; emit content as the "snippet" source (trimmed later) and 0 score.
+	// LIKE has no bm25; emit the full content as the "snippet" column (0 score) and
+	// let Search window it around the actual hit via windowSnippet — a plain
+	// substr(1,160) here would silently return a snippet that may not even contain
+	// the matched term if it occurs past the 160th char.
 	q := `SELECT m.id, m.seq, m.session_uuid, COALESCE(s.project_path,''), COALESCE(s.parent_session,''), COALESCE(s.agent_type,''), COALESCE(s.source,'claude-code'), m.role, COALESCE(m.ts,0),
-		substr(m.content,1,160), 0.0
+		m.content, 0.0
 		FROM messages m
 		LEFT JOIN sessions s ON s.uuid = m.session_uuid
 		WHERE ` + where + filt + `
