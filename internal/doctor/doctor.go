@@ -4,6 +4,7 @@
 package doctor
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -14,6 +15,7 @@ import (
 	"github.com/linhn0617/clio/internal/config"
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
+	sqlitelib "modernc.org/sqlite"
 )
 
 // Result is one check outcome.
@@ -70,18 +72,31 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 		add("db integrity", integ == "ok", integ)
 	}
 
-	// FTS sync: messages vs fts row counts.
+	// FTS sync: messages vs fts row counts, then (only when counts match) a
+	// content-level integrity check. Row counts alone can't see the index
+	// desynced from message content while row bookkeeping stays consistent
+	// (see ftsContentIntegrityOK) — a real defect a row-count-only check
+	// cannot distinguish from a healthy index.
 	var msgCount, ftsCount int
 	msgErr := database.QueryRow(`SELECT count(*) FROM messages`).Scan(&msgCount)
 	ftsErr := database.QueryRow(`SELECT count(*) FROM messages_fts`).Scan(&ftsCount)
-	if msgErr != nil || ftsErr != nil {
+	switch {
+	case msgErr != nil || ftsErr != nil:
 		e := msgErr
 		if e == nil {
 			e = ftsErr
 		}
 		add("fts index", false, e.Error())
-	} else {
-		add("fts index", msgCount == ftsCount, fmt.Sprintf("%d messages / %d fts rows", msgCount, ftsCount))
+	case msgCount != ftsCount:
+		add("fts index", false, fmt.Sprintf("%d messages / %d fts rows", msgCount, ftsCount))
+	default:
+		if ok, detail, ierr := ftsContentIntegrityOK(dbPath); ierr != nil {
+			add("fts index", false, fmt.Sprintf("%d messages / %d fts rows, content check failed: %s", msgCount, ftsCount, ierr.Error()))
+		} else if !ok {
+			add("fts index", false, fmt.Sprintf("%d messages / %d fts rows, %s", msgCount, ftsCount, detail))
+		} else {
+			add("fts index", true, fmt.Sprintf("%d messages / %d fts rows, content verified", msgCount, ftsCount))
+		}
 	}
 
 	// Orphan sessions (no messages).
@@ -191,6 +206,57 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 	}
 
 	return out
+}
+
+// ftsContentIntegrityOK runs SQLite FTS5's external-content integrity check
+// (`INSERT INTO messages_fts(messages_fts, rank) VALUES('integrity-check', 1)`)
+// against the index at dbPath. Unlike a row-count comparison, this walks the
+// trigram postings and verifies them against messages.content, so it catches
+// index/content divergence that leaves row counts untouched (verified against
+// a real sqlite3 CLI repro in scratchpad: deleting a row's fts entry keyed on
+// the wrong old content, rather than through the AFTER UPDATE/DELETE
+// triggers, leaves messages_fts's row count unchanged but its postings
+// inconsistent — plain `integrity-check` with no rank argument does NOT catch
+// this, only the rank=1 form does).
+//
+// This requires a writable connection: SQLite implements FTS5 maintenance
+// commands as an INSERT against the virtual table, which a mode=ro connection
+// refuses outright ("attempt to write a readonly database"), confirmed
+// against the same repro. doctor's CLI caller opens the DB read-only (see
+// internal/cli/doctor.go) so callers aren't forced to hold the whole
+// diagnostic run on a writable handle just for this one check; instead this
+// opens its own short-lived writable connection to dbPath and closes it
+// immediately after. The command does not persist any change to the database
+// file (verified: no WAL/SHM sidecar appears and the file's size is
+// unchanged after running it), so this is safe to run against a live index.
+//
+// This does not run schema migrations (unlike db.Open): it is a single
+// INSERT statement against an already-migrated messages_fts table. On a
+// pre-migration DB missing that table, or when the DB can't be opened
+// writable at all (e.g. permission denied, or contention that outlasts the
+// busy_timeout), the query error is returned via err for the caller to
+// report like any other check failure — it is not conflated with a genuine
+// integrity failure.
+func ftsContentIntegrityOK(dbPath string) (ok bool, detail string, err error) {
+	dsn := "file:" + dbPath + "?_pragma=busy_timeout(3000)&mode=rw"
+	conn, oerr := sql.Open("sqlite", dsn)
+	if oerr != nil {
+		return false, "", fmt.Errorf("open writable connection for fts integrity-check: %w", oerr)
+	}
+	defer conn.Close()
+
+	_, cerr := conn.Exec(`INSERT INTO messages_fts(messages_fts, rank) VALUES('integrity-check', 1)`)
+	if cerr == nil {
+		return true, "", nil
+	}
+	var se *sqlitelib.Error
+	if errors.As(cerr, &se) && se.Code()&0xff == 11 {
+		// 11 = SQLITE_CORRUPT primary result code, masking off any extended-code
+		// bits (e.g. SQLITE_CORRUPT_VTAB reports as 267 = 11 | (1<<8)) — mirrors
+		// the SQLITE_BUSY/SQLITE_LOCKED check in internal/db/db.go's isBusyErr.
+		return false, "trigram index content mismatch (fts5 integrity-check failed): " + cerr.Error(), nil
+	}
+	return false, "", fmt.Errorf("fts5 integrity-check: %w", cerr)
 }
 
 func reconcile(database *db.DB, availRoots []string) (missing, preserved, truncated, rewritten, lag int, err error) {

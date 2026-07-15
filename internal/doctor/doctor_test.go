@@ -208,6 +208,101 @@ func findResult(t *testing.T, results []Result, name string) Result {
 	return Result{}
 }
 
+// TestFTSIndexDetectsContentLevelCorruption covers a corruption the old
+// row-count-only fts check could not see: the messages_fts trigram index can
+// be desynced from messages.content while both tables still report the same
+// row count (e.g. a bug in an update/delete path, or operator error). This
+// reproduces that by issuing the fts5 external-content "delete" maintenance
+// command with content that does NOT match what was actually indexed for
+// that rowid, bypassing the AFTER UPDATE/DELETE triggers (which always pass
+// the real old content) — verified against a real sqlite3 CLI experiment
+// (scratchpad) that row counts stay equal (3=3) while
+// `INSERT INTO messages_fts(messages_fts, rank) VALUES('integrity-check', 1)`
+// reports "database disk image is malformed".
+func TestFTSIndexDetectsContentLevelCorruption(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "x.sqlite")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	for i, c := range []string{"hello world alpha", "goodbye world beta", "third message gamma here"} {
+		if _, err := d.Exec(`INSERT INTO messages(session_uuid, seq, ts, role, content, raw_json) VALUES (?,?,?,?,?,?)`,
+			"s1", i+1, i+1, "user", c, "{}"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Sanity: healthy before corruption (also guards against a false positive
+	// on a real, non-empty index).
+	if r := findResult(t, Run(d, dir, dbPath), "fts index"); !r.OK {
+		t.Fatalf("expected fts index healthy before corruption, got %+v", r)
+	}
+
+	if _, err := d.Exec(`INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', 2, 'WRONG OLD TEXT NOT MATCHING')`); err != nil {
+		t.Fatal(err)
+	}
+
+	var msgCount, ftsCount int
+	if err := d.QueryRow(`SELECT count(*) FROM messages`).Scan(&msgCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.QueryRow(`SELECT count(*) FROM messages_fts`).Scan(&ftsCount); err != nil {
+		t.Fatal(err)
+	}
+	if msgCount != ftsCount {
+		t.Fatalf("test fixture bug: row counts must still match after this corruption (got messages=%d fts=%d)", msgCount, ftsCount)
+	}
+
+	r := findResult(t, Run(d, dir, dbPath), "fts index")
+	if r.OK {
+		t.Fatalf("expected fts index to catch content-level corruption despite matching row counts, got %+v", r)
+	}
+}
+
+// TestFTSIndexContentCheckWorksWithReadOnlyRun mirrors exactly how the real
+// CLI drives doctor (internal/cli/doctor.go: db.OpenReadOnly then
+// doctor.Run) to confirm the content-level fts integrity check — which needs
+// a writable SQLite connection because SQLite implements FTS5 maintenance
+// commands as an INSERT that a mode=ro connection refuses outright — still
+// works when the *db.DB passed into Run is itself read-only. It must, since
+// ftsContentIntegrityOK opens its own short-lived writable connection to
+// dbPath rather than reusing the passed-in connection.
+func TestFTSIndexContentCheckWorksWithReadOnlyRun(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "x.sqlite")
+
+	w, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, c := range []string{"hello world alpha", "goodbye world beta"} {
+		if _, err := w.Exec(`INSERT INTO messages(session_uuid, seq, ts, role, content, raw_json) VALUES (?,?,?,?,?,?)`,
+			"s1", i+1, i+1, "user", c, "{}"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ro, err := db.OpenReadOnly(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+
+	r := findResult(t, Run(ro, dir, dbPath), "fts index")
+	if !r.OK {
+		t.Fatalf("expected healthy fts index via a read-only Run (matching the real CLI path), got %+v", r)
+	}
+	if !strings.Contains(r.Detail, "content verified") {
+		t.Fatalf("expected detail to confirm the content check ran, got %q", r.Detail)
+	}
+}
+
 func TestRunFlagsFtsCheckWhenMessagesQueryErrors(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "x.sqlite")
