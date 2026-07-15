@@ -147,12 +147,14 @@ generate an answer. Over MCP, Claude synthesizes from the bundle.
 | `--since` | Only consider sessions since this time | 只考慮此時間後的 session | — |
 | `--limit` | Max sessions in the bundle | 最多幾個 session | `6` |
 | `--window` | Dialogue turns each side of a match | 命中前後各幾個對話 turn | `2` |
+| `--max-tokens` | Max estimated tokens in the bundle's excerpt text (clamped to 200–8000) | 證據包片段文字的最大估計 token 數（夾限在 200–8000） | `2000` |
 | `--json` | Output the bundle as JSON | 以 JSON 輸出 | `false` |
 
 ```bash
 clio ask "how did we fix the auth bug"
 clio ask "資料庫遷移的設計" --since 30d --window 3
 clio ask "rate limiter" --project myapp --json
+clio ask "big feature investigation" --max-tokens 500 --json
 ```
 
 ### `clio list` — browse sessions / 瀏覽 session
@@ -399,7 +401,7 @@ EN:
 ```bash
 clio install-mcp                                  # set up (index + register MCP)
 clio search "<query>" [--since 7d] [--project X] [--role user|assistant] [--touched P] [--tool T] [--ran S] [--limit N] [--json]
-clio ask "<question>" [--since 7d] [--project X] [--limit N] [--window N] [--json]
+clio ask "<question>" [--since 7d] [--project X] [--limit N] [--window N] [--max-tokens N] [--json]
 clio list [--since 7d] [--project X] [--min-turns N] [--touched P] [--tool T] [--ran S] [--limit N] [--json]
 clio show <uuid-or-prefix> [--format markdown|json|raw] [--no-tool-output]
 clio activity --by file|command|tool|pattern|url [--since 7d] [--project X]
