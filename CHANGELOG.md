@@ -5,6 +5,41 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-07-15
+
+Token-budgeted evidence bundles, an assertion-based retrieval regression
+suite, and content-level FTS index verification. Both features were
+spec'd first (openspec), adversarially reviewed, and implemented against
+the revised specs.
+
+### Added
+
+- `ask` evidence bundles are bounded by a global token budget: a
+  deterministic, dependency-free estimator (CJK runes 1:1, other runes
+  ~4:1) enforces an effective bound of max(budget, the top group's
+  minimum-length hit excerpts). Whole lower-ranked groups are dropped
+  first and a group is never partially emitted — except the top group,
+  whose hit excerpts always survive, so a tiny budget returns a trimmed
+  bundle rather than an empty one. Exposed as `max_tokens` on the MCP
+  `ask` tool and `--max-tokens` on `clio ask` (default 2000, clamped to
+  200–8000 on every surface).
+- A retrieval regression suite (`internal/eval`): 12 synthetic bilingual
+  sessions and 20 assertion-style queries (EN / CJK / mixed / code
+  fragments / quoted phrases / FTS-vs-LIKE tiers) pinning search and ask
+  top-k behavior, snippet visibility, and budget compliance. Runs as
+  plain `go test` inside the existing CI step; failures name the query,
+  the expectation, and the actual top-k.
+- `clio doctor` verifies FTS index content, not just row counts: when
+  counts match, it runs SQLite's FTS5 `integrity-check`, catching
+  content-level corruption the old check silently passed (~0.5s on a
+  50k-message database).
+
+### Notes
+
+- The openspec source-adapter registry proposal
+  (`openspec/changes/2026-07-14-generalize-source-adapter-spi/`) ships as
+  a reviewed spec only; implementation is deferred.
+
 ## [0.11.0] - 2026-07-14
 
 Retrieval-quality and diagnostics release, driven by an adversarial

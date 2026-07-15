@@ -26,12 +26,12 @@ You *could* `grep ~/.claude/projects/*.jsonl` — but that's exactly what clio i
 
 **1. Install the binary**
 
-**Prebuilt (recommended)** — download the asset for your platform from the [latest release](https://github.com/linhn0617/clio/releases/latest) (current: [**v0.11.0**](https://github.com/linhn0617/clio/releases/tag/v0.11.0); macOS/Linux `amd64`+`arm64`, Windows `amd64`), put it on your `PATH`, and verify it against `SHASUMS256.txt`.
+**Prebuilt (recommended)** — download the asset for your platform from the [latest release](https://github.com/linhn0617/clio/releases/latest) (current: [**v0.12.0**](https://github.com/linhn0617/clio/releases/tag/v0.12.0); macOS/Linux `amd64`+`arm64`, Windows `amd64`), put it on your `PATH`, and verify it against `SHASUMS256.txt`.
 
 **Or with `go install`:**
 
 ```
-go install github.com/linhn0617/clio/cmd/clio@v0.11.0   # or @latest for the newest
+go install github.com/linhn0617/clio/cmd/clio@v0.12.0   # or @latest for the newest
 ```
 
 This drops `clio` into `$(go env GOPATH)/bin` — make sure that's on your `PATH`.
@@ -90,10 +90,12 @@ When registered via `clio install-mcp`, Claude Code can call:
 | Tool | What it does |
 |------|--------------|
 | `search` | Full-text search, **ranked** by relevance + recency (short queries fall back to a substring scan; tool output excluded by default) |
-| `ask` | Answer a question from history: a cited bundle of the most relevant excerpts, windowed in their turns and grouped by session, for Claude to synthesize from |
+| `ask` | Answer a question from history: a cited bundle of the most relevant excerpts, windowed in their turns and grouped by session, for Claude to synthesize from; `max_tokens` bounds the bundle's estimated size (default 2000, min 200, max 8000) |
 | `list_sessions` | List sessions by date/project/turn count, or by file touched / tool used / command run; subagent children are hidden by default (each parent carries a `subagent_count`), `include_subagents` adds them as rows with `parent_session` / `agent_type` |
 | `activity_summary` | Counts by day or project, or your most-used files / commands / tools / patterns / URLs ("what did I touch last week?") |
 | `read_session` | Read one session in full, paginated; reports a parent's subagents (`include_subagents` inlines them) |
+
+Retrieval quality (ranking, FTS/LIKE tiering, `ask` grouping and windowing) is protected end to end by a deterministic regression suite over a small bilingual fixture corpus (`internal/eval`, runs under plain `go test ./...`).
 
 ## Privacy
 
