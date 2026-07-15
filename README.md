@@ -26,7 +26,10 @@ You *could* `grep ~/.claude/projects/*.jsonl` — but that's exactly what clio i
 
 **1. Install the binary**
 
-**Prebuilt (recommended)** — download the asset for your platform from the [latest release](https://github.com/linhn0617/clio/releases/latest) (current: [**v0.12.0**](https://github.com/linhn0617/clio/releases/tag/v0.12.0); macOS/Linux `amd64`+`arm64`, Windows `amd64`), put it on your `PATH`, and verify it against `SHASUMS256.txt`.
+**Prebuilt (recommended)** — download the asset for your platform from the [latest release](https://github.com/linhn0617/clio/releases/latest) (current: [**v0.12.0**](https://github.com/linhn0617/clio/releases/tag/v0.12.0); macOS/Linux `amd64`+`arm64`, Windows `amd64`), put it on your `PATH`, and verify it against `SHASUMS256.txt`. The binaries are not
+code-signed: on macOS the first run may be blocked by Gatekeeper — allow it under
+System Settings → Privacy & Security, or clear the quarantine flag with
+`xattr -d com.apple.quarantine <path-to-clio>`.
 
 **Or with `go install`:**
 

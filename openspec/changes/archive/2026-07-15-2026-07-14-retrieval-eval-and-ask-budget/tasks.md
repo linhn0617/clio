@@ -66,7 +66,7 @@ asserts (b)'s bundle-size behavior, so (b) must exist to be asserted.
 - [x] 3.1 `go build ./...`, `go vet ./...`, `go test -race ./...` all green
   (the new `internal/eval` suite runs in the default test set); `gofmt -l .` clean.
 - [x] 3.2 `openspec validate 2026-07-14-retrieval-eval-and-ask-budget --strict` passes.
-- [ ] 3.3 Manual check: `clio ask "<big-history question>" --max-tokens 500 --json` and an
+- [x] 3.3 Manual check: `clio ask "<big-history question>" --max-tokens 500 --json` and an
   MCP `ask` call with `max_tokens: 500` both return a bundle whose excerpt text estimates
   ≤ ~500 tokens, still leading with the most relevant session's hits.
   (Not run this pass — out of scope for the eval-suite/docs task; section 1's `ask`
@@ -75,7 +75,7 @@ asserts (b)'s bundle-size behavior, so (b) must exist to be asserted.
   Claude `/review`.
   (Skipped this pass: codex quota exhausted per task instructions. Still needs a real
   codex round + Claude `/review` before this change is considered done.)
-- [~] 3.5 Docs: CHANGELOG entry; README ×2 note the `ask` `--max-tokens` / `max_tokens`
+- [x] 3.5 Docs: CHANGELOG entry; README ×2 note the `ask` `--max-tokens` / `max_tokens`
   budget and the `internal/eval` retrieval regression suite.
   (README.md, README_zh-TW.md, and docs/USAGE.md done this pass. CHANGELOG entry
   deliberately NOT added — task instructions reserve CHANGELOG/openspec-archive for
