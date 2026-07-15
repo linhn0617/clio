@@ -1,0 +1,70 @@
+{
+  "queries": [
+    {
+      "id": "search-en-auth-01",
+      "query": "refresh token",
+      "lang": "en",
+      "expect": [{"session": "s-auth-en", "seq": 1, "top_k": 3}]
+    },
+    {
+      "id": "search-en-migrate-01",
+      "query": "database migration script",
+      "lang": "en",
+      "expect": [{"session": "s-migrate-en", "seq": 0, "top_k": 3}]
+    },
+    {
+      "id": "search-en-quoted-01",
+      "query": "\"zero downtime migration\"",
+      "lang": "en",
+      "expect": [{"session": "s-migrate-en", "seq": 1, "top_k": 3}]
+    },
+    {
+      "id": "search-en-quoted-02",
+      "query": "\"connection pool exhausted\"",
+      "lang": "en",
+      "expect": [{"session": "s-quoted-phrase", "seq": 0, "top_k": 5}]
+    },
+    {
+      "id": "search-cjk-migrate-01",
+      "query": "資料庫遷移",
+      "lang": "cjk",
+      "expect": [{"session": "s-cjk-migrate", "seq": 0, "top_k": 3}]
+    },
+    {
+      "id": "search-cjk-auth-01",
+      "query": "登入驗證",
+      "lang": "cjk",
+      "expect": [{"session": "s-cjk-auth", "seq": 0, "top_k": 3}]
+    },
+    {
+      "id": "search-cjk-quoted-01",
+      "query": "快取失效",
+      "lang": "cjk",
+      "expect": [{"session": "s-quoted-cjk", "seq": 0, "top_k": 3}]
+    },
+    {
+      "id": "search-mixed-01",
+      "query": "golang CI",
+      "lang": "mixed",
+      "expect": [{"session": "s-mixed", "seq": 1, "top_k": 3}]
+    },
+    {
+      "id": "search-code-01",
+      "query": "c++ compile",
+      "lang": "en",
+      "expect": [{"session": "s-code-fragment", "seq": 1, "top_k": 3}]
+    },
+    {
+      "id": "search-en-fts-tier-01",
+      "query": "authentication design notes",
+      "lang": "en",
+      "expect": [{"session": "s-fts-tier", "seq": 0, "top_k": 3}]
+    },
+    {
+      "id": "search-en-like-tier-01",
+      "query": "ci",
+      "lang": "en",
+      "expect": [{"session": "s-like-tier", "seq": 0, "top_k": 5}]
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "queries": [
+    {
+      "id": "ask-en-auth-01",
+      "query": "how did we fix the authentication problem?",
+      "lang": "en",
+      "expect": [{"session": "s-auth-en", "hit_seq": 0, "top_k": 3}]
+    },
+    {
+      "id": "ask-en-migrate-01",
+      "query": "what happened during the database migration?",
+      "lang": "en",
+      "expect": [{"session": "s-migrate-en", "hit_seq": 0, "top_k": 2}]
+    },
+    {
+      "id": "ask-en-multi-hit-01",
+      "query": "tell me about the deployment pipeline",
+      "lang": "en",
+      "expect": [{"session": "s-ask-multi-hit", "hit_seq": 1, "top_k": 3}]
+    },
+    {
+      "id": "ask-cjk-migrate-01",
+      "query": "資料庫遷移的狀況如何？",
+      "lang": "cjk",
+      "expect": [{"session": "s-cjk-migrate", "hit_seq": 1, "top_k": 3}]
+    },
+    {
+      "id": "ask-cjk-auth-01",
+      "query": "登入驗證系統發生什麼問題？",
+      "lang": "cjk",
+      "expect": [{"session": "s-cjk-auth", "hit_seq": 0, "top_k": 3}]
+    },
+    {
+      "id": "ask-mixed-01",
+      "query": "golang CI pipeline 是怎麼設定的？",
+      "lang": "mixed",
+      "expect": [{"session": "s-mixed", "hit_seq": 1, "top_k": 3}]
+    },
+    {
+      "id": "ask-code-01",
+      "query": "what was the fix for foo(\"bar syntax error?",
+      "lang": "en",
+      "expect": [{"session": "s-code-fragment", "hit_seq": 0, "top_k": 3}]
+    },
+    {
+      "id": "ask-quoted-01",
+      "query": "how was the connection pool exhausted issue resolved?",
+      "lang": "en",
+      "expect": [{"session": "s-quoted-phrase", "hit_seq": 1, "top_k": 3}]
+    },
+    {
+      "id": "ask-tier-01",
+      "query": "design go ci ab",
+      "lang": "en",
+      "expect": [{"session": "s-fts-tier", "hit_seq": 0, "top_k": 1}]
+    }
+  ]
+}
