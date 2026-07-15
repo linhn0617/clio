@@ -17,12 +17,13 @@ import (
 
 func newAskCmd() *cobra.Command {
 	var (
-		since   string
-		project string
-		limit   int
-		window  int
-		asJSON  bool
-		source  string
+		since     string
+		project   string
+		limit     int
+		window    int
+		maxTokens int
+		asJSON    bool
+		source    string
 	)
 	cmd := &cobra.Command{
 		Use:   "ask <question>",
@@ -67,6 +68,7 @@ func newAskCmd() *cobra.Command {
 					Since:         sinceTS,
 					MaxSessions:   limit,
 					Window:        window,
+					MaxTokens:     maxTokens,
 					Source:        source,
 				})
 				if err != nil {
@@ -88,6 +90,7 @@ func newAskCmd() *cobra.Command {
 	cmd.Flags().StringVar(&project, "project", "", "Limit to a project path prefix (default: all projects)")
 	cmd.Flags().IntVar(&limit, "limit", 0, "Maximum sessions in the bundle (default 6)")
 	cmd.Flags().IntVar(&window, "window", 0, "Dialogue turns to include each side of a match (default 2)")
+	cmd.Flags().IntVar(&maxTokens, "max-tokens", 0, "Maximum estimated tokens in the bundle's excerpt text (default 2000)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Output the bundle as JSON")
 	addSourceFlag(cmd, &source)
 	return cmd

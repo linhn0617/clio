@@ -28,6 +28,7 @@ type Options struct {
 	MaxSessions   int    // cap on grouped sessions (default 6)
 	Window        int    // dialogue turns each side of a hit (default 2)
 	MaxExcerptLen int    // per-excerpt rune cap (default 600)
+	MaxTokens     int    // global budget over the bundle's excerpt text (default 2000)
 	Source        string // "" / "claude-code" (default) | "codex" | "all"
 }
 
@@ -74,6 +75,17 @@ func Ask(ctx context.Context, database *db.DB, opt Options) (Answer, error) {
 	}
 	if opt.MaxExcerptLen <= 0 {
 		opt.MaxExcerptLen = defaultMaxExcerptLen
+	}
+	if opt.MaxTokens <= 0 {
+		opt.MaxTokens = defaultMaxTokens
+	}
+	// Clamp caller-supplied budgets here so every surface (CLI, MCP, direct
+	// callers) gets the same floor/ceiling regardless of its own validation.
+	if opt.MaxTokens < minMaxTokens {
+		opt.MaxTokens = minMaxTokens
+	}
+	if opt.MaxTokens > maxMaxTokens {
+		opt.MaxTokens = maxMaxTokens
 	}
 
 	terms := extractTerms(opt.Question)
@@ -158,14 +170,41 @@ func Ask(ctx context.Context, database *db.DB, opt Options) (Answer, error) {
 		order = order[:opt.MaxSessions]
 	}
 
-	for _, uuid := range order {
+	// Pack whole groups against the token budget: order is already FTS-tier
+	// first then descending aggOf, so walking top-down and stopping at the
+	// first group that doesn't fit drops the lowest-ranked groups first,
+	// always as whole groups. The one exception is the keep-top-hits
+	// invariant below, which takes precedence over the budget.
+	remaining := opt.MaxTokens
+	for i, uuid := range order {
 		eg, err := assembleGroup(ctx, database, uuid, aggOf[uuid], groups[uuid].hitSeqs, opt)
 		if err != nil {
 			return ans, err
 		}
-		if len(eg.Excerpts) > 0 {
-			ans.Groups = append(ans.Groups, eg)
+		if len(eg.Excerpts) == 0 {
+			continue
 		}
+		if tokens := estimateGroupTokens(eg); tokens <= remaining {
+			ans.Groups = append(ans.Groups, eg)
+			remaining -= tokens
+			continue
+		}
+		if i == 0 {
+			// Invariant (takes precedence over the budget): the top-ranked
+			// group's hit excerpts are always returned. When the full group
+			// doesn't fit, emit only its hits, truncated toward the floor —
+			// so a matching question never yields an empty bundle. This is
+			// the sole case where a group is partially emitted; the bundle's
+			// effective bound becomes max(opt.MaxTokens, these floor hits).
+			if hits := floorTopGroupHits(eg); len(hits.Excerpts) > 0 {
+				ans.Groups = append(ans.Groups, hits)
+			}
+		}
+		// This group didn't fit the remaining budget: every group from here
+		// down in order is lower-ranked still, so stop rather than skip
+		// ahead looking for a smaller one (no bin-packing — a whole
+		// lower-ranked group is dropped, not substituted).
+		break
 	}
 	return ans, nil
 }

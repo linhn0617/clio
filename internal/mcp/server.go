@@ -49,6 +49,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("since", mcp.Description("Only consider sessions since: 7d, 12h, 30m, or YYYY-MM-DD")),
 		mcp.WithString("project", mcp.Description("Limit to a project path prefix (default: all projects)")),
 		mcp.WithNumber("limit", mcp.Description(fmt.Sprintf("Max sessions in the bundle (default %d, max %d)", defaultAskSessions, maxAskSessions)), mcp.DefaultNumber(defaultAskSessions), mcp.Min(1), mcp.Max(maxAskSessions)),
+		mcp.WithNumber("max_tokens", mcp.Description(fmt.Sprintf("Max estimated tokens in the bundle's excerpt text (default %d, min %d, max %d)", defaultMaxTokens, minMaxTokens, maxMaxTokens)), mcp.DefaultNumber(defaultMaxTokens), mcp.Min(minMaxTokens), mcp.Max(maxMaxTokens)),
 		mcp.WithString("source", mcp.Description("Which tool's history: claude-code (default), codex, or all"), mcp.Enum("claude-code", "codex", "all"), mcp.DefaultString("claude-code")),
 	), handleAsk(database, beforeRead))
 

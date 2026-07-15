@@ -21,6 +21,12 @@ const (
 	maxReadLimit       = 200
 	defaultAskSessions = 6
 	maxAskSessions     = 10
+	// Mirrors internal/ask's own defaultMaxTokens/minMaxTokens/maxMaxTokens
+	// (unexported there), the same way defaultAskSessions/maxAskSessions
+	// above already mirror ask's session-count defaults.
+	defaultMaxTokens = 2000
+	minMaxTokens     = 200
+	maxMaxTokens     = 8000
 )
 
 // parseSince is the MCP-side wrapper: same parsing as the CLI, but a bad value
@@ -33,6 +39,24 @@ func parseSince(s string) int64 {
 func clamp(v, def, max int) int {
 	if v <= 0 {
 		return def
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+// clampRange is like clamp but also enforces a true floor: a positive value
+// below min is raised to min rather than passed through. Used for max_tokens,
+// where the spec requires an out-of-range value (including a small positive
+// one) to be clamped into the allowed range rather than rejected — unlike the
+// existing limit params, where any positive value under def is accepted as-is.
+func clampRange(v, def, min, max int) int {
+	if v <= 0 {
+		return def
+	}
+	if v < min {
+		return min
 	}
 	if v > max {
 		return max
@@ -252,6 +276,7 @@ func handleAsk(database *db.DB, beforeRead func()) func(context.Context, mcp.Cal
 			ProjectPrefix: req.GetString("project", ""),
 			Since:         parseSince(req.GetString("since", "")),
 			MaxSessions:   clamp(req.GetInt("limit", defaultAskSessions), defaultAskSessions, maxAskSessions),
+			MaxTokens:     clampRange(req.GetInt("max_tokens", defaultMaxTokens), defaultMaxTokens, minMaxTokens, maxMaxTokens),
 			Source:        req.GetString("source", "claude-code"),
 		})
 		if err != nil {
