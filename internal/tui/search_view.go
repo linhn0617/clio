@@ -10,6 +10,7 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/linhn0617/clio/internal/db"
+	"github.com/linhn0617/clio/internal/registry"
 	"github.com/linhn0617/clio/internal/search"
 	"github.com/linhn0617/clio/internal/sessions"
 )
@@ -226,8 +227,8 @@ func (v searchView) renderList(w, h int) string {
 			}
 			line = "↳(" + typ + ") " + line
 		}
-		if r.source == "codex" {
-			line = "[codex] " + line
+		if lbl := registry.Label(r.source); lbl != "" {
+			line = lbl + " " + line
 		}
 		lines = append(lines, runewidth.Truncate(marker+line, w, "…"))
 	}

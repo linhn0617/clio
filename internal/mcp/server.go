@@ -3,12 +3,50 @@ package mcp
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/linhn0617/clio/internal/db"
+	"github.com/linhn0617/clio/internal/registry"
 )
+
+// sourceDescription builds the "<prefix>: claude-code (default), codex, or
+// all"-style prose used by a tool's "source" parameter description: every
+// registered source name (registry.Names(), in Seed order, the default
+// source marked "(default)") plus the "all" filter value. Generated from the
+// registry rather than a hardcoded per-tool sentence, so a source added to
+// the registry appears in every tool's description without editing this
+// file (codex review P1 finding #1).
+func sourceDescription(prefix string) string {
+	def := registry.DefaultSource()
+	names := registry.Names()
+	parts := make([]string, len(names))
+	for i, n := range names {
+		if n == def {
+			parts[i] = n + " (default)"
+		} else {
+			parts[i] = n
+		}
+	}
+	return prefix + ": " + strings.Join(parts, ", ") + ", or " + registry.All
+}
+
+// sourceOptions returns the "source" parameter's description, enum, and
+// default, all derived from the source registry rather than hardcoded per
+// tool (design.md D5): one helper feeds all five read tools, so a source
+// added to the registry appears in every tool's enum and description
+// without editing this file. prefix is the tool-specific lead-in
+// (e.g. "Which tool's history"); sourceDescription appends the registry-
+// derived name list.
+func sourceOptions(prefix string) []mcp.PropertyOption {
+	return []mcp.PropertyOption{
+		mcp.Description(sourceDescription(prefix)),
+		mcp.Enum(registry.EnumValues()...),
+		mcp.DefaultString(registry.DefaultSource()),
+	}
+}
 
 // NewServer builds an MCP server with clio's four tools registered. beforeRead,
 // if non-nil, runs before each read tool serves (used by followers for a
@@ -36,7 +74,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("role", mcp.Description("Filter by role"), mcp.Enum("user", "assistant")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 10, max 50)"), mcp.DefaultNumber(defaultSearchLimit), mcp.Min(1), mcp.Max(maxSearchLimit)),
 		mcp.WithBoolean("include_tool_output", mcp.Description("Include tool output in results"), mcp.DefaultBool(false)),
-		mcp.WithString("source", mcp.Description("Which tool's history: claude-code (default), codex, or all"), mcp.Enum("claude-code", "codex", "all"), mcp.DefaultString("claude-code")),
+		mcp.WithString("source", sourceOptions("Which tool's history")...),
 	), handleSearch(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("ask",
@@ -50,7 +88,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("project", mcp.Description("Limit to a project path prefix (default: all projects)")),
 		mcp.WithNumber("limit", mcp.Description(fmt.Sprintf("Max sessions in the bundle (default %d, max %d)", defaultAskSessions, maxAskSessions)), mcp.DefaultNumber(defaultAskSessions), mcp.Min(1), mcp.Max(maxAskSessions)),
 		mcp.WithNumber("max_tokens", mcp.Description(fmt.Sprintf("Max estimated tokens in the bundle's excerpt text (default %d, min %d, max %d)", defaultMaxTokens, minMaxTokens, maxMaxTokens)), mcp.DefaultNumber(defaultMaxTokens), mcp.Min(minMaxTokens), mcp.Max(maxMaxTokens)),
-		mcp.WithString("source", mcp.Description("Which tool's history: claude-code (default), codex, or all"), mcp.Enum("claude-code", "codex", "all"), mcp.DefaultString("claude-code")),
+		mcp.WithString("source", sourceOptions("Which tool's history")...),
 	), handleAsk(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("list_sessions",
@@ -67,7 +105,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("tool", mcp.Description("Only sessions that used this tool, e.g. Bash or mcp__server__name")),
 		mcp.WithString("ran", mcp.Description("Only sessions that ran a command containing this substring")),
 		mcp.WithBoolean("include_subagents", mcp.Description("Include subagent child sessions (default: top-level only)"), mcp.DefaultBool(false)),
-		mcp.WithString("source", mcp.Description("Which tool's history: claude-code (default), codex, or all"), mcp.Enum("claude-code", "codex", "all"), mcp.DefaultString("claude-code")),
+		mcp.WithString("source", sourceOptions("Which tool's history")...),
 	), handleListSessions(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("activity_summary",
@@ -80,7 +118,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("group_by", mcp.Description("Grouping: day or project (counts), or file/command/tool/pattern/url (activity)"), mcp.Enum("day", "project", "file", "command", "tool", "pattern", "url"), mcp.DefaultString("day")),
 		mcp.WithString("project", mcp.Description("Filter by project path prefix")),
 		mcp.WithNumber("limit", mcp.Description("Max rows for file/command/tool/pattern/url grouping (default 30, max 50)"), mcp.DefaultNumber(30), mcp.Min(1), mcp.Max(maxSearchLimit)),
-		mcp.WithString("source", mcp.Description("Which tool's history: claude-code (default), codex, or all"), mcp.Enum("claude-code", "codex", "all"), mcp.DefaultString("claude-code")),
+		mcp.WithString("source", sourceOptions("Which tool's history")...),
 	), handleActivitySummary(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("read_session",
@@ -94,7 +132,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithNumber("limit", mcp.Description("Max messages per page (default 50, max 200)"), mcp.DefaultNumber(defaultReadLimit), mcp.Min(1), mcp.Max(maxReadLimit)),
 		mcp.WithBoolean("include_tool_output", mcp.Description("Include tool output / thinking"), mcp.DefaultBool(false)),
 		mcp.WithBoolean("include_subagents", mcp.Description("Inline each subagent's messages in the result")),
-		mcp.WithString("source", mcp.Description("Source filter for prefix resolution: claude-code (default), codex, or all"), mcp.Enum("claude-code", "codex", "all"), mcp.DefaultString("claude-code")),
+		mcp.WithString("source", sourceOptions("Source filter for prefix resolution")...),
 	), handleReadSession(database, beforeRead))
 
 	return s

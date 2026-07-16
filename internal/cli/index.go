@@ -32,8 +32,8 @@ func newIndexCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, err := os.Stat(projects); err != nil && !codexAvailable() {
-				return fmt.Errorf("no sessions to index: neither %s nor a Codex sessions dir exists: %w", projects, err)
+			if _, err := os.Stat(projects); err != nil && !nonDefaultSourceAvailable() {
+				return bootstrapMissingSourcesError(projects, err)
 			}
 			dbPath, err := config.DBPath()
 			if err != nil {

@@ -9,6 +9,7 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/linhn0617/clio/internal/db"
+	"github.com/linhn0617/clio/internal/registry"
 	"github.com/linhn0617/clio/internal/sessions"
 )
 
@@ -246,8 +247,8 @@ func (v browseView) renderList(w, h int) string {
 		if label == "" {
 			label = r.sess.ProjectPath
 		}
-		if r.sess.Source == "codex" {
-			label = "[codex] " + label
+		if lbl := registry.Label(r.sess.Source); lbl != "" {
+			label = lbl + " " + label
 		}
 		var row string
 		if r.child {

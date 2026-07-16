@@ -9,6 +9,7 @@ import (
 
 	"github.com/linhn0617/clio/internal/ask"
 	"github.com/linhn0617/clio/internal/db"
+	"github.com/linhn0617/clio/internal/registry"
 	"github.com/linhn0617/clio/internal/search"
 	"github.com/linhn0617/clio/internal/sessions"
 	"github.com/linhn0617/clio/internal/timeutil"
@@ -80,7 +81,7 @@ func handleSearch(database *db.DB, beforeRead func()) func(context.Context, mcp.
 			Role:              req.GetString("role", ""),
 			Limit:             clamp(req.GetInt("limit", defaultSearchLimit), defaultSearchLimit, maxSearchLimit),
 			IncludeToolOutput: req.GetBool("include_tool_output", false),
-			Source:            req.GetString("source", "claude-code"),
+			Source:            req.GetString("source", registry.DefaultSource()),
 		})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -117,7 +118,7 @@ func handleListSessions(database *db.DB, beforeRead func()) func(context.Context
 			Tool:             req.GetString("tool", ""),
 			Ran:              req.GetString("ran", ""),
 			IncludeSubagents: req.GetBool("include_subagents", false),
-			Source:           req.GetString("source", "claude-code"),
+			Source:           req.GetString("source", registry.DefaultSource()),
 		})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -152,7 +153,7 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 			since = time.Now().Add(-7 * 24 * time.Hour).Unix()
 		}
 		groupBy := req.GetString("group_by", "day")
-		source := req.GetString("source", "claude-code")
+		source := req.GetString("source", registry.DefaultSource())
 		switch groupBy {
 		case "day", "project":
 			buckets, err := sessions.ActivitySummary(ctx, database, since, groupBy, req.GetString("project", ""), source)
@@ -197,7 +198,7 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 		if err != nil {
 			return mcp.NewToolResultError("uuid is required"), nil
 		}
-		sess, err := sessions.ResolvePrefix(ctx, database, uuid, req.GetString("source", "claude-code"))
+		sess, err := sessions.ResolvePrefix(ctx, database, uuid, req.GetString("source", registry.DefaultSource()))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -277,7 +278,7 @@ func handleAsk(database *db.DB, beforeRead func()) func(context.Context, mcp.Cal
 			Since:         parseSince(req.GetString("since", "")),
 			MaxSessions:   clamp(req.GetInt("limit", defaultAskSessions), defaultAskSessions, maxAskSessions),
 			MaxTokens:     clampRange(req.GetInt("max_tokens", defaultMaxTokens), defaultMaxTokens, minMaxTokens, maxMaxTokens),
-			Source:        req.GetString("source", "claude-code"),
+			Source:        req.GetString("source", registry.DefaultSource()),
 		})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil

@@ -503,24 +503,52 @@ func TestCoverageBySourceOKWhenFullyTracked(t *testing.T) {
 // TestClaudeDirStatus covers defect (C)'s severity half: a missing ~/.claude/projects
 // is only a real problem when no other source is available. A Codex-only install
 // (Codex present, Claude absent) is a supported configuration and must not warn.
+// otherPresentNames replaces the old bespoke codexPresent bool (codex review P2
+// finding #3): claudeDirStatus's note must name whichever non-default source(s)
+// are actually present, not a hardcoded "codex" literal.
 func TestClaudeDirStatus(t *testing.T) {
 	cases := []struct {
-		name         string
-		present      bool
-		codexPresent bool
-		wantOK       bool
+		name              string
+		present           bool
+		otherPresentNames []string
+		wantOK            bool
 	}{
-		{"present", true, false, true},
-		{"present and codex too", true, true, true},
-		{"absent, codex-only install", false, true, true},
-		{"absent, no other source", false, false, false},
+		{"present", true, nil, true},
+		{"present and codex too", true, []string{"codex"}, true},
+		{"absent, codex-only install", false, []string{"codex"}, true},
+		{"absent, no other source", false, nil, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ok, _ := claudeDirStatus(c.present, c.codexPresent)
+			ok, _ := claudeDirStatus(c.present, c.otherPresentNames)
 			if ok != c.wantOK {
-				t.Fatalf("claudeDirStatus(present=%v, codexPresent=%v) ok=%v, want %v", c.present, c.codexPresent, ok, c.wantOK)
+				t.Fatalf("claudeDirStatus(present=%v, otherPresentNames=%v) ok=%v, want %v", c.present, c.otherPresentNames, ok, c.wantOK)
 			}
 		})
+	}
+}
+
+// TestClaudeDirStatusNoteGoldenTwoSourceSeed pins claudeDirStatus's note text
+// for the pre-registry codex-only-install case to the original hardcoded
+// literal, so refactoring the note to be generated from the actual present
+// source name(s) is proven not to change today's output (golden-test gate).
+func TestClaudeDirStatusNoteGoldenTwoSourceSeed(t *testing.T) {
+	_, note := claudeDirStatus(false, []string{"codex"})
+	if want := "codex-only install, supported"; note != want {
+		t.Errorf("claudeDirStatus(false, [codex]) note = %q, want %q", note, want)
+	}
+}
+
+// TestClaudeDirStatusNoteNamesActualNonDefaultSource proves the note is
+// generated from the actual present source name(s), not a hardcoded "codex"
+// literal (codex review P2 finding #3): a fake non-default source's name
+// must appear in the note.
+func TestClaudeDirStatusNoteNamesActualNonDefaultSource(t *testing.T) {
+	_, note := claudeDirStatus(false, []string{"fake-tool"})
+	if !strings.Contains(note, "fake-tool") {
+		t.Errorf("claudeDirStatus(false, [fake-tool]) note = %q, want it to name fake-tool", note)
+	}
+	if strings.Contains(note, "codex") {
+		t.Errorf("claudeDirStatus(false, [fake-tool]) note = %q, must not mention codex when codex isn't the present source", note)
 	}
 }

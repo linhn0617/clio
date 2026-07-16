@@ -12,9 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/linhn0617/clio/internal/config"
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
+	"github.com/linhn0617/clio/internal/registry"
 	sqlitelib "modernc.org/sqlite"
 )
 
@@ -34,14 +34,26 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 
 	var availRoots []string
 
-	// The Codex source root is optional: report it only when present, and treat its
-	// absence as "not installed", never a failure. Resolved up front because whether
-	// it's present changes how a missing Claude projects dir is judged below.
-	codexDir, codexDirErr := config.CodexSessionsDir()
-	codexPresent := false
-	if codexDirErr == nil {
-		if _, serr := os.Stat(codexDir); serr == nil {
-			codexPresent = true
+	// Every non-default (e.g. Codex) registered source's root is optional: report
+	// it only when present, and treat its absence as "not installed", never a
+	// failure. Iterating the registry (instead of special-casing codex by name)
+	// means a third registered source is reported here without editing this
+	// function (design.md D7). Resolved up front because whether any is present
+	// changes how a missing Claude projects dir is judged below.
+	//
+	// Uses rs.Exists (not rs.IsDir): doctor's pre-registry semantics
+	// (codexPresent) considered a root present whenever os.Stat succeeded,
+	// regardless of file type — unlike bootstrap, which additionally requires
+	// a directory (registry.NonDefaultRootAvailable; codex review P1 finding #2).
+	var otherRoots []registry.RootStatus
+	var otherPresentNames []string
+	for _, rs := range registry.Roots() {
+		if rs.IsDefault {
+			continue
+		}
+		otherRoots = append(otherRoots, rs)
+		if rs.Exists {
+			otherPresentNames = append(otherPresentNames, rs.Name)
 		}
 	}
 
@@ -49,7 +61,7 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 	if _, err := os.Stat(projectsDir); err == nil {
 		claudePresent = true
 	}
-	if ok, note := claudeDirStatus(claudePresent, codexPresent); !ok {
+	if ok, note := claudeDirStatus(claudePresent, otherPresentNames); !ok {
 		add("claude projects dir", false, fmt.Sprintf("not found: %s", projectsDir))
 	} else if claudePresent {
 		add("claude projects dir", true, projectsDir)
@@ -59,9 +71,11 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 		// reported so the absence is visible, but not as a warning.
 		add("claude projects dir", true, fmt.Sprintf("not found (%s): %s", note, projectsDir))
 	}
-	if codexPresent {
-		add("codex sessions dir", true, codexDir)
-		availRoots = append(availRoots, codexDir)
+	for _, rs := range otherRoots {
+		if rs.Exists {
+			add(rs.Label, true, rs.Dir)
+			availRoots = append(availRoots, rs.Dir)
+		}
 	}
 
 	// DB integrity.
@@ -346,16 +360,19 @@ func coverageBySource(database *db.DB, roots []string) (ok bool, detail string, 
 }
 
 // claudeDirStatus judges the ~/.claude/projects presence check. Its absence is only a
-// genuine problem when no other source is available: a Codex-only install (no Claude
-// Code projects dir, Codex present) is a supported configuration and must not warn.
-// note explains a non-warning absence for the caller's detail text; empty when present
-// or when the absence is a real failure.
-func claudeDirStatus(present, codexPresent bool) (ok bool, note string) {
+// genuine problem when no other registered source is available: an install with only
+// a non-default source present (e.g. Codex-only, or a third registered source) is a
+// supported configuration and must not warn. otherPresentNames lists the names of
+// every non-default registered source whose root is currently present (design.md D7);
+// note names them (generated, not a hardcoded "codex" literal — codex review P2
+// finding #3) for the caller's detail text, and is empty when present or when the
+// absence is a real failure.
+func claudeDirStatus(present bool, otherPresentNames []string) (ok bool, note string) {
 	if present {
 		return true, ""
 	}
-	if codexPresent {
-		return true, "codex-only install, supported"
+	if len(otherPresentNames) > 0 {
+		return true, fmt.Sprintf("%s-only install, supported", strings.Join(otherPresentNames, "+"))
 	}
 	return false, ""
 }

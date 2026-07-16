@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/linhn0617/clio/internal/model"
+	"github.com/linhn0617/clio/internal/registry"
 	sqlitelib "modernc.org/sqlite"
 )
 
@@ -178,17 +178,18 @@ func EscapeLike(s string) string {
 }
 
 // SourceFilter returns a WHERE fragment (leading " AND ...") restricting the column
-// `col` to the requested source, plus its bind args. An empty source or
-// model.SourceClaudeCode restricts to Claude Code (treating a NULL source as Claude
-// Code, for rows that predate the source column); "all" applies no restriction; any
-// other value is matched exactly. `col` must be a trusted, caller-supplied column
-// name (never user input), e.g. "source" or "s.source".
+// `col` to the requested source, plus its bind args. An empty source or the source
+// registry's default source restricts to that default (treating a NULL source as
+// the default, for rows that predate the source column); "all" applies no
+// restriction; any other value is matched exactly. `col` must be a trusted,
+// caller-supplied column name (never user input), e.g. "source" or "s.source".
 func SourceFilter(col, source string) (string, []any) {
+	def := registry.DefaultSource()
 	switch source {
-	case "all":
+	case registry.All:
 		return "", nil
-	case "", model.SourceClaudeCode:
-		return " AND (" + col + " IS NULL OR " + col + " = ?)", []any{model.SourceClaudeCode}
+	case "", def:
+		return " AND (" + col + " IS NULL OR " + col + " = ?)", []any{def}
 	default:
 		return " AND " + col + " = ?", []any{source}
 	}

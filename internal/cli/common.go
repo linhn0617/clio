@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
 	"github.com/linhn0617/clio/internal/lock"
+	"github.com/linhn0617/clio/internal/registry"
 )
 
 // osExecutable resolves the running binary's path; overridable in tests so
@@ -21,30 +23,45 @@ import (
 var osExecutable = os.Executable
 
 // addSourceFlag registers the shared --source flag (which agent tool's history to
-// read), defaulting to Claude Code so existing behavior is unchanged.
+// read), defaulting to the registry's default source (Claude Code) so existing
+// behavior is unchanged. Accepted values and their order are derived from the
+// source registry rather than hardcoded, so a source added to the registry
+// appears in --help without editing this function.
 func addSourceFlag(cmd *cobra.Command, p *string) {
-	cmd.Flags().StringVar(p, "source", "claude-code", "Which tool's history: claude-code | codex | all")
+	cmd.Flags().StringVar(p, "source", registry.DefaultSource(),
+		"Which tool's history: "+strings.Join(registry.EnumValues(), " | "))
 }
 
 // validateSource rejects an unknown --source value before it reaches a query.
+// The accepted set (registered source names, plus "all") is derived from the
+// source registry, not a hardcoded literal list.
 func validateSource(s string) error {
-	switch s {
-	case "", "claude-code", "codex", "all":
+	if s == "" || s == registry.All || registry.IsValid(s) {
 		return nil
-	default:
-		return fmt.Errorf("invalid --source %q (want claude-code, codex, or all)", s)
 	}
+	return fmt.Errorf("invalid --source %q (want %s, or %s)", s, strings.Join(registry.Names(), ", "), registry.All)
 }
 
-// codexAvailable reports whether the Codex sessions dir exists, so a Codex-only
-// machine (no ~/.claude/projects) can still bootstrap and index.
-func codexAvailable() bool {
-	dir, err := config.CodexSessionsDir()
-	if err != nil {
-		return false
-	}
-	fi, serr := os.Stat(dir)
-	return serr == nil && fi.IsDir()
+// nonDefaultSourceAvailable reports whether any registered source other than
+// the default (Claude Code) has an available root directory, so a machine
+// with only that source (no ~/.claude/projects) can still bootstrap and
+// index. Generalized from the former codex-specific check: adding a new
+// source to the registry makes this work for it without editing this
+// function (design.md D4).
+func nonDefaultSourceAvailable() bool {
+	return registry.NonDefaultRootAvailable()
+}
+
+// bootstrapMissingSourcesError builds the "no sessions to index" error CLI
+// bootstrap (index/install-mcp) returns when neither the default source's
+// dir (projectsDir) nor any non-default registered source's root is
+// available. The non-default clause is generated from the registry
+// (registry.NonDefaultRootLabelsProse), not a hardcoded "a Codex sessions
+// dir" literal, so an additional registered source is named here without
+// editing this function or its callers (codex review P1 finding #1).
+func bootstrapMissingSourcesError(projectsDir string, statErr error) error {
+	return fmt.Errorf("no sessions to index: neither %s nor %s exists: %w",
+		projectsDir, registry.NonDefaultRootLabelsProse(), statErr)
 }
 
 func stderrLogger() *slog.Logger {
