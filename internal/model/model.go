@@ -7,6 +7,7 @@ import "encoding/json"
 const (
 	SourceClaudeCode = "claude-code"
 	SourceCodex      = "codex"
+	SourceGemini     = "gemini"
 )
 
 // Roles stored in the messages table.

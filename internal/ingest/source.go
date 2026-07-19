@@ -24,6 +24,11 @@ type Source interface {
 	// ParseFile parses one source file region into a session and its messages. It owns
 	// the per-line parse and metadata aggregation for its format.
 	ParseFile(ing *Ingester, f *os.File, startOffset int64, startSeq int, path string) (parseResult, error)
+	// WholeFileReplay reports whether this source's files must be reconstructed by a
+	// full replay from offset 0 rather than resumed from a stored byte offset (e.g. an
+	// op-log format where a later record can overwrite earlier state). Claude Code and
+	// Codex are true append-only event streams and return false; Gemini returns true.
+	WholeFileReplay() bool
 }
 
 // parseResult is one source file parsed into a session and its messages.
@@ -49,6 +54,8 @@ func (claudeCodeSource) Owns(path string) bool { return strings.HasSuffix(path, 
 func (claudeCodeSource) SessionIDFromPath(path string) string { return sessionUUIDFromPath(path) }
 
 func (claudeCodeSource) Roots() ([]string, error) { return nil, nil }
+
+func (claudeCodeSource) WholeFileReplay() bool { return false }
 
 func (claudeCodeSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, startSeq int, path string) (parseResult, error) {
 	parser := NewParser(startSeq)
@@ -121,4 +128,21 @@ func (ing *Ingester) addCodexSource() {
 		return
 	}
 	ing.AddSource(codexSource{root: root})
+}
+
+// addGeminiSource registers the Gemini CLI source rooted at ~/.gemini/tmp, but
+// only when that directory exists. Mirrors addCodexSource: Gemini not being
+// installed is not an error, the source is simply not registered. Unexported
+// for the same reason as addCodexSource: tests inject a geminiSource with a
+// controlled root directly via AddSource.
+func (ing *Ingester) addGeminiSource() {
+	root, err := config.GeminiTmpDir()
+	if err != nil {
+		ing.log.Warn("gemini tmp dir unavailable", "err", err)
+		return
+	}
+	if fi, statErr := os.Stat(root); statErr != nil || !fi.IsDir() {
+		return
+	}
+	ing.AddSource(geminiSource{root: root})
 }

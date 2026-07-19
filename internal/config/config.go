@@ -26,6 +26,16 @@ func CodexSessionsDir() (string, error) {
 	return filepath.Join(home, ".codex", "sessions"), nil
 }
 
+// GeminiTmpDir is where Gemini CLI stores per-project chat transcripts
+// (~/.gemini/tmp/<projectId>/chats/session-*.jsonl).
+func GeminiTmpDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".gemini", "tmp"), nil
+}
+
 // ClaudeConfigFile is Claude Code's main settings file (~/.claude.json).
 func ClaudeConfigFile() (string, error) {
 	home, err := os.UserHomeDir()

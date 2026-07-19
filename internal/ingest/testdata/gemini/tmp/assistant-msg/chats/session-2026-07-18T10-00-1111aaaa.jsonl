@@ -1,0 +1,2 @@
+{"sessionId":"11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa","projectHash":"deadbeef","startTime":"2026-07-18T10:00:00.000Z","lastUpdated":"2026-07-18T10:00:05.000Z","kind":"main"}
+{"$set":{"messages":[{"id":"msg0000000000000000000000000000001","timestamp":"2026-07-18T10:00:01.000Z","type":"user","content":[{"text":"what is 2+2"}]},{"id":"msg0000000000000000000000000000002","timestamp":"2026-07-18T10:00:02.000Z","type":"gemini","content":[{"text":"2+2 is 4."}],"thoughts":[{"subject":"arithmetic","description":"trivial"}],"toolCalls":[]}],"lastUpdated":"2026-07-18T10:00:05.000Z"}}

@@ -27,25 +27,25 @@ func sourceProperty(t *testing.T, toolName string, props map[string]any) map[str
 	return m
 }
 
-// TestFiveToolsSourceEnumGoldenTwoSourceSeed pins every read tool's source
+// TestFiveToolsSourceEnumGoldenThreeSourceSeed pins every read tool's source
 // enum + default to the pre-registry hardcoded values (openspec change
 // 2026-07-14-generalize-source-adapter-spi golden-test gate).
-func TestFiveToolsSourceEnumGoldenTwoSourceSeed(t *testing.T) {
+func TestFiveToolsSourceEnumGoldenThreeSourceSeed(t *testing.T) {
 	d := testDB(t)
 	s := NewServer(d, "test", nil)
 	tools := s.ListTools()
 
-	wantEnum := []string{"claude-code", "codex", "all"}
+	wantEnum := []string{"claude-code", "codex", "gemini", "all"}
 	// wantDescription pins each tool's "source" parameter description to its
 	// pre-registry hardcoded literal (codex review P1 finding #1: these must
 	// keep reading identically after switching to registry-derived
 	// generation).
 	wantDescription := map[string]string{
-		"search":           "Which tool's history: claude-code (default), codex, or all",
-		"ask":              "Which tool's history: claude-code (default), codex, or all",
-		"list_sessions":    "Which tool's history: claude-code (default), codex, or all",
-		"activity_summary": "Which tool's history: claude-code (default), codex, or all",
-		"read_session":     "Source filter for prefix resolution: claude-code (default), codex, or all",
+		"search":           "Which tool's history: claude-code (default), codex, gemini, or all",
+		"ask":              "Which tool's history: claude-code (default), codex, gemini, or all",
+		"list_sessions":    "Which tool's history: claude-code (default), codex, gemini, or all",
+		"activity_summary": "Which tool's history: claude-code (default), codex, gemini, or all",
+		"read_session":     "Source filter for prefix resolution: claude-code (default), codex, gemini, or all",
 	}
 	for _, name := range sourceTools {
 		st, ok := tools[name]
@@ -81,7 +81,7 @@ func TestFiveToolsSourceEnumTracksFakeSeedEntry(t *testing.T) {
 	s := NewServer(d, "test", nil)
 	tools := s.ListTools()
 
-	wantEnum := []string{"claude-code", "codex", "fake-tool", "all"}
+	wantEnum := []string{"claude-code", "codex", "gemini", "fake-tool", "all"}
 	for _, name := range sourceTools {
 		st := tools[name]
 		src := sourceProperty(t, name, st.Tool.InputSchema.Properties)

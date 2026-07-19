@@ -15,11 +15,11 @@ import (
 	"github.com/linhn0617/clio/internal/registry"
 )
 
-// TestValidateSourceGoldenTwoSourceSeed pins validateSource's accepted set and
+// TestValidateSourceGoldenThreeSourceSeed pins validateSource's accepted set and
 // error text to the pre-registry hardcoded values (openspec change
 // 2026-07-14-generalize-source-adapter-spi, design.md §2 golden-test gate).
-func TestValidateSourceGoldenTwoSourceSeed(t *testing.T) {
-	for _, ok := range []string{"", "claude-code", "codex", "all"} {
+func TestValidateSourceGoldenThreeSourceSeed(t *testing.T) {
+	for _, ok := range []string{"", "claude-code", "codex", "gemini", "all"} {
 		if err := validateSource(ok); err != nil {
 			t.Errorf("validateSource(%q) = %v, want nil", ok, err)
 		}
@@ -28,7 +28,7 @@ func TestValidateSourceGoldenTwoSourceSeed(t *testing.T) {
 	if err == nil {
 		t.Fatal("validateSource(bogus) = nil, want error")
 	}
-	if want := `invalid --source "bogus" (want claude-code, codex, or all)`; err.Error() != want {
+	if want := `invalid --source "bogus" (want claude-code, codex, gemini, or all)`; err.Error() != want {
 		t.Errorf("validateSource(bogus) error = %q, want %q", err.Error(), want)
 	}
 }
@@ -46,7 +46,7 @@ func TestAddSourceFlagGoldenDefaultAndHelp(t *testing.T) {
 	if f.DefValue != "claude-code" {
 		t.Errorf("--source default = %q, want %q", f.DefValue, "claude-code")
 	}
-	if want := "Which tool's history: claude-code | codex | all"; f.Usage != want {
+	if want := "Which tool's history: claude-code | codex | gemini | all"; f.Usage != want {
 		t.Errorf("--source usage = %q, want %q", f.Usage, want)
 	}
 }
@@ -71,7 +71,7 @@ func TestValidateSourceAndFlagTrackFakeSeedEntry(t *testing.T) {
 	var source string
 	addSourceFlag(cmd, &source)
 	f := cmd.Flags().Lookup("source")
-	if want := "Which tool's history: claude-code | codex | fake-tool | all"; f.Usage != want {
+	if want := "Which tool's history: claude-code | codex | gemini | fake-tool | all"; f.Usage != want {
 		t.Errorf("--source usage with fake entry = %q, want %q", f.Usage, want)
 	}
 }
@@ -124,15 +124,15 @@ func TestNonDefaultSourceAvailableFalseWhenRootIsARegularFile(t *testing.T) {
 	}
 }
 
-// TestBootstrapMissingSourcesErrorGoldenTwoSourceSeed pins
+// TestBootstrapMissingSourcesErrorGoldenThreeSourceSeed pins
 // bootstrapMissingSourcesError's message to the pre-registry hardcoded
 // literal ("neither %s nor a Codex sessions dir exists: %w"), proving the
 // refactor to generate the non-default clause from the registry doesn't
 // change today's output (golden-test gate).
-func TestBootstrapMissingSourcesErrorGoldenTwoSourceSeed(t *testing.T) {
+func TestBootstrapMissingSourcesErrorGoldenThreeSourceSeed(t *testing.T) {
 	statErr := errors.New("stat failed")
 	err := bootstrapMissingSourcesError("/x/projects", statErr)
-	want := `no sessions to index: neither /x/projects nor a Codex sessions dir exists: stat failed`
+	want := `no sessions to index: neither /x/projects nor a Codex sessions dir, or a Gemini chats dir exists: stat failed`
 	if err.Error() != want {
 		t.Errorf("bootstrapMissingSourcesError() = %q, want %q", err.Error(), want)
 	}

@@ -9,12 +9,12 @@ import (
 	"github.com/linhn0617/clio/internal/model"
 )
 
-// TestNamesMatchesTwoSourceSeed pins the registry's helper outputs for the
-// current two-source seed to the pre-registry hardcoded values (tasks.md
-// §1.1 acceptance).
-func TestNamesMatchesTwoSourceSeed(t *testing.T) {
+// TestNamesMatchesThreeSourceSeed pins the registry's helper outputs for the
+// current three-source seed (claude-code, codex, gemini) to the expected
+// values (tasks.md §1.1/§1.2 acceptance).
+func TestNamesMatchesThreeSourceSeed(t *testing.T) {
 	got := Names()
-	want := []string{model.SourceClaudeCode, model.SourceCodex}
+	want := []string{model.SourceClaudeCode, model.SourceCodex, model.SourceGemini}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Names() = %v, want %v", got, want)
 	}
@@ -22,7 +22,7 @@ func TestNamesMatchesTwoSourceSeed(t *testing.T) {
 
 func TestEnumValuesAppendsAll(t *testing.T) {
 	got := EnumValues()
-	want := []string{model.SourceClaudeCode, model.SourceCodex, All}
+	want := []string{model.SourceClaudeCode, model.SourceCodex, model.SourceGemini, All}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("EnumValues() = %v, want %v", got, want)
 	}
@@ -74,8 +74,8 @@ func TestLabel(t *testing.T) {
 // filesystem state (Present/Dir/Err vary by host).
 func TestRootsReflectsSeedOrderAndDefault(t *testing.T) {
 	roots := Roots()
-	if len(roots) != 2 {
-		t.Fatalf("Roots() len = %d, want 2", len(roots))
+	if len(roots) != 3 {
+		t.Fatalf("Roots() len = %d, want 3", len(roots))
 	}
 	if roots[0].Name != model.SourceClaudeCode || !roots[0].IsDefault {
 		t.Errorf("Roots()[0] = %+v, want claude-code/IsDefault=true", roots[0])
@@ -88,6 +88,12 @@ func TestRootsReflectsSeedOrderAndDefault(t *testing.T) {
 	}
 	if roots[0].Label != "claude projects dir" {
 		t.Errorf("Roots()[0].Label = %q, want %q", roots[0].Label, "claude projects dir")
+	}
+	if roots[2].Name != model.SourceGemini || roots[2].IsDefault {
+		t.Errorf("Roots()[2] = %+v, want gemini/IsDefault=false", roots[2])
+	}
+	if roots[2].Label != "gemini chats dir" {
+		t.Errorf("Roots()[2].Label = %q, want %q", roots[2].Label, "gemini chats dir")
 	}
 }
 
@@ -112,10 +118,10 @@ func TestFakeSeedEntryAppearsInHelpersWithoutCodeEdits(t *testing.T) {
 		},
 	})
 
-	if got, want := Names(), []string{model.SourceClaudeCode, model.SourceCodex, "fake-tool"}; !reflect.DeepEqual(got, want) {
+	if got, want := Names(), []string{model.SourceClaudeCode, model.SourceCodex, model.SourceGemini, "fake-tool"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("Names() with fake entry = %v, want %v", got, want)
 	}
-	if got, want := EnumValues(), []string{model.SourceClaudeCode, model.SourceCodex, "fake-tool", All}; !reflect.DeepEqual(got, want) {
+	if got, want := EnumValues(), []string{model.SourceClaudeCode, model.SourceCodex, model.SourceGemini, "fake-tool", All}; !reflect.DeepEqual(got, want) {
 		t.Errorf("EnumValues() with fake entry = %v, want %v", got, want)
 	}
 	if !IsValid("fake-tool") {
@@ -131,12 +137,12 @@ func TestFakeSeedEntryAppearsInHelpersWithoutCodeEdits(t *testing.T) {
 	}
 
 	roots := Roots()
-	if len(roots) != 3 {
-		t.Fatalf("Roots() with fake entry len = %d, want 3", len(roots))
+	if len(roots) != 4 {
+		t.Fatalf("Roots() with fake entry len = %d, want 4", len(roots))
 	}
-	fake := roots[2]
+	fake := roots[3]
 	if fake.Name != "fake-tool" || fake.IsDefault || fake.Exists || fake.IsDir {
-		t.Errorf("Roots()[2] = %+v, want fake-tool/IsDefault=false/Exists=false/IsDir=false", fake)
+		t.Errorf("Roots()[3] = %+v, want fake-tool/IsDefault=false/Exists=false/IsDir=false", fake)
 	}
 	if !fakeRootCalled {
 		t.Error("Roots() did not call the fake entry's RootDir resolver")

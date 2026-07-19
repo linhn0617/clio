@@ -1,0 +1,3 @@
+{"sessionId":"44444444-dddd-4ddd-8ddd-dddddddddddd","projectHash":"deadbeef","startTime":"2026-07-18T13:00:00.000Z","lastUpdated":"2026-07-18T13:00:01.000Z","kind":"main"}
+{"$set":{"messages":[{"id":"msgA","timestamp":"2026-07-18T13:00:01.000Z","type":"user","content":[{"text":"question before rewind"}]}],"lastUpdated":"2026-07-18T13:00:01.000Z"}}
+{"$rewindTo":"msgA"}

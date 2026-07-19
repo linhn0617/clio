@@ -72,6 +72,12 @@ var Seed = []Entry{
 		RootLabel: "codex sessions dir",
 		RootDir:   config.CodexSessionsDir,
 	},
+	{
+		Name:      model.SourceGemini,
+		Label:     "[gemini]",
+		RootLabel: "gemini chats dir",
+		RootDir:   config.GeminiTmpDir,
+	},
 }
 
 // Names returns the registered source names, in Seed order.

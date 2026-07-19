@@ -52,6 +52,8 @@ func (s codexSource) Roots() ([]string, error) {
 	return []string{s.root}, nil
 }
 
+func (codexSource) WholeFileReplay() bool { return false }
+
 // pathUnder reports whether path is within root.
 func pathUnder(path, root string) bool {
 	rel, err := filepath.Rel(root, path)

@@ -17,6 +17,16 @@ func TestDataDirIgnoresRelativeXDG(t *testing.T) {
 	}
 }
 
+func TestGeminiTmpDir(t *testing.T) {
+	dir, err := GeminiTmpDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(dir, filepath.Join(".gemini", "tmp")) {
+		t.Fatalf("GeminiTmpDir() = %q, want a path ending in .gemini/tmp", dir)
+	}
+}
+
 func TestDataDirHonorsAbsoluteXDG(t *testing.T) {
 	abs := filepath.Join(t.TempDir(), "xdg")
 	t.Setenv("XDG_DATA_HOME", abs)

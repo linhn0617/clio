@@ -53,13 +53,14 @@ func New(database *db.DB, log *slog.Logger) *Ingester {
 }
 
 // NewWithBuiltinSources returns an Ingester with every built-in source registered:
-// claude-code always, plus codex when its sessions directory exists. This is the
-// composition root for CLI/MCP entry points — they call this instead of New, so
-// adding a future built-in source only requires a change here, not at every call
-// site.
+// claude-code always, plus codex and gemini when their respective directories exist.
+// This is the composition root for CLI/MCP entry points — they call this instead of
+// New, so adding a future built-in source only requires a change here, not at every
+// call site.
 func NewWithBuiltinSources(database *db.DB, log *slog.Logger) *Ingester {
 	ing := New(database, log)
 	ing.addCodexSource()
+	ing.addGeminiSource()
 	return ing
 }
 
@@ -154,6 +155,15 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 		return 0, false, nil
 	}
 
+	// A whole-file-replay source (e.g. Gemini's $set op-log) cannot be resumed
+	// from a stored byte offset: a later record can overwrite or shrink
+	// already-ingested state, so any change forces a full replay from 0,
+	// committed as a full re-ingest. The stored offset still gates change
+	// detection above (changeSkip), it is just never used as a resume point.
+	if src.WholeFileReplay() {
+		kind = changeFull
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, false, err
@@ -198,6 +208,26 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 
 	res, err := src.ParseFile(ing, f, startOffset, startSeq, path)
 	if err != nil {
+		// An unusable state record (e.g. an over-cap or unparsable Gemini $set)
+		// aborts the pass before commit: rows and the stored watermark stay put,
+		// so doctor's lag check keeps flagging the file. The failure itself must
+		// still be durably counted as unparsed (spec: "the failure SHALL be
+		// counted as unparsed") — the normal unparsed_lines accounting rides the
+		// commit transaction, which never runs on this path.
+		if errors.Is(err, errUnusableStateRecord) {
+			// The abort itself always counts as (at least) 1; if the source's
+			// parser had already skip-counted ordinary records earlier in
+			// this SAME now-aborted pass (unusableStateCounter), fold those
+			// in too — otherwise they would be silently dropped, since the
+			// normal unparsed_lines accounting rides the commit transaction,
+			// which never runs on this path (adversarial review finding 4).
+			var priorUnparsed int64
+			var counter unusableStateCounter
+			if errors.As(err, &counter) {
+				priorUnparsed = counter.PriorUnparsed()
+			}
+			ing.recordUnusableStatePass(path, size, mtime, priorUnparsed)
+		}
 		return 0, false, err
 	}
 	if res.Consumed == 0 {
@@ -502,6 +532,33 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 	return inserted, nil
 }
 
+// recordUnusableStatePass durably counts a pass aborted by an unusable
+// state-carrying record (errUnusableStateRecord): +(1+priorUnparsed)
+// unparsed_lines for the file, WITHOUT touching the stored byte offset or
+// fingerprints — the watermark must not advance past the unusable record, so
+// doctor's lag check (fi.Size() > offset) keeps flagging the file.
+// priorUnparsed is the count of ordinary skip+count records the source's
+// parser had already accumulated earlier in this same aborted pass (0 if
+// none); folding it in here prevents that count from being silently dropped
+// (adversarial review finding 4) — the normal unparsed_lines accounting
+// rides the commit transaction, which never runs on this path. Recording the
+// failing size/mtime alongside makes the next pass classify the same broken
+// bytes as changeSkip (the parse is deterministic — re-aborting every pass
+// would both waste work and inflate the count); any further append changes
+// the size and triggers a fresh full replay. Best-effort: a write error is
+// logged, never escalated (the abort itself is already the caller's error).
+func (ing *Ingester) recordUnusableStatePass(path string, size, mtime, priorUnparsed int64) {
+	n := 1 + priorUnparsed
+	_, err := ing.db.Exec(`INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, head_fingerprint, last_ingested_at, unparsed_lines)
+		VALUES (?,?,?,0,'','',?,?)
+		ON CONFLICT(source_file) DO UPDATE SET last_size=excluded.last_size, last_mtime=excluded.last_mtime,
+		last_ingested_at=excluded.last_ingested_at, unparsed_lines=ingest_state.unparsed_lines + ?`,
+		path, size, mtime, time.Now().Unix(), n, n)
+	if err != nil {
+		ing.log.Warn("record unusable-state pass failed", "file", path, "err", err)
+	}
+}
+
 // upsertIngestState writes the file watermark into ingest_state. When monotonic
 // is true (incremental ingests), the update only applies when the new offset is
 // at least as large as the stored one — preventing a stale writer from moving
@@ -699,14 +756,35 @@ func (ing *Ingester) allSourceFiles() ([]string, error) {
 // at a different, re-ingested path (the file was moved/renamed under the same name, e.g. a
 // renamed project dir), deleting by uuid would clobber the live data, so only the stale
 // ingest_state for src is removed. A final re-stat closes the scan->delete TOCTOU window.
-// sessionUUIDForPurge resolves the session uuid for a source path via its owning
-// source adapter (Codex's id is not the filename), falling back to the claude-code
-// filename convention when no source owns the path.
+// sessionUUIDForPurge resolves the session uuid for a source path. It prefers
+// the DB (sessions.source_file), since purge only ever runs for a file
+// already confirmed gone (design.md §2): a Gemini file's uuid lives in its
+// metadata line, which is no longer readable once the file is deleted, so
+// SessionIDFromPath alone would resolve "" and leave orphaned rows. This is
+// safe for every source — the DB and the filename/metadata convention
+// already agree there when a row exists — so it is not Gemini-specific. It
+// falls back to the owning source adapter's SessionIDFromPath (Codex's id is
+// not the filename), then to the claude-code filename convention, for a path
+// with no DB row (e.g. never successfully ingested).
 func (ing *Ingester) sessionUUIDForPurge(src string) string {
+	if uuid := ing.sessionUUIDFromDB(src); uuid != "" {
+		return uuid
+	}
 	if s := ing.sourceFor(src); s != nil {
 		return s.SessionIDFromPath(src)
 	}
 	return sessionUUIDFromPath(src)
+}
+
+// sessionUUIDFromDB looks up a source file's session uuid via
+// sessions.source_file. "" if no row matches (not yet ingested, or already
+// purged) — the caller falls back to the source-adapter/filename convention.
+func (ing *Ingester) sessionUUIDFromDB(src string) string {
+	var uuid string
+	if err := ing.db.QueryRow(`SELECT uuid FROM sessions WHERE source_file = ?`, src).Scan(&uuid); err != nil {
+		return ""
+	}
+	return uuid
 }
 
 func (ing *Ingester) purgeSource(src string) error {
