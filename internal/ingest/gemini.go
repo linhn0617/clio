@@ -19,19 +19,26 @@ import (
 // and codex (simple event streams, one line -> zero-or-more messages
 // appended in order), a Gemini transcript must be REPLAYED to reconstruct
 // the final message list: a record can be a full-state overwrite ($set), a
-// bare appended message, or a rewind (design.md §0/§3). v1 replays only the
-// shapes observed in a real transcript (metadata line + $set); a line that
-// DID parse as a JSON object but carries some other observed-but-unreplayed
-// shape (bare MessageRecord, $rewindTo) is warned, skipped, and counted as
-// unparsed, never fatal — but a line that cannot even be parsed as JSON, or
-// an identified $set that is unusable (over-cap or unparsable), aborts the
-// whole pass rather than silently discarding partial state: neither case can
-// be ruled out as a $set carrying the entire conversation state, so
-// skip-and-continue would risk silently discarding a full-state overwrite
-// (design.md §3 P1, spec "An unusable Gemini state record aborts the
-// pass"). geminiSource therefore declares WholeFileReplay()==true (task
-// 2.1/2.2): the orchestrator always reparses it from offset 0 and commits a
-// full re-ingest.
+// bare appended message (upserted by id), or a rewind (design.md §0/§3,
+// re-confirmed against a real assistant-bearing transcript, task 6.1 ship
+// gate). A $set record with a "messages" key overwrites the reconstructed
+// list wholesale (last writer wins); a bare (non-$set, non-$rewindTo)
+// top-level message record — confirmed real, not provisional, by a live
+// sample containing tool calls and an in-place edit — is replayed via
+// upsert-by-id: an id already in the reconstructed list is replaced AT ITS
+// ORIGINAL POSITION (the real sample's assistant message arrives first with
+// only `thoughts`, then again with `toolCalls` added, same id), an unseen id
+// is appended at the tail. $rewindTo remains unobserved in any real
+// transcript and is still warned, skipped, and counted as unparsed, never
+// replayed — but a line that cannot even be parsed as JSON, or an identified
+// $set that is unusable (over-cap or unparsable), aborts the whole pass
+// rather than silently discarding partial state: neither case can be ruled
+// out as a $set carrying the entire conversation state, so skip-and-continue
+// would risk silently discarding a full-state overwrite (design.md §3 P1,
+// spec "An unusable Gemini state record aborts the pass"). geminiSource
+// therefore declares WholeFileReplay()==true (task 2.1/2.2): the
+// orchestrator always reparses it from offset 0 and commits a full
+// re-ingest.
 // debt: full re-ingest cost grows linearly with session length on every
 // change (each watcher batch deletes+reinserts the whole session), where the
 // append-only sources pay only for the new tail (design.md §4 "Honest cost
@@ -180,14 +187,53 @@ type geminiContentBlock struct {
 	Text string `json:"text"`
 }
 
-// geminiMessage is one element of a $set's "messages" array (v1 fields
-// only: thoughts/toolCalls are intentionally not modeled here — task 4.4
-// leaves them in raw_json unextracted).
+// geminiDecodeContent extracts text blocks from a message's raw "content"
+// field, which real gemini-cli transcripts encode in TWO different shapes —
+// confirmed by gemini-real-sample-with-assistant.jsonl (ship-gate re-review,
+// 2026-07-20), not guessed: a content[] array of {text} blocks (used by
+// $set-embedded "user" turns, e.g. lines 2/3), AND a bare JSON string (used
+// by bare "gemini"-type records, e.g. line 10's real assistant reply and
+// lines 5/7's "" placeholder before real text exists — v1's original model
+// only knew the array shape, because the baseline v0.51.0 sample used for
+// that guess had no assistant turn at all to reveal this). Both shapes are
+// tried; an absent field, an explicit empty string, or any other
+// unrecognized JSON shape (object, number, bool, …) all return nil — "no
+// extractable text" — and are NOT told apart here, because every caller
+// treats them identically (an assistant message with no extractable text is
+// warned/skipped/counted; a user message with no extractable text is simply
+// not a turn — see the final per-role mapping loop).
+func geminiDecodeContent(raw json.RawMessage) []geminiContentBlock {
+	if len(raw) == 0 {
+		return nil
+	}
+	var blocks []geminiContentBlock
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		return blocks
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if s == "" {
+			return nil
+		}
+		return []geminiContentBlock{{Text: s}}
+	}
+	return nil // unrecognized shape (object, number, bool, ...)
+}
+
+// geminiMessage is one element of a $set's "messages" array, or a bare
+// upserted record (v1 fields only: thoughts/toolCalls are intentionally not
+// modeled here — they stay in raw_json unextracted). Their real shapes are
+// now confirmed by a live assistant-bearing transcript (ship-gate
+// re-review, 2026-07-20, see the gemini-oplog-replay-from-real-sample
+// change's design.md) — this is no longer provisional — but extraction
+// into separate thinking/tool-use messages remains deliberately out of
+// scope for that change too: only the replay/reconstruction model was
+// re-confirmed against real bytes, not the extraction itself.
 // debt: no thinking/tool-use messages and no activity targets are produced
-// from a gemini message's thoughts[]/toolCalls[] in v1 — their field shapes
-// are unobserved (provisional, from gemini-cli source types only). Build the
-// extraction (mirroring codexExtractTargets, codex.go:378, incl. the
-// mcp__clio__* self-pollution guard) in task 6.1 against real bytes.
+// from a gemini message's thoughts[]/toolCalls[] yet. Build the extraction
+// (mirroring codexExtractTargets, codex.go:378, incl. the mcp__clio__*
+// self-pollution guard) in a future change against the confirmed real
+// shapes once needed.
 type geminiMessage struct {
 	ID        string               `json:"id"`
 	Timestamp string               `json:"timestamp"`
@@ -195,18 +241,21 @@ type geminiMessage struct {
 	Content   []geminiContentBlock `json:"content"`
 }
 
-// geminiMessageEnvelope decodes a $set messages[] element's id/timestamp/type
-// fields while leaving content as raw bytes, so an unrecognized content shape
-// (e.g. an object or a bare string instead of the expected content[] array)
-// can be handled as "no extractable text" at the message level instead of
-// failing to decode the whole element outright. Decoding straight into
-// geminiMessage would make that failure indistinguishable from a genuine
-// $set-structure failure and wrongly abort the entire pass (adversarial
-// review finding 2, P1): only the $set's own structure (the wrapper object,
-// the $set value, the messages array itself) can hide an unrecoverable
-// full-state overwrite; a single messages[] element's shape cannot, because
-// every other element in the SAME array is still fully usable. See the
-// replay loop for where this boundary is enforced.
+// geminiMessageEnvelope decodes a $set messages[] element's — OR a bare
+// top-level message record's — id/timestamp/type fields while leaving
+// content as raw bytes, so an unrecognized content shape (e.g. an object or
+// a bare string instead of the expected content[] array) can be handled as
+// "no extractable text" at the message level instead of failing to decode
+// the whole element outright. Decoding straight into geminiMessage would
+// make that failure indistinguishable from a genuine $set-structure failure
+// and wrongly abort the entire pass (adversarial review finding 2, P1):
+// only the $set's own structure (the wrapper object, the $set value, the
+// messages array itself) can hide an unrecoverable full-state overwrite; a
+// single messages[] element's shape cannot, because every other element in
+// the SAME array is still fully usable — and neither can a single bare
+// record's shape, because it is not part of any array at all. See the
+// replay loop for where this boundary is enforced, both for $set elements
+// and for a bare record's upsert-by-id.
 type geminiMessageEnvelope struct {
 	ID        string          `json:"id"`
 	Timestamp string          `json:"timestamp"`
@@ -278,9 +327,10 @@ var errUnusableStateRecord = errors.New("unusable state record")
 
 // unusableStateCounter is implemented by an errUnusableStateRecord-wrapping
 // error that additionally carries priorUnparsed: the count of ordinary
-// skip+count records (bare MessageRecord/$rewindTo lines, or message-element
-// shape skips within an otherwise-usable $set) the parser had already
-// accumulated earlier in the SAME now-aborted pass. Without this,
+// skip+count records ($rewindTo lines, a bare record with no id or an
+// unparsable envelope, or message-element shape skips within an otherwise-
+// usable $set) the parser had already accumulated earlier in the SAME
+// now-aborted pass. Without this,
 // recordUnusableStatePass's durable +1 unparsed_lines bump would silently
 // drop those earlier counted skips (adversarial review finding 4, P2) — a
 // pass that skip-counted N ordinary records before hitting an unusable state
@@ -331,30 +381,48 @@ func errGeminiUnusableSet(path, reason string, priorUnparsed int64) error {
 
 // ParseFile replays a Gemini transcript from offset 0 (startOffset/startSeq
 // are always 0 here — forced by ingest.go's whole-file-replay wiring, task
-// 2.2) into a session and its messages. v1 replays only the observed record
-// shapes: the metadata line seeds the session (and its sessionId must be
-// non-empty — an empty/missing id would commit rows under uuid "" and let
-// unrelated broken files collide there, so it aborts like any other
-// corrupted state record, adversarial review finding 5), and a $set record
-// with a PRESENT, non-null "messages" key overwrites the reconstructed
-// message list (last writer wins); a metadata-only $set (the "messages" key
-// genuinely absent) is a no-op for messages. A $set whose "messages" key (or
-// whose own value) is present but JSON null is NOT the metadata-only case —
-// it is unusable and aborts (finding 1; see the $set-body map decode comment
-// above geminiMessageEnvelope for why "absent" and "present-but-null" must
-// be told apart).
-// A line that DOES parse as a JSON object but carries any other record shape
-// after the metadata line (bare MessageRecord, $rewindTo, or anything else
-// unrecognized) is warned, skipped, and counted as unparsed — never
-// replayed, never fatal (design.md §3, adversarial-review ruling). A line
-// that does NOT even parse as a JSON object, or an identified $set whose own
-// structure is unusable (over-cap, unparsable, or present-but-null), aborts
-// the whole pass instead of being skipped: neither can be inspected well
-// enough to rule out that it was a $set carrying the entire conversation
-// state (see errGeminiUnusableSet; spec "An unusable Gemini state record
-// aborts the pass"). A single messages[] ELEMENT's shape (as opposed to the
-// $set's own structure) does NOT abort — see the replay loop's per-element
-// geminiMessageEnvelope decode (finding 2).
+// 2.2) into a session and its messages. The metadata line seeds the session
+// (and its sessionId must be non-empty — an empty/missing id would commit
+// rows under uuid "" and let unrelated broken files collide there, so it
+// aborts like any other corrupted state record, adversarial review finding
+// 5). After that, every record is replayed by one of two rules, both
+// confirmed against a real assistant-bearing transcript (ship-gate
+// re-review, 2026-07-20, gemini-oplog-replay-from-real-sample/design.md —
+// this superseded the original v1 guess that a bare record is unreplayed):
+//
+//   - A $set record with a PRESENT, non-null "messages" key overwrites the
+//     ENTIRE reconstructed message list (last writer wins); a metadata-only
+//     $set (the "messages" key genuinely absent) is a no-op for messages. An
+//     empty "messages" array ([]) is a legitimate full clear — $set is
+//     inherently a full-replace operation, and json.Unmarshal into a slice
+//     never errors on "[]", so this falls out of the existing decode with no
+//     extra branch (pinned by TestGeminiSetEmptyMessagesArrayClearsMessages).
+//     A $set whose "messages" key (or whose own value) is present but JSON
+//     null is NOT the metadata-only case — it is unusable and aborts
+//     (finding 1; see the $set-body map decode comment above
+//     geminiMessageEnvelope for why "absent" and "present-but-null" must be
+//     told apart).
+//   - A bare (non-$set, non-$rewindTo) top-level record is upserted BY ID
+//     into the reconstructed list: an id already present is replaced AT ITS
+//     ORIGINAL POSITION (never moved to the tail), an unseen id is appended.
+//     A bare record with no id cannot be placed by upsert and is skipped +
+//     counted, never replayed and never fatal — same for one whose top-level
+//     shape fails to decode at all (defensive; should not happen once the
+//     line has already parsed as a JSON object). $rewindTo remains
+//     unobserved in any real transcript to date and is still warned,
+//     skipped, and counted as unparsed, never replayed
+//     (`debt:` build it, including the inclusive/exclusive rewind boundary,
+//     once a real transcript containing one exists).
+//
+// A line that does NOT even parse as a JSON object, or an identified $set
+// whose own structure is unusable (over-cap, unparsable, or
+// present-but-null), aborts the whole pass instead of being skipped: neither
+// can be inspected well enough to rule out that it was a $set carrying the
+// entire conversation state (see errGeminiUnusableSet; spec "An unusable
+// Gemini state record aborts the pass"). A single messages[] ELEMENT's shape
+// (as opposed to the $set's own structure), and a single bare record's
+// shape, does NOT abort — see the replay loop's per-element/per-record
+// geminiMessageEnvelope decode (finding 2, extended to bare records).
 func (s geminiSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, startSeq int, path string) (parseResult, error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return parseResult{}, err
@@ -397,6 +465,13 @@ func (s geminiSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, st
 	// carries one) in task 6.1 once a real nested transcript is observed.
 
 	var reconstructed []geminiReplayedMsg
+	// idIndex maps a message id to its position in reconstructed, so a bare
+	// record's upsert-by-id can find and replace an existing entry AT ITS
+	// ORIGINAL POSITION in O(1) instead of a linear scan, and so a fresh id
+	// can be told apart from one already seen. Rebuilt wholesale every time a
+	// $set overwrites reconstructed (see below); updated incrementally by
+	// each bare-record upsert in between $sets.
+	idIndex := make(map[string]int)
 
 	for {
 		data, n, terminated, overCap, err := readCappedLine(r, maxLineBytes)
@@ -441,13 +516,57 @@ func (s geminiSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, st
 		}
 		setRaw, isSet := wrapper["$set"]
 		if !isSet {
-			// Unobserved shape (bare MessageRecord, $rewindTo, or anything
-			// else not yet built) — v1 does not replay these.
-			// debt: bare-MessageRecord append and $rewindTo replay branches
-			// (incl. the rewind's inclusive/exclusive boundary) are built in
-			// task 6.1 once a real transcript containing them exists.
-			ing.log.Warn("skip unobserved gemini record shape (not $set)", "file", path)
-			unparsed++
+			if _, isRewind := wrapper["$rewindTo"]; isRewind {
+				// $rewindTo remains unobserved in any real transcript to date
+				// (ship-gate re-review, 2026-07-20) — still not replayed.
+				// debt: build the rewind replay branch (incl. the
+				// inclusive/exclusive boundary) once a real transcript
+				// containing one exists.
+				ing.log.Warn("skip unobserved gemini record shape ($rewindTo, not yet replayed)", "file", path)
+				unparsed++
+				continue
+			}
+			// A bare (non-$set, non-$rewindTo) top-level record is a
+			// MessageRecord appended directly to the op-log — CONFIRMED real
+			// by a live assistant-bearing transcript (ship-gate re-review,
+			// 2026-07-20: gemini-real-sample-with-assistant.jsonl lines
+			// 3/5/7/8/10), not the "unobserved, skip+count" guess v1 made
+			// before that sample existed. It is replayed via upsert-by-id
+			// into reconstructed, exactly like a $set's array elements are
+			// replayed into the array — never simply skipped.
+			var env geminiMessageEnvelope
+			if err := json.Unmarshal(line, &env); err != nil {
+				// Structurally shouldn't happen (line already parsed as a
+				// JSON object to build wrapper above), but guard
+				// defensively: this is an ordinary record-level issue, not a
+				// $set, so it is skipped and counted, never aborts the pass.
+				ing.log.Warn("skip unparsable bare gemini record", "file", path, "err", err)
+				unparsed++
+				continue
+			}
+			if env.ID == "" {
+				// No id: upsert-by-id has nothing to key on, so this record
+				// cannot be placed in the reconstructed list at all — skip
+				// and count, same as any other record-level issue that
+				// isn't a $set (it cannot hide a full-state overwrite).
+				ing.log.Warn("skip bare gemini record with no id", "file", path)
+				unparsed++
+				continue
+			}
+			// geminiDecodeContent mirrors the $set-element handling below
+			// exactly (array-shape OR bare-string-shape, else nil) and lets
+			// the per-role handling in the final mapping loop decide what an
+			// empty result means. This is NOT an immediate skip for a
+			// shape-mismatch: the record still occupies its upsert-by-id
+			// slot, same as a $set element would.
+			gm := geminiMessage{ID: env.ID, Timestamp: env.Timestamp, Type: env.Type, Content: geminiDecodeContent(env.Content)}
+			rm := geminiReplayedMsg{raw: line, parsed: gm}
+			if idx, ok := idIndex[env.ID]; ok {
+				reconstructed[idx] = rm // upsert: same id updates in place, position preserved
+			} else {
+				idIndex[env.ID] = len(reconstructed)
+				reconstructed = append(reconstructed, rm)
+			}
 			continue
 		}
 		if isJSONNull(setRaw) {
@@ -488,6 +607,16 @@ func (s geminiSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, st
 		if err := json.Unmarshal(messagesRaw, &rawMsgs); err != nil {
 			return parseResult{}, errGeminiUnusableSet(path, "unparsable $set messages array: "+err.Error(), unparsed)
 		}
+		// An empty array ("messages":[]) unmarshals into a zero-length,
+		// non-nil rawMsgs with no error — json.Unmarshal never errors on "[]"
+		// for a slice target. Deliberately treated as a legitimate full
+		// clear, not an abort: $set is inherently a full-replace operation
+		// (§ design.md, "the last $set wins"), so an explicitly empty array
+		// is just that replacement being "the empty conversation" — no
+		// special-case branch is needed, this falls out of the existing
+		// decode (pinned by TestGeminiSetEmptyMessagesArrayClearsMessages;
+		// unobserved in any real transcript to date, so this is a considered
+		// choice, not an observed fact).
 		replayed := make([]geminiReplayedMsg, 0, len(rawMsgs))
 		for _, raw := range rawMsgs {
 			// Message-level shape problems — this element isn't even a JSON
@@ -520,47 +649,78 @@ func (s geminiSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, st
 				unparsed++
 				continue
 			}
-			gm := geminiMessage{ID: env.ID, Timestamp: env.Timestamp, Type: env.Type}
-			if len(env.Content) > 0 {
-				if err := json.Unmarshal(env.Content, &gm.Content); err != nil {
-					// Unrecognized content shape (e.g. an object or a bare
-					// string instead of the expected content[] array): leave
-					// gm.Content empty so the per-role handling below treats
-					// it exactly like an empty content[] array — an
-					// assistant message with no extractable text is warned,
-					// skipped, and counted (spec: "An assistant message with
-					// an unrecognized content shape is not indexed empty");
-					// a user message with no extractable text is simply not
-					// a turn (same as a session_context-only wrapper).
-					gm.Content = nil
-				}
-			}
+			// geminiDecodeContent handles BOTH real content shapes (a
+			// content[] array of {text} blocks, or a bare JSON string — see
+			// its doc comment) and returns nil — "no extractable text" — for
+			// anything else (e.g. an object). An empty result is not an
+			// element-level failure: the per-role handling below treats it
+			// exactly like an empty content[] array — an assistant message
+			// with no extractable text is warned, skipped, and counted
+			// (spec: "An assistant message with an unrecognized content
+			// shape is not indexed empty"); a user message with no
+			// extractable text is simply not a turn (same as a
+			// session_context-only wrapper).
+			gm := geminiMessage{ID: env.ID, Timestamp: env.Timestamp, Type: env.Type, Content: geminiDecodeContent(env.Content)}
 			// raw_json is the record's own line (redacted below), shared by
 			// every message this $set produces — not this element's bytes.
 			// See geminiReplayedMsg's doc comment (finding 3).
 			replayed = append(replayed, geminiReplayedMsg{raw: line, parsed: gm})
 		}
 		reconstructed = replayed // full overwrite, last writer wins
+		// idIndex must be rebuilt wholesale (not merged) alongside
+		// reconstructed: a $set is a full-state overwrite, so any id that
+		// existed only in a PRIOR $set/bare-record generation and is absent
+		// from this array is gone — a later bare record referencing that
+		// stale id must be treated as a fresh append, not an upsert into a
+		// position that no longer exists in the current conversation.
+		idIndex = make(map[string]int, len(reconstructed))
+		for i, rm := range reconstructed {
+			if rm.parsed.ID != "" {
+				idIndex[rm.parsed.ID] = i
+			}
+		}
 	}
 
 	var msgs []model.Message
 	seq := 0
-	// lastRaw/lastRedacted cache the most recently redacted $set record line
-	// so every message that record produced shares ONE redact call and ONE
-	// resulting string (finding 1, P1/adversarial round 3): every
-	// geminiReplayedMsg appended from the SAME replayed batch carries the
-	// identical line bytes — literally the same underlying array, since they
-	// all come from the one `line` slice read for that record (see the
-	// append above and geminiReplayedMsg's doc comment) — so comparing by
-	// data pointer (not re-scanning the bytes) is enough to detect "same
-	// record" in O(1). Without this, a $set with N messages redacted the
-	// full record line N times and held N separate copies of it, an
-	// O(messages × line length) blow-up: a $set near the 16 MiB line cap
-	// with many messages could balloon to gigabytes of memory and redact
-	// work for what is structurally one line.
-	var lastRaw json.RawMessage
-	var lastRedacted string
-	haveLast := false
+	// redactCache maps a raw record LINE's own identity (the address of its
+	// first byte) to its already-redacted string, so every message that
+	// line produced shares ONE redact call and ONE resulting string for the
+	// WHOLE mapping pass — not just when consecutive (finding 1,
+	// P1/adversarial round 3, re-broken by upsert-by-id and re-found on
+	// ship-gate re-review 2026-07-20). An earlier version of this cache only
+	// compared each message's raw line against the IMMEDIATELY PRECEDING
+	// message's, which was sufficient when a $set's messages were the only
+	// thing ever in reconstructed (they're appended together, so they start
+	// out adjacent — see the append in the $set branch above and
+	// geminiReplayedMsg's doc comment). But upsert-by-id can splice a bare
+	// record's line in BETWEEN two messages that came from the SAME $set
+	// line without removing either — e.g. $set[A,B,C] then a bare upsert of
+	// B produces the reconstructed identity sequence
+	// [setLine, bareLine, setLine]: A and C still share setLine's bytes but
+	// are no longer adjacent, so a consecutive-only check misses the second
+	// occurrence and redacts setLine again — the same line redacted twice,
+	// and (since encoding/json never interns strings) the two results no
+	// longer share a backing array either, breaking cli/show.go's writeRaw
+	// consecutive-line dedup for messages that DO stay consecutive.
+	// Keying by the line's identity across the ENTIRE pass, not just the
+	// previous iteration, fixes both: wherever a line's messages land after
+	// upserts reorder or interleave them, they all hit the same cache entry.
+	//
+	// The key is the line's own identity, not its content: two structurally
+	// different records that happen to redact to identical bytes must still
+	// redact independently (they're different records that coincide, not
+	// the same record). &raw[0] is a stable, comparable identity for this —
+	// every message produced by one record's line shares that exact
+	// backing array (geminiReplayedMsg's doc comment), and Go's GC never
+	// relocates a live array out from under a still-held reference, which is
+	// the same idiom TestGeminiSetRedactedOncePerRecordNotPerMessage already
+	// relies on via unsafe.StringData. An empty raw (len 0 — not expected in
+	// practice, since both the $set element loop and the bare record loop
+	// above only ever store a non-empty line, but guarded defensively since
+	// raw[0] cannot be taken on it) is redacted directly and never cached;
+	// redacting "" is O(1) either way so that costs nothing.
+	redactCache := make(map[*byte]string, len(reconstructed))
 	for _, rm := range reconstructed {
 		gm := rm.parsed
 		ts := parseTS(gm.Timestamp)
@@ -573,11 +733,16 @@ func (s geminiSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, st
 			}
 		}
 		var raw string
-		if haveLast && len(rm.raw) == len(lastRaw) && (len(rm.raw) == 0 || &rm.raw[0] == &lastRaw[0]) {
-			raw = lastRedacted
-		} else {
+		if len(rm.raw) == 0 {
 			raw = string(redactJSON(rm.raw))
-			lastRaw, lastRedacted, haveLast = rm.raw, raw, true
+		} else {
+			key := &rm.raw[0]
+			if cached, ok := redactCache[key]; ok {
+				raw = cached
+			} else {
+				raw = string(redactJSON(rm.raw))
+				redactCache[key] = raw
+			}
 		}
 		switch gm.Type {
 		case model.RoleUser:

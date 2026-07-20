@@ -75,7 +75,16 @@
 
 ## 6. Fixtures, verification, ship gate
 
-- [ ] 6.1 **SHIP GATE (blocked on user re-auth)** — real-sample re-confirmation: re-auth
+- [x] 6.1 **SHIP GATE — real-sample re-confirmation done (2026-07-20)**: captured a real
+  assistant-bearing session via an API-key auth run. It revealed the provisional replay model
+  was wrong (messages arrive as bare-record upserts-by-id, not via `$set`; assistant content is
+  a JSON string, not an array) — corrected in change 2026-07-20-gemini-oplog-replay-from-real-
+  sample (codex clean gate, verifier 9/9, conversation text now indexed and verified end-to-end
+  against the real sample). Gate released for a scoped v1 "indexes Gemini conversations". Still
+  deferred (documented as follow-ups, not gate blockers): thoughts/toolCalls extraction,
+  `$rewindTo` replay (unobserved in the sample), subagent nesting + parent linking. Original
+  gate text (kept for record):
+- [ ] 6.1 (orig) **SHIP GATE (blocked on user re-auth)** — real-sample re-confirmation: re-auth
   Gemini CLI, drive a real multi-turn session with tool calls + an edit/rewind, then build and
   confirm against real bytes: assistant/`thoughts`/`toolCalls` shapes + extraction,
   bare-`MessageRecord` and `$rewindTo` replay branches (incl. boundary), subagent nesting +

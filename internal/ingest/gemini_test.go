@@ -292,11 +292,16 @@ func TestGeminiIngestRedactsSecretInContent(t *testing.T) {
 	}
 }
 
-// TestGeminiIngestBareAppendSkippedAndCounted is the spec scenario
-// "Unobserved record shapes are skipped and counted, not replayed": a bare
-// (non-$set) MessageRecord line is skipped+warned+counted unparsed, while
-// the file's $set-derived message is still indexed.
-func TestGeminiIngestBareAppendSkippedAndCounted(t *testing.T) {
+// TestGeminiIngestBareAppendReplayedAndIndexed is the INVERTED form of the
+// original v1 test (was TestGeminiIngestBareAppendSkippedAndCounted): the
+// ship-gate re-review (2026-07-20, real gemini-real-sample-with-assistant.jsonl)
+// confirmed a bare (non-$set) MessageRecord line IS part of the real Gemini
+// CLI op-log and must be replayed via upsert-by-id, not skipped — v1's
+// "warn+skip+unparsed" treatment was a wrong guess made before real bytes
+// existed (design.md "0. Ground truth vs provisional" superseded). Both the
+// $set-carried message and the bare append must now be indexed, in file
+// order, and the pass must not count the bare append as unparsed.
+func TestGeminiIngestBareAppendReplayedAndIndexed(t *testing.T) {
 	ing, database := newGeminiTestIngester(t)
 	if _, err := ing.IngestAll(context.Background(), t.TempDir(), false); err != nil {
 		t.Fatal(err)
@@ -304,16 +309,22 @@ func TestGeminiIngestBareAppendSkippedAndCounted(t *testing.T) {
 	const uuid = "33333333-cccc-4ccc-8ccc-cccccccccccc"
 	var n int
 	database.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_uuid=?`, uuid).Scan(&n)
-	if n != 1 {
-		t.Fatalf("messages=%d want 1 (only the $set-carried message; the bare append is skipped)", n)
+	if n != 2 {
+		t.Fatalf("messages=%d want 2 (the $set-carried message AND the bare append, both replayed)", n)
+	}
+	rows := geminiMessageRows(t, database, uuid)
+	wantSeq0 := "0:user:question via set"
+	wantSeq1 := "1:user:appended without $set wrapper"
+	if len(rows) != 2 || rows[0] != wantSeq0 || rows[1] != wantSeq1 {
+		t.Fatalf("rows=%v want [%q %q] (in file order: the $set message first, the bare append appended after it)", rows, wantSeq0, wantSeq1)
 	}
 	var unparsed int64
 	if err := database.QueryRow(`SELECT unparsed_lines FROM ingest_state WHERE source_file=?`,
 		filepath.Join(geminiTestdataRoot, "bare-append/chats/session-2026-07-18T10-00-3333cccc.jsonl")).Scan(&unparsed); err != nil {
 		t.Fatal(err)
 	}
-	if unparsed < 1 {
-		t.Fatalf("unparsed_lines=%d want >=1 (the bare-append line must be counted)", unparsed)
+	if unparsed != 0 {
+		t.Fatalf("unparsed_lines=%d want 0 (the bare append is now successfully replayed, not a parse failure)", unparsed)
 	}
 }
 
@@ -1540,6 +1551,192 @@ func TestGeminiSetManyMessagesRedactionSharedAndBounded(t *testing.T) {
 	}
 }
 
+// TestGeminiInterleavedBareUpsertRedactsSetLineOnce is the P1 found on
+// re-review after upsert-by-id shipped (task 6.1 follow-up): the redact
+// cache added for finding 1 (TestGeminiSetRedactedOncePerRecordNotPerMessage)
+// only compared each message's raw line against the IMMEDIATELY PRECEDING
+// message's raw line — correct when a $set's messages were the only thing
+// ever in reconstructed, but upsert-by-id (§0/§3) can now splice a bare
+// record's line in BETWEEN two messages that came from the same $set line
+// without ever removing either: $set[A,B,C] followed by a bare upsert of B
+// produces the reconstructed identity sequence [setLine, bareLine, setLine].
+// A and C still come from the exact same underlying line bytes, but they are
+// no longer adjacent, so the consecutive-only cache misses the second
+// occurrence of setLine and redacts it again — the SAME source line
+// redacted twice, and A's and C's resulting RawJSON strings no longer share
+// one backing array (encoding/json does not intern strings — see
+// TestGeminiSetRedactedOncePerRecordNotPerMessage's doc comment for why that
+// makes pointer-identity the correct probe). This defeats both the intended
+// "redact once per record" cost bound and the raw_json-sharing invariant
+// cli/show.go's writeRaw dedup depends on for messages that DO stay
+// consecutive.
+//
+// The fix must key the redact cache by each LINE's own identity (stable for
+// the whole mapping pass, not just the previous iteration), not by
+// adjacency, so A and C hit the cache on C's turn regardless of what sits
+// between them in reconstructed.
+func TestGeminiInterleavedBareUpsertRedactsSetLineOnce(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "interleaved-bare-upsert", "chats")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "session-2026-07-20T10-00-e000000d.jsonl")
+	const uuid = "e000000d-dddd-4ddd-8ddd-dddddddddddd"
+
+	setLine := `{"$set":{"messages":[` +
+		`{"id":"msgA","timestamp":"2026-07-20T09:00:01.000Z","type":"user","content":[{"text":"turn A"}]},` +
+		`{"id":"msgB","timestamp":"2026-07-20T09:00:02.000Z","type":"gemini","content":[{"text":"turn B first draft"}]},` +
+		`{"id":"msgC","timestamp":"2026-07-20T09:00:03.000Z","type":"user","content":[{"text":"turn C"}]}` +
+		`],"lastUpdated":"2026-07-20T09:00:03.000Z"}}`
+	// A bare record upserting id "msgB" — same shape as a real live-sample
+	// in-place edit (design.md §0/§3): it replaces B AT ITS ORIGINAL
+	// POSITION (index 1), splicing a different raw line's identity between
+	// A's and C's, which both still point at setLine.
+	bareLine := `{"id":"msgB","timestamp":"2026-07-20T09:00:04.000Z","type":"gemini","content":[{"text":"turn B revised"}]}`
+
+	content := `{"sessionId":"` + uuid + `","startTime":"2026-07-20T09:00:00.000Z","kind":"main"}` + "\n" +
+		setLine + "\n" +
+		bareLine + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	database := openTestDB(t)
+	ing := New(database, nil)
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	result, err := geminiSource{root: root}.ParseFile(ing, f, 0, 0, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Messages) != 3 {
+		t.Fatalf("messages=%d want 3 (A, revised B, C)", len(result.Messages))
+	}
+
+	wantSet := string(redactJSON([]byte(setLine)))
+	wantBare := string(redactJSON([]byte(bareLine)))
+
+	a, b, c := result.Messages[0], result.Messages[1], result.Messages[2]
+	if a.RawJSON != wantSet {
+		t.Fatalf("message A raw_json mismatch:\n got =%s\n want=%s", a.RawJSON, wantSet)
+	}
+	if c.RawJSON != wantSet {
+		t.Fatalf("message C raw_json mismatch:\n got =%s\n want=%s", c.RawJSON, wantSet)
+	}
+	if b.RawJSON != wantBare {
+		t.Fatalf("message B raw_json mismatch:\n got =%s\n want=%s", b.RawJSON, wantBare)
+	}
+
+	// The core assertion: A and C — both from setLine, but no longer
+	// adjacent after B's bare upsert spliced bareLine's identity between
+	// them — must share ONE redacted string (same backing array), proving
+	// setLine was redacted exactly once for the whole pass, not once per
+	// non-consecutive occurrence.
+	aPtr := unsafe.StringData(a.RawJSON)
+	cPtr := unsafe.StringData(c.RawJSON)
+	if aPtr != cPtr {
+		t.Fatalf("message A and message C both come from setLine but have different raw_json backing arrays (A=%p, C=%p) — setLine was redacted more than once because it is no longer consecutive in the reconstructed list", aPtr, cPtr)
+	}
+	// And B — from a genuinely different line — must NOT share that array.
+	bPtr := unsafe.StringData(b.RawJSON)
+	if bPtr == aPtr {
+		t.Fatalf("message B (from bareLine) unexpectedly shares a backing array with setLine's messages")
+	}
+}
+
+// TestGeminiAlternatingBareUpsertsDoNotDegradeRedactCost is the coarse
+// behavioral guard for the same P1: a session that alternates many bare
+// upserts with a single large $set (so no two same-origin messages are ever
+// consecutive in reconstructed) must still redact the $set line once, not
+// once per message — a regression back to consecutive-only caching would
+// redact the (large) $set line again on every one of its messages, an
+// O(messages x line length) blow-up matching the one
+// TestGeminiSetManyMessagesRedactionSharedAndBounded already guards for the
+// simpler non-interleaved case.
+func TestGeminiAlternatingBareUpsertsDoNotDegradeRedactCost(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "alternating-bare-upserts", "chats")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "session-2026-07-20T10-00-e000000e.jsonl")
+	const uuid = "e000000e-eeee-4eee-8eee-eeeeeeeeeeee"
+
+	const n = 40
+	var b strings.Builder
+	b.WriteString(`{"$set":{"messages":[`)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		role := "user"
+		if i%2 == 1 {
+			role = "gemini"
+		}
+		fmt.Fprintf(&b, `{"id":"set%03d","timestamp":"2026-07-20T11:%02d:00.000Z","type":%q,"content":[{"text":"set turn %d has a token sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789AB"}]}`, i, i%60, role, i)
+	}
+	b.WriteString(`],"lastUpdated":"2026-07-20T11:39:00.000Z"}}`)
+	setLine := b.String()
+
+	var content strings.Builder
+	content.WriteString(`{"sessionId":"` + uuid + `","startTime":"2026-07-20T11:00:00.000Z","kind":"main"}` + "\n")
+	content.WriteString(setLine + "\n")
+	// Interleave a bare upsert of an EXISTING $set id between every pair of
+	// set-produced messages, so no two set-produced messages ever end up
+	// consecutive in reconstructed — the worst case for a consecutive-only
+	// cache.
+	for i := 0; i < n; i += 2 {
+		fmt.Fprintf(&content, `{"id":"set%03d","timestamp":"2026-07-20T11:%02d:30.000Z","type":"gemini","content":[{"text":"revised %d"}]}`+"\n", i+1, i%60, i)
+	}
+	if err := os.WriteFile(path, []byte(content.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	database := openTestDB(t)
+	ing := New(database, nil)
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	start := time.Now()
+	result, err := geminiSource{root: root}.ParseFile(ing, f, 0, 0, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("parse of a %d-message $set interleaved with alternating bare upserts took %s, want well under 5s (coarse guard against an O(messages x line length) blow-up)", n, elapsed)
+	}
+	if len(result.Messages) != n {
+		t.Fatalf("messages=%d want %d", len(result.Messages), n)
+	}
+
+	// Every message whose id was NOT bare-upserted still comes from setLine
+	// and must share ONE backing array across all of them, however many
+	// non-consecutive positions they occupy.
+	var setPtr *byte
+	for i, m := range result.Messages {
+		if i%2 == 0 {
+			// even indices (set000, set002, ...) were never upserted
+			p := unsafe.StringData(m.RawJSON)
+			if setPtr == nil {
+				setPtr = p
+			} else if p != setPtr {
+				t.Fatalf("message[%d] (id set%03d) raw_json backing array differs from the other setLine-origin messages — setLine was redacted more than once", i, i)
+			}
+		}
+	}
+	if setPtr == nil {
+		t.Fatal("no setLine-origin message found to compare")
+	}
+}
+
 // TestGeminiNullMessageElementSkippedAndCountedOthersIndexed is finding 2
 // (P2, adversarial round 3): a messages[] element that is the JSON literal
 // null (not an object) must be treated like any other malformed element —
@@ -1630,5 +1827,302 @@ func TestGeminiOnlyNullMessageElementCountedNoMessagesIndexed(t *testing.T) {
 	database.QueryRow(`SELECT unparsed_lines FROM ingest_state WHERE source_file=?`, path).Scan(&unparsed)
 	if unparsed < 1 {
 		t.Fatalf("unparsed_lines=%d want >=1 (the null element must be counted even with no valid siblings)", unparsed)
+	}
+}
+
+// ---- Ship-gate task 6.1 re-review (2026-07-20): bare records are replayed
+// via upsert-by-id, confirmed against gemini-real-sample-with-assistant.jsonl ----
+
+// TestGeminiBareRecordUpsertByIDReplacesAtOriginalPosition is the core new
+// behavior: a bare record whose id already exists in the reconstructed list
+// (the real sample's assistant message arrives once with only `thoughts`,
+// then again with `toolCalls` added, same id bb86a134) is replaced AT ITS
+// ORIGINAL POSITION, not moved to the tail. msgX first arrives with
+// unrecognized (non-array) content — indexing nothing yet — then is updated
+// with real text; the update must land BETWEEN msgA and msgB in the final
+// seq order, proving position (not arrival order of the LATEST write) is
+// preserved.
+func TestGeminiBareRecordUpsertByIDReplacesAtOriginalPosition(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "bare-upsert-position", "chats")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "session-2026-07-20T10-00-f0000001.jsonl")
+	const uuid = "f0000001-1111-4111-8111-111111111111"
+	content := `{"sessionId":"` + uuid + `","startTime":"2026-07-20T10:00:00.000Z","kind":"main"}` + "\n" +
+		`{"$set":{"messages":[{"id":"msgA","timestamp":"2026-07-20T10:00:01.000Z","type":"user","content":[{"text":"first question"}]}],"lastUpdated":"2026-07-20T10:00:01.000Z"}}` + "\n" +
+		`{"id":"msgX","timestamp":"2026-07-20T10:00:02.000Z","type":"gemini","content":""}` + "\n" +
+		`{"id":"msgB","timestamp":"2026-07-20T10:00:03.000Z","type":"user","content":[{"text":"second question"}]}` + "\n" +
+		`{"id":"msgX","timestamp":"2026-07-20T10:00:02.000Z","type":"gemini","content":[{"text":"the actual answer"}]}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	database := openTestDB(t)
+	ing := New(database, nil)
+	ing.AddSource(geminiSource{root: root})
+	if _, err := ing.IngestAll(context.Background(), t.TempDir(), false); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := geminiMessageRows(t, database, uuid)
+	want := []string{
+		"0:user:first question",
+		"1:assistant:the actual answer",
+		"2:user:second question",
+	}
+	if strings.Join(rows, "|") != strings.Join(want, "|") {
+		t.Fatalf("rows=%v want %v (msgX's update must land BETWEEN msgA and msgB — its original position — not after msgB at the tail)", rows, want)
+	}
+	// The interim empty-content state of msgX must not leak into the final
+	// pass as a separately-counted "no extractable text" warning: it was
+	// fully superseded before the final mapping loop ran over the
+	// reconstructed list, so this pass has nothing to warn about.
+	var unparsed int64
+	database.QueryRow(`SELECT unparsed_lines FROM ingest_state WHERE source_file=?`, path).Scan(&unparsed)
+	if unparsed != 0 {
+		t.Fatalf("unparsed_lines=%d want 0 (msgX's interim empty-content state is fully superseded by its own update, never reaches the final mapping loop)", unparsed)
+	}
+}
+
+// TestGeminiBareRecordAppendMultipleDistinctIDsInOrder is the append half of
+// upsert-by-id: bare records with ids not yet seen are appended at the tail,
+// in file order, interleaved after a $set.
+func TestGeminiBareRecordAppendMultipleDistinctIDsInOrder(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "bare-append-multi", "chats")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "session-2026-07-20T10-00-f0000002.jsonl")
+	const uuid = "f0000002-2222-4222-8222-222222222222"
+	content := `{"sessionId":"` + uuid + `","startTime":"2026-07-20T11:00:00.000Z","kind":"main"}` + "\n" +
+		`{"$set":{"messages":[{"id":"msgA","timestamp":"2026-07-20T11:00:01.000Z","type":"user","content":[{"text":"opening question"}]}],"lastUpdated":"2026-07-20T11:00:01.000Z"}}` + "\n" +
+		`{"id":"msgB","timestamp":"2026-07-20T11:00:02.000Z","type":"gemini","content":[{"text":"reply one"}]}` + "\n" +
+		`{"id":"msgC","timestamp":"2026-07-20T11:00:03.000Z","type":"user","content":[{"text":"follow-up question"}]}` + "\n" +
+		`{"id":"msgD","timestamp":"2026-07-20T11:00:04.000Z","type":"gemini","content":[{"text":"reply two"}]}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	database := openTestDB(t)
+	ing := New(database, nil)
+	ing.AddSource(geminiSource{root: root})
+	if _, err := ing.IngestAll(context.Background(), t.TempDir(), false); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := geminiMessageRows(t, database, uuid)
+	want := []string{
+		"0:user:opening question",
+		"1:assistant:reply one",
+		"2:user:follow-up question",
+		"3:assistant:reply two",
+	}
+	if strings.Join(rows, "|") != strings.Join(want, "|") {
+		t.Fatalf("rows=%v want %v (every distinct-id bare append replayed, in file order)", rows, want)
+	}
+	var unparsed int64
+	database.QueryRow(`SELECT unparsed_lines FROM ingest_state WHERE source_file=?`, path).Scan(&unparsed)
+	if unparsed != 0 {
+		t.Fatalf("unparsed_lines=%d want 0 (every record in this file is fully replayed)", unparsed)
+	}
+}
+
+// TestGeminiMetadataOnlySetInterleavedWithBareAppendsDoesNotClear proves a
+// metadata-only $set (the "messages" key genuinely absent) sprinkled between
+// bare-record upserts is a true no-op — it must not clear the reconstructed
+// list nor disturb the id->position index that later bare records rely on.
+func TestGeminiMetadataOnlySetInterleavedWithBareAppendsDoesNotClear(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "meta-only-interleaved-bare", "chats")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "session-2026-07-20T10-00-f0000003.jsonl")
+	const uuid = "f0000003-3333-4333-8333-333333333333"
+	content := `{"sessionId":"` + uuid + `","startTime":"2026-07-20T12:00:00.000Z","kind":"main"}` + "\n" +
+		`{"$set":{"messages":[{"id":"msgA","timestamp":"2026-07-20T12:00:01.000Z","type":"user","content":[{"text":"q1"}]}],"lastUpdated":"2026-07-20T12:00:01.000Z"}}` + "\n" +
+		`{"$set":{"lastUpdated":"2026-07-20T12:00:02.000Z"}}` + "\n" + // metadata-only: no "messages" key
+		`{"id":"msgB","timestamp":"2026-07-20T12:00:03.000Z","type":"gemini","content":[{"text":"a1"}]}` + "\n" +
+		`{"$set":{"lastUpdated":"2026-07-20T12:00:04.000Z"}}` + "\n" + // metadata-only again
+		`{"id":"msgC","timestamp":"2026-07-20T12:00:05.000Z","type":"user","content":[{"text":"q2"}]}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	database := openTestDB(t)
+	ing := New(database, nil)
+	ing.AddSource(geminiSource{root: root})
+	if _, err := ing.IngestAll(context.Background(), t.TempDir(), false); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := geminiMessageRows(t, database, uuid)
+	want := []string{
+		"0:user:q1",
+		"1:assistant:a1",
+		"2:user:q2",
+	}
+	if strings.Join(rows, "|") != strings.Join(want, "|") {
+		t.Fatalf("rows=%v want %v (metadata-only $sets between bare appends must not clear or reorder the reconstructed list)", rows, want)
+	}
+}
+
+// TestGeminiSetEmptyMessagesArrayClearsMessages pins the deliberate choice
+// (design.md §3, ParseFile doc comment) for a shape not present in any real
+// sample to date: a $set whose "messages" value is a present, non-null, but
+// EMPTY array ([]) is treated as a legitimate full clear of the
+// conversation — not an abort — because $set is inherently a full-replace
+// operation and json.Unmarshal never errors decoding "[]" into a slice. A
+// bare append after the clear must upsert into a freshly empty id index (an
+// append, not a stale reference to the cleared msgA).
+func TestGeminiSetEmptyMessagesArrayClearsMessages(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "set-empty-messages-array", "chats")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "session-2026-07-20T10-00-f0000004.jsonl")
+	const uuid = "f0000004-4444-4444-8444-444444444444"
+	content := `{"sessionId":"` + uuid + `","startTime":"2026-07-20T13:00:00.000Z","kind":"main"}` + "\n" +
+		`{"$set":{"messages":[{"id":"msgA","timestamp":"2026-07-20T13:00:01.000Z","type":"user","content":[{"text":"will be cleared"}]}],"lastUpdated":"2026-07-20T13:00:01.000Z"}}` + "\n" +
+		`{"$set":{"messages":[],"lastUpdated":"2026-07-20T13:00:02.000Z"}}` + "\n" +
+		`{"id":"msgD","timestamp":"2026-07-20T13:00:03.000Z","type":"user","content":[{"text":"fresh question after clear"}]}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	database := openTestDB(t)
+	ing := New(database, nil)
+	ing.AddSource(geminiSource{root: root})
+	if _, err := ing.IngestAll(context.Background(), t.TempDir(), false); err != nil {
+		t.Fatalf("IngestAll must not error/abort on an empty $set messages array: %v", err)
+	}
+
+	rows := geminiMessageRows(t, database, uuid)
+	want := []string{"0:user:fresh question after clear"}
+	if strings.Join(rows, "|") != strings.Join(want, "|") {
+		t.Fatalf("rows=%v want %v (the empty $set array clears msgA; the later bare append is a fresh entry at seq 0, not upserted into a stale slot)", rows, want)
+	}
+	var found int
+	database.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_uuid=? AND content='will be cleared'`, uuid).Scan(&found)
+	if found != 0 {
+		t.Fatalf("msgA ('will be cleared') must not survive the empty-array $set, found %d", found)
+	}
+	var unparsed int64
+	database.QueryRow(`SELECT unparsed_lines FROM ingest_state WHERE source_file=?`, path).Scan(&unparsed)
+	if unparsed != 0 {
+		t.Fatalf("unparsed_lines=%d want 0 (an empty messages array is a legitimate clear, not a parse failure)", unparsed)
+	}
+}
+
+// ---- Ship-gate task 6.1: the real assistant-bearing sample as a fixture ----
+//
+// gemini-real-sample-with-assistant.jsonl is a REAL gemini-cli v0.51.0+
+// transcript (not synthesized) captured for the 6.1 ship-gate re-review
+// (2026-07-20): a user question, a two-part assistant turn (thoughts only,
+// then the same id updated with toolCalls added — the upsert-by-id proof),
+// a tool functionResponse fed back as a "user" record with no plain text,
+// and a final assistant reply with real text. It is also what revealed that
+// a bare "gemini"-type record's "content" field is a bare JSON STRING (line
+// 10's real reply, and line 5/7's "" placeholder), NOT the content[] array
+// of {text} blocks used by $set-embedded "user" turns — geminiDecodeContent
+// handles both shapes. It is the ground truth this whole change is a
+// correction against (see design.md §0). Confirmed free of secrets before
+// being checked into testdata.
+const geminiSampleWithAssistantUUID = "8bcf6c9f-5e8d-4f35-8652-ccd83496e68f"
+
+// TestGeminiRealSampleWithAssistantMessageCountAndRoleOrder is the direct
+// "real sample as fixture" acceptance: message count and role order match
+// hand-verified expectations from the real bytes (see the fixture's doc
+// comment above and design.md §0 for the line-by-line derivation).
+func TestGeminiRealSampleWithAssistantMessageCountAndRoleOrder(t *testing.T) {
+	ing, database := newGeminiTestIngester(t)
+	if _, err := ing.IngestAll(context.Background(), t.TempDir(), false); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := database.Query(`SELECT role FROM messages WHERE session_uuid=? ORDER BY seq`, geminiSampleWithAssistantUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var roles []string
+	for rows.Next() {
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			t.Fatal(err)
+		}
+		roles = append(roles, role)
+	}
+	// Only 2 of the 5 reconstructed messages carry extractable text: the
+	// initial <session_context>-wrapper user record strips to empty (not
+	// indexed), the assistant's thoughts-only turn (bb86a134) never gets
+	// text in this sample even after its toolCalls update — its "content" is
+	// the bare JSON string "" both times (a legitimately-decoded EMPTY
+	// string, not a shape mismatch; thoughts/toolCalls extraction is still
+	// out of scope, debt) — and the functionResponse "user" record's
+	// content[] array has no block with a non-empty "text" field.
+	want := []string{"user", "assistant"}
+	if strings.Join(roles, "|") != strings.Join(want, "|") {
+		t.Fatalf("roles=%v want %v", roles, want)
+	}
+	var unparsed int64
+	database.QueryRow(`SELECT unparsed_lines FROM ingest_state WHERE source_file=?`,
+		filepath.Join(geminiTestdataRoot, "gemini-sample-with-assistant/chats/session-2026-07-20T13-04-8bcf6c9f.jsonl")).Scan(&unparsed)
+	if unparsed != 1 {
+		t.Fatalf("unparsed_lines=%d want 1 (the assistant's thoughts-only/no-text turn, bb86a134, warned+skipped+counted)", unparsed)
+	}
+}
+
+// TestGeminiRealSampleWithAssistantEndToEndConversation is the "$set opening
+// + later bare appends, mixed — the real sample's own shape" end-to-end
+// scenario: the user's real question and the assistant's real reply are
+// both indexed with the right text, and the <session_context> harness
+// wrapper is neither indexed nor used as the session title.
+func TestGeminiRealSampleWithAssistantEndToEndConversation(t *testing.T) {
+	ing, database := newGeminiTestIngester(t)
+	if _, err := ing.IngestAll(context.Background(), t.TempDir(), false); err != nil {
+		t.Fatal(err)
+	}
+	const wantUserText = "Read hello.py and explain in two sentences what it does, then suggest one concrete improvement."
+	const wantAsstText = "This script prints the string `\"hello\"` to the console. It serves as a minimal \"Hello World\" example to verify that the Python environment is working correctly.\n\n**Suggested Improvement:** Wrap the code in a function guarded by `if __name__ == \"__main__\":` to support modular imports and follow Python best practices."
+
+	var turns int
+	var title string
+	if err := database.QueryRow(`SELECT turn_count, COALESCE(title,'') FROM sessions WHERE uuid=?`, geminiSampleWithAssistantUUID).Scan(&turns, &title); err != nil {
+		t.Fatalf("gemini-sample-with-assistant session not indexed: %v", err)
+	}
+	if turns != 1 {
+		t.Fatalf("turn_count=%d want 1 (one real user turn; the session_context wrapper and the functionResponse record are not turns)", turns)
+	}
+	if title != wantUserText {
+		t.Fatalf("title=%q want %q (the real question, not the <session_context> wrapper)", title, wantUserText)
+	}
+	if strings.Contains(title, "session_context") {
+		t.Fatalf("title=%q must not contain the harness wrapper", title)
+	}
+
+	var userContent string
+	if err := database.QueryRow(`SELECT content FROM messages WHERE session_uuid=? AND role='user'`, geminiSampleWithAssistantUUID).Scan(&userContent); err != nil {
+		t.Fatal(err)
+	}
+	if userContent != wantUserText {
+		t.Fatalf("user content=%q want %q", userContent, wantUserText)
+	}
+	var asstContent string
+	if err := database.QueryRow(`SELECT content FROM messages WHERE session_uuid=? AND role='assistant'`, geminiSampleWithAssistantUUID).Scan(&asstContent); err != nil {
+		t.Fatal(err)
+	}
+	if asstContent != wantAsstText {
+		t.Fatalf("assistant content=%q want %q", asstContent, wantAsstText)
+	}
+
+	var userSeq, asstSeq int
+	database.QueryRow(`SELECT seq FROM messages WHERE session_uuid=? AND role='user'`, geminiSampleWithAssistantUUID).Scan(&userSeq)
+	database.QueryRow(`SELECT seq FROM messages WHERE session_uuid=? AND role='assistant'`, geminiSampleWithAssistantUUID).Scan(&asstSeq)
+	if userSeq >= asstSeq {
+		t.Fatalf("user seq=%d, assistant seq=%d — want the question before the reply", userSeq, asstSeq)
 	}
 }
