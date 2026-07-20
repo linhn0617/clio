@@ -5,6 +5,38 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-07-20
+
+Gemini CLI history support. Spec-first, adversarially reviewed, and — for the
+op-log format — confirmed against a real captured session before shipping.
+
+### Added
+
+- **Gemini CLI as a third source.** clio now indexes Gemini CLI conversation
+  history (`~/.gemini/tmp/<project>/chats/*.jsonl`, the ChatRecordingService
+  format) alongside Claude Code and Codex. Use `--source gemini` on any command
+  or `source: "gemini"` on the MCP tools; it's wired through a single source
+  registry so every surface (CLI, MCP, doctor, TUI) picks it up.
+- The registry refactor behind this: source names, labels, root availability,
+  and the CLI/MCP/doctor/TUI derivations now come from one static-seeded list
+  instead of per-surface hardcoded `{claude-code, codex}` literals.
+
+### Notes
+
+- Gemini files are an op-log: a `$set` sets full state, individual turns arrive
+  as bare records upserted by id, and the whole file is re-read on any change
+  (idempotent). This was corrected against a real assistant-bearing session —
+  the initial schema, inferred from source types, was wrong.
+- Scoped v1: conversation **text** is indexed and searchable. Structured
+  extraction of Gemini's `thoughts` / `toolCalls`, `$rewindTo` rewind handling,
+  and subagent parent-linking are follow-ups; that detail still lives in the
+  stored raw event (`clio show --format raw`) in the meantime.
+- Heads-up for Gemini CLI users: Google ended the free "Sign in with Google"
+  auth for Gemini CLI on 2026-06-18 (migrating individuals to Antigravity). Your
+  existing `chats/` history is still on disk and indexable; new sessions need
+  API-key or enterprise auth. clio does not care which — it reads the local
+  files.
+
 ## [0.12.0] - 2026-07-15
 
 Token-budgeted evidence bundles, an assertion-based retrieval regression
