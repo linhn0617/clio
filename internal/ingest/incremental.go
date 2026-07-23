@@ -30,6 +30,19 @@ func headFingerprint(f *os.File) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// usageCounterPolicy selects how a pass updates the per-file usage diagnostic
+// counters: whole-file passes (Claude scan, Gemini replay, full ingest)
+// replace; tail-scoped extraction (Codex incremental) accumulates on strict
+// offset advance; a failed scan preserves the stored counters and only raises
+// the stale flag.
+type usageCounterPolicy int
+
+const (
+	usageCountersReplace usageCounterPolicy = iota
+	usageCountersAccumulate
+	usageCountersPreserve
+)
+
 // FileState mirrors a row of the ingest_state table.
 type FileState struct {
 	SourceFile      string
@@ -40,6 +53,12 @@ type FileState struct {
 	HeadFingerprint string
 	LastIngestedAt  int64
 	UnparsedLines   int64
+	UsageSkipped    int64
+	UsageUnmapped   int64
+	UsageStale      int64 // 0/1: last usage scan failed; aggregate retained but not current
+	// UsagePolicy is transient write-side state (how this pass's counters merge
+	// with the stored row), not a persisted column.
+	UsagePolicy usageCounterPolicy
 }
 
 type changeKind int

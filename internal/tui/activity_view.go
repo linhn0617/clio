@@ -39,6 +39,8 @@ type activityView struct {
 	err           error
 	drillGen      int // bumps on each drill load; debounce ticks and stale results are dropped
 	drill         []sessions.Session
+	drillTokens   map[string]int64
+	drillStale    map[string]bool
 	drillErr      error
 }
 
@@ -56,6 +58,8 @@ type activityDrillMsg struct {
 	kind     string
 	value    string
 	sessions []sessions.Session
+	tokens   map[string]int64
+	stale    map[string]bool
 	err      error
 }
 
@@ -115,7 +119,18 @@ func (v activityView) drillCmd() tea.Cmd {
 	filter := sessions.ListFilter{Limit: drillSessionLimit, TargetKind: kind, TargetValue: value, Source: v.source}
 	return func() tea.Msg {
 		ss, err := sessions.ListSessions(ctx, database, filter)
-		return activityDrillMsg{kind: kind, value: value, sessions: ss, err: err}
+		msg := activityDrillMsg{kind: kind, value: value, sessions: ss, err: err}
+		if err == nil && len(ss) > 0 {
+			uuids := make([]string, len(ss))
+			for i, sess := range ss {
+				uuids[i] = sess.UUID
+			}
+			// Best-effort: the drill list renders without tokens on error.
+			if totals, stale, terr := sessions.SessionTotalTokens(ctx, database, uuids); terr == nil {
+				msg.tokens, msg.stale = totals, stale
+			}
+		}
+		return msg
 	}
 }
 
@@ -132,6 +147,7 @@ func (v activityView) Update(msg tea.Msg) (activityView, tea.Cmd) {
 	case activityDrillMsg:
 		if msg.kind == v.currentKind() && msg.value == v.selectedValue() {
 			v.drill, v.drillErr = msg.sessions, msg.err
+			v.drillTokens, v.drillStale = msg.tokens, msg.stale
 		}
 	case detailTickMsg:
 		if msg.owner == tabActivity && msg.gen == v.drillGen { // debounce settled, still current
@@ -200,7 +216,15 @@ func (v activityView) renderDrill() string {
 		if label == "" {
 			label = s.ProjectPath
 		}
-		b.WriteString(shortID(s.UUID) + " " + oneLine(label) + "\n")
+		line := shortID(s.UUID) + " " + oneLine(label)
+		if t, ok := v.drillTokens[s.UUID]; ok {
+			line += " [" + humanTokens(t) + " tok"
+			if v.drillStale[s.UUID] {
+				line += ", stale"
+			}
+			line += "]"
+		}
+		b.WriteString(line + "\n")
 	}
 	return b.String()
 }

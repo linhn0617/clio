@@ -171,6 +171,43 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 		add("unparsed lines", false, fmt.Sprintf("%d source lines could not be parsed; after upgrading clio, run `clio index --full`", unparsed))
 	}
 
+	// Usage coverage and diagnostics: sessions with a usage aggregate vs total,
+	// skipped/unmapped counters, and files whose last usage scan failed (stale —
+	// their retained values are last-known, not current). Pre-0011 DBs lack the
+	// tables/columns; treat that as legacy, not a failure.
+	var usageSessions, totalSessions int64
+	uqerr := database.QueryRow(`SELECT
+		(SELECT COUNT(DISTINCT session_uuid) FROM session_usage),
+		(SELECT COUNT(*) FROM sessions)`).Scan(&usageSessions, &totalSessions)
+	switch {
+	case uqerr != nil && (strings.Contains(uqerr.Error(), "no such table") || strings.Contains(uqerr.Error(), "no such column")):
+		add("usage coverage", true, "n/a (pre-migration db)")
+	case uqerr != nil:
+		add("usage coverage", false, uqerr.Error())
+	default:
+		ok := totalSessions == 0 || usageSessions > 0
+		detail := fmt.Sprintf("%d/%d sessions have usage data", usageSessions, totalSessions)
+		if usageSessions == 0 && totalSessions > 0 {
+			detail += "; run `clio index --full` to backfill"
+		}
+		add("usage coverage", ok, detail)
+
+		var uskip, uunmap, ustale int64
+		derr := database.QueryRow(`SELECT COALESCE(SUM(usage_skipped),0), COALESCE(SUM(usage_unmapped),0),
+			COALESCE(SUM(CASE WHEN usage_stale != 0 THEN 1 ELSE 0 END),0) FROM ingest_state`).Scan(&uskip, &uunmap, &ustale)
+		switch {
+		case derr != nil && strings.Contains(derr.Error(), "no such column"):
+			// legacy: skip silently, coverage line above already rendered
+		case derr != nil:
+			add("usage diagnostics", false, derr.Error())
+		case uskip == 0 && uunmap == 0 && ustale == 0:
+			add("usage diagnostics", true, "0 skipped, 0 unmapped, 0 stale files")
+		default:
+			add("usage diagnostics", ustale == 0,
+				fmt.Sprintf("%d malformed usage events skipped, %d unmapped category occurrences, %d file(s) with stale usage", uskip, uunmap, ustale))
+		}
+	}
+
 	// File permissions: the DB and its WAL/SHM sidecars hold indexed content and must
 	// be private (0600). Absent sidecars (no writes yet) are skipped.
 	var badPerms []string

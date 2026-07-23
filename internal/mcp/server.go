@@ -109,13 +109,13 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 	), handleListSessions(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("activity_summary",
-		mcp.WithDescription("Summarize activity over a period. Group by day/project for session and message counts ('what did I work on last week?'), or by file/command/tool/pattern/url for the most frequent files touched, commands run, or tools used."),
+		mcp.WithDescription("Summarize activity over a period. Group by day/project for session and message counts ('what did I work on last week?'), by file/command/tool/pattern/url for the most frequent files touched, commands run, or tools used, or by usage for session-level token totals ('which sessions burned my tokens?') with ids you can pass to read_session."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(false),
 		mcp.WithString("since", mcp.Description("Period start: 7d, 12h, 30m, or YYYY-MM-DD (default 7d)")),
-		mcp.WithString("group_by", mcp.Description("Grouping: day or project (counts), or file/command/tool/pattern/url (activity)"), mcp.Enum("day", "project", "file", "command", "tool", "pattern", "url"), mcp.DefaultString("day")),
+		mcp.WithString("group_by", mcp.Description("Grouping: day or project (counts), file/command/tool/pattern/url (activity), or usage (session token totals)"), mcp.Enum("day", "project", "file", "command", "tool", "pattern", "url", "usage"), mcp.DefaultString("day")),
 		mcp.WithString("project", mcp.Description("Filter by project path prefix")),
 		mcp.WithNumber("limit", mcp.Description("Max rows for file/command/tool/pattern/url grouping (default 30, max 50)"), mcp.DefaultNumber(30), mcp.Min(1), mcp.Max(maxSearchLimit)),
 		mcp.WithString("source", sourceOptions("Which tool's history")...),

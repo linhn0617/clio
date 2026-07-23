@@ -100,6 +100,14 @@ func (s codexSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, sta
 	seq := startSeq
 	skipped := map[string]bool{} // call_ids of skipped clio MCP calls, so their outputs drop too
 
+	// Usage extraction: token_count events carry a CUMULATIVE whole-file counter,
+	// so the latest observation IS the file's total — even a tail-only read yields
+	// the true value (one rollout file = one session). The counter has no per-model
+	// attribution; rows always use the "(mixed)" sentinel.
+	var lastTokenUsage map[string]json.RawMessage
+	var usageSkipped int64
+	snapshots := map[string]model.QuotaSnapshot{}
+
 	add := func(ts int64, role, content, raw string, tcs []model.ToolCall, targets []model.ToolTarget) {
 		content = strings.TrimSpace(content)
 		if content == "" && len(tcs) == 0 {
@@ -152,8 +160,35 @@ func (s codexSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, sta
 				sess.EndedAt = ts
 			}
 		}
-		// Skip the event_msg UI stream (it duplicates response_item) and any other
-		// non-conversational record type.
+		// event_msg duplicates response_item for conversation content and is
+		// skipped for indexing — but its token_count payloads are the only
+		// carrier of usage and rate-limit state, so extract those first.
+		if env.Type == "event_msg" {
+			var tc codexTokenCountPayload
+			if err := json.Unmarshal(env.Payload, &tc); err != nil {
+				// Undecodable payload: only count it against usage when it was
+				// identifiably a token_count (substring check — role unknowable
+				// otherwise), so an unrelated broken event_msg is not miscounted.
+				if bytes.Contains(env.Payload, tokenCountNeedle) {
+					usageSkipped++
+				}
+				continue
+			}
+			if tc.Type == "token_count" {
+				// A native-total source's record must carry a usable native
+				// total; accepting categories without one would persist
+				// total_tokens=0 as apparently-current data. Reject + count,
+				// keep the previous observation.
+				if tc.Info != nil && hasNumericKey(tc.Info.TotalTokenUsage, "total_tokens") {
+					lastTokenUsage = tc.Info.TotalTokenUsage // cumulative: latest wins
+				} else {
+					usageSkipped++
+				}
+				codexCollectSnapshots(snapshots, tc.RateLimits, ts)
+			}
+			continue
+		}
+		// Skip any other non-conversational record type.
 		if env.Type != "response_item" && env.Type != "session_meta" && env.Type != "turn_context" {
 			continue
 		}
@@ -223,7 +258,91 @@ func (s codexSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, sta
 	for i := range msgs {
 		msgs[i].SessionUUID = sess.UUID // canonical id, in case session_meta followed early records
 	}
-	return parseResult{Session: sess, Messages: msgs, Consumed: consumed, Unparsed: unparsed}, nil
+
+	// Usage outcome: replace (a counter was observed), no-op (incremental tail
+	// without token events — existing row stays), or delete (a full parse of the
+	// whole file found no usage, so any stale row must go).
+	usage := &usageResult{Skipped: usageSkipped, AccumulateCounters: startOffset > 0}
+	if lastTokenUsage != nil {
+		acc := newUsageAcc(model.SourceCodex)
+		usage.Unmapped = acc.addCategories(model.ModelMixed, lastTokenUsage, codexUsageCanon, "total_tokens")
+		usage.Rows = fillSessionUUID(acc.finish("", false), sess.UUID)
+		usage.Outcome = usageReplace
+		if len(usage.Rows) == 0 {
+			usage.Outcome = usageDelete // counter present but all-zero: nothing to keep
+		}
+	} else if startOffset == 0 {
+		usage.Outcome = usageDelete
+	} else {
+		usage.Outcome = usageNoop
+	}
+	for _, snap := range snapshots {
+		usage.Snapshots = append(usage.Snapshots, snap)
+	}
+	return parseResult{Session: sess, Messages: msgs, Consumed: consumed, Unparsed: unparsed, Usage: usage}, nil
+}
+
+// tokenCountNeedle identifies an undecodable event_msg payload as a
+// token_count for diagnostic counting (see the decode-failure path above).
+var tokenCountNeedle = []byte(`"token_count"`)
+
+// codexTokenCountPayload decodes an event_msg token_count payload: the
+// cumulative usage counter plus the rate-limit state Codex persists alongside.
+type codexTokenCountPayload struct {
+	Type string `json:"type"`
+	Info *struct {
+		TotalTokenUsage map[string]json.RawMessage `json:"total_token_usage"`
+	} `json:"info"`
+	RateLimits json.RawMessage `json:"rate_limits"`
+}
+
+// codexRateLimits mirrors the persisted rate_limits object (one window struct
+// per primary/secondary).
+type codexRateLimits struct {
+	LimitID  string `json:"limit_id"`
+	PlanType string `json:"plan_type"`
+	Primary  *struct {
+		UsedPercent   float64 `json:"used_percent"`
+		WindowMinutes int64   `json:"window_minutes"`
+		ResetsAt      int64   `json:"resets_at"`
+	} `json:"primary"`
+	Secondary *struct {
+		UsedPercent   float64 `json:"used_percent"`
+		WindowMinutes int64   `json:"window_minutes"`
+		ResetsAt      int64   `json:"resets_at"`
+	} `json:"secondary"`
+}
+
+// codexCollectSnapshots folds one rate_limits payload into snaps (latest
+// observed_at wins within the pass; the DB upsert guards across passes). Each
+// window becomes its own snapshot under "<limit_id>:primary|secondary" so two
+// windows of one limit never clobber each other.
+func codexCollectSnapshots(snaps map[string]model.QuotaSnapshot, raw json.RawMessage, ts int64) {
+	if len(raw) == 0 || ts == 0 {
+		return
+	}
+	var rl codexRateLimits
+	if json.Unmarshal(raw, &rl) != nil || rl.LimitID == "" {
+		return
+	}
+	rawStored := string(redactJSON(raw))
+	put := func(suffix string, usedPercent float64, windowMinutes, resetsAt int64) {
+		key := rl.LimitID + ":" + suffix
+		if prev, ok := snaps[key]; ok && prev.ObservedAt >= ts {
+			return
+		}
+		snaps[key] = model.QuotaSnapshot{
+			Source: model.SourceCodex, LimitID: key, ObservedAt: ts,
+			UsedPercent: usedPercent, WindowMinutes: windowMinutes, ResetsAt: resetsAt,
+			PlanType: rl.PlanType, RawJSON: rawStored,
+		}
+	}
+	if rl.Primary != nil {
+		put("primary", rl.Primary.UsedPercent, rl.Primary.WindowMinutes, rl.Primary.ResetsAt)
+	}
+	if rl.Secondary != nil {
+		put("secondary", rl.Secondary.UsedPercent, rl.Secondary.WindowMinutes, rl.Secondary.ResetsAt)
+	}
 }
 
 // codexBlocksText joins the text of input_text/output_text/text blocks.

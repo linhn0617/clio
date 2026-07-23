@@ -281,6 +281,48 @@ clio list --touched src/auth.ts           # sessions that edited a file / 編輯
 clio search "panic" --ran "go test"       # matches from sessions that ran a command
 ```
 
+### `clio usage` — token usage / token 用量
+
+Session-level token usage from the same indexed files, sectioned **per
+source** — token counts from different tools use different tokenizers and are
+not comparable, so no cross-source grand total is ever printed. No dollar
+amounts anywhere: raw token counts only. Only `--by session` rows can be
+opened directly (`clio show <uuid>`); project/model rows show a drill-down
+command instead. Sessions indexed before this feature need a one-time
+backfill: `clio index --full`.
+
+各 session 的 token 用量，**按來源分節**——不同工具的 tokenizer 不同、數字
+不可互比，因此永遠不會印跨來源總和。全程只有原始 token 數、沒有任何金額。
+只有 `--by session` 的列可直接 `clio show <uuid>` 開啟；project/model 列
+改附 drill-down 指令。升級前索引的 session 需一次性回填：`clio index --full`。
+
+| Flag | English | 中文 | Default |
+|------|---------|------|---------|
+| `--by` | Group by `session`\|`project`\|`model` | 分組方式 | `session` |
+| `--since` | Only sessions active since | 期間起點 | — |
+| `--project` | Filter by project path prefix | 依專案前綴過濾 | — |
+| `--source` | One source, or `all` | 來源過濾 | default source |
+| `--quota` | Show last-observed quota snapshots | 顯示額度快照 | off |
+| `--model` | Only sessions with usage attributed to this model | 依模型過濾 | — |
+
+```bash
+clio usage --since 7d                     # top sessions by tokens / 最燒 token 的 session
+clio usage --by project --since 30d       # per-project totals / 各專案用量
+clio usage --quota                        # last-observed quota snapshots / 額度快照
+```
+
+`--quota` prints **last-observed** rate-limit snapshots extracted from session
+files (currently only Codex persists these). They are never live readings:
+every line shows its observation age, and a snapshot older than its own window
+— or whose reset time has passed — renders as STALE. Quota data is CLI-only
+and never exposed over MCP. A `[stale]` marker on usage rows means the file's
+last usage scan failed and values are last-known, not current.
+
+`--quota` 印的是從 session 檔抽出的**最後觀測**額度快照（目前只有 Codex 會
+落盤）。它永遠不是即時數據：每行都標觀測時間，超過自身窗口或重置時間已過
+的快照會標 STALE。額度資料只在 CLI 顯示、永不經 MCP 暴露。用量列上的
+`[stale]` 代表該檔最近一次 usage 掃描失敗，數值是最後已知、非當前。
+
 ### `clio index` — (re)build the index / 建立索引
 
 | Flag | English | 中文 |

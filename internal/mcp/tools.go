@@ -183,8 +183,29 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 				"group_by": groupBy,
 				"activity": out,
 			})
+		case "usage":
+			// Session-level token aggregates with source attribution and
+			// jump-through ids for read_session. Per-source subtotals only —
+			// no cross-source grand total (tokenizers are not comparable).
+			// Quota snapshot data is CLI-only by spec and never appears here.
+			limit := clamp(req.GetInt("limit", 20), 20, maxSearchLimit)
+			totals, err := sessions.UsageSourceTotals(ctx, database, since, req.GetString("project", ""), source, "")
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			rows, err := sessions.UsageBySession(ctx, database, since, req.GetString("project", ""), source, "", limit)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return mcp.NewToolResultJSON(map[string]any{
+				"since":    tsString(since),
+				"group_by": "usage",
+				"note":     "token counts are per source and not comparable across sources; stale=true means the last usage scan failed and values are last-known, not current",
+				"totals":   totals,
+				"sessions": rows,
+			})
 		default:
-			return mcp.NewToolResultError(`group_by must be one of "day", "project", "file", "command", "tool", "pattern", "url"`), nil
+			return mcp.NewToolResultError(`group_by must be one of "day", "project", "file", "command", "tool", "pattern", "url", "usage"`), nil
 		}
 	}
 }

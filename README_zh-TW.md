@@ -6,7 +6,7 @@
 
 clio 把 Claude Code 的 session 檔（`~/.claude/projects/*.jsonl`）索引進本機的 SQLite + FTS5 資料庫，提供兩條介面：
 
-- **CLI** —— `clio search` / `clio ask` / `clio list` / `clio show`，跨所有專案搜尋、提問、閱讀過去的對話,或用 `clio tui` 開互動式儀表板
+- **CLI** —— `clio search` / `clio ask` / `clio list` / `clio show`，跨所有專案搜尋、提問、閱讀過去的對話，`clio usage` 看各 session/專案/模型的 token 用量，或用 `clio tui` 開互動式儀表板
 - **MCP server** —— 讓 Claude Code 在 session 內反查自己的歷史（「上週我們討論了什麼？」、「那個 bug 之前怎麼修的？」）
 
 本機優先（local-first）、對 `.claude` 資料唯讀，絕不寫入你原始的 session 檔。
@@ -94,7 +94,7 @@ clio doctor                     # 健康檢查
 | `search` | 全文搜尋、**依相關性與近期排序**（短查詢會退回子字串掃描；預設排除 tool output） |
 | `ask` | 從歷史回答問題：回傳最相關片段的帶引用證據包（依 session 分組、含前後 turn），交給 Claude 合成；`max_tokens` 限制證據包的估計大小（預設 2000，最小 200，最大 8000） |
 | `list_sessions` | 依日期/專案/turn 數，或依動過的檔／用過的工具／跑過的指令列出 session；子代理子項預設隱藏（母體帶 `subagent_count`），`include_subagents` 會以帶 `parent_session` / `agent_type` 的列補上 |
-| `activity_summary` | 依天或專案，或你最常動的檔／指令／工具／搜尋 pattern／URL 統計（「我上週碰了什麼？」） |
+| `activity_summary` | 依天或專案、你最常動的檔／指令／工具／pattern／URL，或各 session 的 token 用量統計（「我的 token 燒去哪了？」） |
 | `read_session` | 分頁讀取單一 session 的完整內容；回報母體的子代理（`include_subagents` 連訊息一起內嵌） |
 
 檢索品質（排序、FTS/LIKE 分層、`ask` 的分組與加窗）由一套涵蓋端到端的決定性

@@ -54,17 +54,40 @@ func newListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Per-session token totals (placeholder/omitted when absent, not zero).
+			uuids := make([]string, len(rows))
+			for i, s := range rows {
+				uuids[i] = s.UUID
+			}
+			totals, staleSet, terr := sessions.SessionTotalTokens(cmd.Context(), database, uuids)
+			if terr != nil {
+				totals, staleSet = nil, nil // usage column is best-effort; the listing still renders
+			}
 			if asJSON {
+				type row struct {
+					sessions.Session
+					TotalTokens *int64 `json:"total_tokens,omitempty"` // nil = no usage data
+					UsageStale  bool   `json:"usage_stale,omitempty"`
+				}
+				out := make([]row, 0, len(rows))
+				for _, s := range rows {
+					r := row{Session: s, UsageStale: staleSet[s.UUID]}
+					if t, ok := totals[s.UUID]; ok {
+						tt := t
+						r.TotalTokens = &tt
+					}
+					out = append(out, r)
+				}
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
-				return enc.Encode(rows)
+				return enc.Encode(out)
 			}
 			if len(rows) == 0 {
 				fmt.Fprintln(os.Stdout, "no sessions")
 				return nil
 			}
 			for _, s := range rows {
-				fmt.Fprintln(os.Stdout, formatSessionLine(s))
+				fmt.Fprintln(os.Stdout, formatSessionLine(s)+usageSuffix(totals, staleSet, s.UUID))
 			}
 			return nil
 		},

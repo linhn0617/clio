@@ -552,3 +552,43 @@ func TestClaudeDirStatusNoteNamesActualNonDefaultSource(t *testing.T) {
 		t.Errorf("claudeDirStatus(false, [fake-tool]) note = %q, must not mention codex when codex isn't the present source", note)
 	}
 }
+
+func TestRunReportsUsageCoverageAndDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "x.sqlite")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, source_file, turn_count) VALUES ('s1','f1.jsonl',1),('s2','f2.jsonl',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO session_usage(session_uuid, source, model, total_tokens) VALUES ('s1','claude-code','m',100)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, head_fingerprint, last_ingested_at, unparsed_lines, usage_skipped, usage_unmapped, usage_stale)
+		VALUES ('f1.jsonl',1,1,1,'','',1,0,3,2,1)`); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Result{}
+	for _, r := range Run(d, dir, dbPath) {
+		byName[r.Name] = r
+	}
+	cov, ok := byName["usage coverage"]
+	if !ok || !strings.Contains(cov.Detail, "1/2 sessions have usage data") {
+		t.Fatalf("usage coverage=%+v want 1/2 detail", cov)
+	}
+	diag, ok := byName["usage diagnostics"]
+	if !ok {
+		t.Fatal("usage diagnostics check missing")
+	}
+	if diag.OK {
+		t.Fatalf("diagnostics should flag the stale file: %+v", diag)
+	}
+	for _, want := range []string{"3 malformed", "2 unmapped", "1 file(s) with stale usage"} {
+		if !strings.Contains(diag.Detail, want) {
+			t.Fatalf("diagnostics detail %q missing %q", diag.Detail, want)
+		}
+	}
+}

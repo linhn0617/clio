@@ -38,6 +38,10 @@ type parseResult struct {
 	ClioIDs  []string // clio MCP tool_use ids to exclude from the index (claude-code only)
 	Consumed int64
 	Unparsed int64
+	// Usage is this pass's token-usage extraction (nil = source produced none;
+	// treated as a no-op). Populated by every built-in source; a usage failure
+	// never fails the parse — text indexing is the product, usage an enrichment.
+	Usage *usageResult
 }
 
 // claudeCodeSource ingests Claude Code transcripts (~/.claude/projects/**/*.jsonl,
@@ -68,7 +72,16 @@ func (claudeCodeSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, 
 	if err != nil {
 		return parseResult{}, err
 	}
-	return parseResult{Session: sess, Messages: msgs, ClioIDs: parser.ClioToolUseIDs(), Consumed: consumed, Unparsed: unparsed}, nil
+	// Usage pass over the committed complete-line watermark [0, startOffset+consumed).
+	// Whole-file by design: the messages table is a filtered subset (clio-MCP
+	// tool-use events are dropped yet still carry usage), so the original file is
+	// the only complete state. Runs here — outside the write transaction.
+	// No tail shortcut: literal last-wins means even a usage-less tail line can
+	// change the aggregate (it tombstones an earlier same-uuid entry), so every
+	// touch rescans. Cost is bounded by the tail-ingest gate.
+	usage := scanClaudeUsage(f, startOffset+consumed, path, ing.log)
+	usage.Rows = fillSessionUUID(usage.Rows, sess.UUID)
+	return parseResult{Session: sess, Messages: msgs, ClioIDs: parser.ClioToolUseIDs(), Consumed: consumed, Unparsed: unparsed, Usage: usage}, nil
 }
 
 // pathUnderAny reports whether path lies within any of roots.

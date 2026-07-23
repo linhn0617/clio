@@ -239,6 +239,8 @@ type geminiMessage struct {
 	Timestamp string               `json:"timestamp"`
 	Type      string               `json:"type"` // "user" | "gemini" | "info" | "error" | "warning"
 	Content   []geminiContentBlock `json:"content"`
+	Model     string               `json:"model"`  // gemini-type messages attribute a model
+	Tokens    json.RawMessage      `json:"tokens"` // per-message usage {input,output,cached,thoughts,tool,total}
 }
 
 // geminiMessageEnvelope decodes a $set messages[] element's — OR a bare
@@ -261,6 +263,8 @@ type geminiMessageEnvelope struct {
 	Timestamp string          `json:"timestamp"`
 	Type      string          `json:"type"`
 	Content   json.RawMessage `json:"content"`
+	Model     string          `json:"model"`
+	Tokens    json.RawMessage `json:"tokens"`
 }
 
 // A $set record's value is decoded into a map[string]json.RawMessage (see
@@ -559,7 +563,7 @@ func (s geminiSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, st
 			// empty result means. This is NOT an immediate skip for a
 			// shape-mismatch: the record still occupies its upsert-by-id
 			// slot, same as a $set element would.
-			gm := geminiMessage{ID: env.ID, Timestamp: env.Timestamp, Type: env.Type, Content: geminiDecodeContent(env.Content)}
+			gm := geminiMessage{ID: env.ID, Timestamp: env.Timestamp, Type: env.Type, Content: geminiDecodeContent(env.Content), Model: env.Model, Tokens: env.Tokens}
 			rm := geminiReplayedMsg{raw: line, parsed: gm}
 			if idx, ok := idIndex[env.ID]; ok {
 				reconstructed[idx] = rm // upsert: same id updates in place, position preserved
@@ -660,7 +664,7 @@ func (s geminiSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, st
 			// shape is not indexed empty"); a user message with no
 			// extractable text is simply not a turn (same as a
 			// session_context-only wrapper).
-			gm := geminiMessage{ID: env.ID, Timestamp: env.Timestamp, Type: env.Type, Content: geminiDecodeContent(env.Content)}
+			gm := geminiMessage{ID: env.ID, Timestamp: env.Timestamp, Type: env.Type, Content: geminiDecodeContent(env.Content), Model: env.Model, Tokens: env.Tokens}
 			// raw_json is the record's own line (redacted below), shared by
 			// every message this $set produces — not this element's bytes.
 			// See geminiReplayedMsg's doc comment (finding 3).
@@ -721,8 +725,27 @@ func (s geminiSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, st
 	// raw[0] cannot be taken on it) is redacted directly and never cached;
 	// redacting "" is O(1) either way so that costs nothing.
 	redactCache := make(map[*byte]string, len(reconstructed))
+	// Usage: sum per-message tokens over the reconstructed (complete) state.
+	// Runs on every replayed message BEFORE any text-shape skip below — an
+	// assistant message with no extractable text still consumed tokens.
+	usageAcc := newUsageAcc(model.SourceGemini)
+	var usageSkipped, usageUnmapped int64
 	for _, rm := range reconstructed {
 		gm := rm.parsed
+		switch {
+		case len(gm.Tokens) > 0 && !isJSONNull(gm.Tokens):
+			var tok map[string]json.RawMessage
+			// A native-total source's record must carry a usable native total
+			// ("total"); categories without one would persist total_tokens=0 as
+			// apparently-current data — reject + count instead.
+			if err := json.Unmarshal(gm.Tokens, &tok); err != nil || !hasNumericKey(tok, "total") {
+				usageSkipped++ // tokens present but malformed: should-carry, can't
+			} else {
+				usageUnmapped += usageAcc.addCategories(gm.Model, tok, geminiUsageCanon, "total")
+			}
+		case gm.Type == "gemini":
+			usageSkipped++ // an assistant record should carry tokens
+		}
 		ts := parseTS(gm.Timestamp)
 		if ts != 0 {
 			if sess.StartedAt == 0 || ts < sess.StartedAt {
@@ -778,7 +801,16 @@ func (s geminiSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, st
 		}
 	}
 
-	return parseResult{Session: sess, Messages: msgs, Consumed: consumed, Unparsed: unparsed}, nil
+	// Whole-file replay = complete state: replace, or delete when the replayed
+	// state carries no usage at all (mirrors Codex full-rebuild semantics).
+	usage := &usageResult{Skipped: usageSkipped, Unmapped: usageUnmapped}
+	usage.Rows = fillSessionUUID(usageAcc.finish("", false), sess.UUID)
+	if len(usage.Rows) == 0 {
+		usage.Outcome = usageDelete
+	} else {
+		usage.Outcome = usageReplace
+	}
+	return parseResult{Session: sess, Messages: msgs, Consumed: consumed, Unparsed: unparsed, Usage: usage}, nil
 }
 
 // joinGeminiContentText joins a Gemini message's content[].text blocks

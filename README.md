@@ -6,7 +6,7 @@ English | [繁體中文](./README_zh-TW.md)
 
 clio indexes Claude Code's session files (`~/.claude/projects/*.jsonl`) into a local SQLite + FTS5 database and exposes them through two interfaces:
 
-- **CLI** — `clio search` / `clio ask` / `clio list` / `clio show` to search, answer questions over, and read past conversations across all projects, or `clio tui` for an interactive dashboard
+- **CLI** — `clio search` / `clio ask` / `clio list` / `clio show` to search, answer questions over, and read past conversations across all projects, `clio usage` for token usage by session/project/model, or `clio tui` for an interactive dashboard
 - **MCP server** — lets Claude Code query its own history in-session ("what did we discuss last week?", "how did we fix that bug?")
 
 It is local-first, read-only against your `.claude` data, and never writes to your original session files.
@@ -95,7 +95,7 @@ When registered via `clio install-mcp`, Claude Code can call:
 | `search` | Full-text search, **ranked** by relevance + recency (short queries fall back to a substring scan; tool output excluded by default) |
 | `ask` | Answer a question from history: a cited bundle of the most relevant excerpts, windowed in their turns and grouped by session, for Claude to synthesize from; `max_tokens` bounds the bundle's estimated size (default 2000, min 200, max 8000) |
 | `list_sessions` | List sessions by date/project/turn count, or by file touched / tool used / command run; subagent children are hidden by default (each parent carries a `subagent_count`), `include_subagents` adds them as rows with `parent_session` / `agent_type` |
-| `activity_summary` | Counts by day or project, or your most-used files / commands / tools / patterns / URLs ("what did I touch last week?") |
+| `activity_summary` | Counts by day or project, your most-used files / commands / tools / patterns / URLs ("what did I touch last week?"), or session token usage ("which sessions burned my tokens?") |
 | `read_session` | Read one session in full, paginated; reports a parent's subagents (`include_subagents` inlines them) |
 
 Retrieval quality (ranking, FTS/LIKE tiering, `ask` grouping and windowing) is protected end to end by a deterministic regression suite over a small bilingual fixture corpus (`internal/eval`, runs under plain `go test ./...`).

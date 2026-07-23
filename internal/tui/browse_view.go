@@ -38,11 +38,15 @@ type browseView struct {
 	previewGen    int // bumps on each preview load; stale preview responses are dropped
 	previewMsgs   []sessions.Message
 	previewErr    error
+	tokens        map[string]int64 // session uuid -> total tokens (absent = no usage data)
+	staleUsage    map[string]bool  // session uuid -> last usage scan failed (values last-known)
 }
 
 // browseLoadedMsg carries the recent sessions loaded for the list.
 type browseLoadedMsg struct {
 	sessions []sessions.Session
+	tokens   map[string]int64
+	stale    map[string]bool
 	err      error
 }
 
@@ -57,6 +61,8 @@ type browseRow struct {
 type browseChildrenLoadedMsg struct {
 	parent   string
 	children []sessions.Session
+	tokens   map[string]int64
+	stale    map[string]bool
 	err      error
 }
 
@@ -94,7 +100,18 @@ func (v browseView) load() tea.Cmd {
 	return func() tea.Msg {
 		ss, err := sessions.ListSessions(ctx, database,
 			sessions.ListFilter{ProjectPrefix: project, Source: source, Limit: browseListLimit})
-		return browseLoadedMsg{sessions: ss, err: err}
+		msg := browseLoadedMsg{sessions: ss, err: err}
+		if err == nil && len(ss) > 0 {
+			uuids := make([]string, len(ss))
+			for i, s := range ss {
+				uuids[i] = s.UUID
+			}
+			// Best-effort: the listing renders without the token column on error.
+			if totals, stale, terr := sessions.SessionTotalTokens(ctx, database, uuids); terr == nil {
+				msg.tokens, msg.stale = totals, stale
+			}
+		}
+		return msg
 	}
 }
 
@@ -107,7 +124,17 @@ func (v browseView) loadChildren(parent string) tea.Cmd {
 	return func() tea.Msg {
 		cs, err := sessions.ListSessions(ctx, database,
 			sessions.ListFilter{ParentSession: parent, Limit: browseChildLimit})
-		return browseChildrenLoadedMsg{parent: parent, children: cs, err: err}
+		msg := browseChildrenLoadedMsg{parent: parent, children: cs, err: err}
+		if err == nil && len(cs) > 0 {
+			uuids := make([]string, len(cs))
+			for i, c := range cs {
+				uuids[i] = c.UUID
+			}
+			if totals, stale, terr := sessions.SessionTotalTokens(ctx, database, uuids); terr == nil {
+				msg.tokens, msg.stale = totals, stale
+			}
+		}
+		return msg
 	}
 }
 
@@ -117,6 +144,7 @@ func (v browseView) Update(msg tea.Msg) (browseView, tea.Cmd) {
 		v.width, v.height = msg.Width, msg.Height
 	case browseLoadedMsg:
 		v.sessions, v.err, v.selected, v.loaded = msg.sessions, msg.err, 0, true
+		v.tokens, v.staleUsage = msg.tokens, msg.stale
 		v.expanded, v.kids = nil, nil
 		v.previewMsgs, v.previewErr = nil, nil
 		return v.loadPreview()
@@ -136,6 +164,18 @@ func (v browseView) Update(msg tea.Msg) (browseView, tea.Cmd) {
 				v.kids = map[string][]sessions.Session{}
 			}
 			v.kids[msg.parent] = msg.children
+			for uuid, t := range msg.tokens {
+				if v.tokens == nil {
+					v.tokens = map[string]int64{}
+				}
+				v.tokens[uuid] = t
+			}
+			for uuid, st := range msg.stale {
+				if v.staleUsage == nil {
+					v.staleUsage = map[string]bool{}
+				}
+				v.staleUsage[uuid] = st
+			}
 		}
 	case previewLoadedMsg:
 		if msg.owner == tabBrowse && msg.gen == v.previewGen { // ours, and not superseded
@@ -257,8 +297,22 @@ func (v browseView) renderList(w, h int) string {
 				typ = "subagent"
 			}
 			row = marker + "  ↳ " + shortID(r.sess.UUID) + " (" + typ + ") " + oneLine(label)
+			if t, ok := v.tokens[r.sess.UUID]; ok {
+				row += " [" + humanTokens(t) + " tok"
+				if v.staleUsage[r.sess.UUID] {
+					row += ", stale"
+				}
+				row += "]"
+			}
 		} else {
 			row = marker + shortID(r.sess.UUID) + " " + oneLine(label)
+			if t, ok := v.tokens[r.sess.UUID]; ok {
+				row += " [" + humanTokens(t) + " tok"
+				if v.staleUsage[r.sess.UUID] {
+					row += ", stale"
+				}
+				row += "]"
+			}
 			if r.sess.SubagentCount > 0 {
 				caret := "▸"
 				if v.expanded[r.sess.UUID] {
@@ -277,4 +331,20 @@ func (v browseView) statusLine() string {
 		return "⚠ " + v.err.Error()
 	}
 	return fmt.Sprintf("%d sessions · ↑/↓ navigate · ⏎ expand · tab switch view · esc quit", len(v.sessions))
+}
+
+// humanTokens compacts a token count for the list row ("1.2M", "34k").
+func humanTokens(n int64) string {
+	switch {
+	case n >= 1_000_000_000:
+		return fmt.Sprintf("%.1fB", float64(n)/1e9)
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 10_000:
+		return fmt.Sprintf("%.0fk", float64(n)/1e3)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1e3)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }

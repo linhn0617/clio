@@ -1,0 +1,64 @@
+package ingest
+
+// Cross-tree tail-ingest benchmark (copied into internal/ingest/ of BOTH the
+// baseline worktree and the candidate tree by perf/run.sh — deleted after).
+// Uses only APIs present in both trees. Times ONE full in-process tail ingest
+// (parse + any usage pass + commit) per iteration on a 5,000-message session,
+// per the design.md protocol (Go benchmarks, no CLI discovery overhead).
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/linhn0617/clio/internal/db"
+)
+
+func BenchmarkZZTailIngest5k(b *testing.B) {
+	projects := b.TempDir()
+	dir := filepath.Join(projects, "-Users-bench-proj")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		b.Fatal(err)
+	}
+	lines := make([]string, 0, 5000)
+	for i := 0; i < 5000; i++ {
+		if i%2 == 0 {
+			lines = append(lines, fmt.Sprintf(`{"type":"user","uuid":"u-%d","timestamp":"2026-07-01T10:00:00Z","sessionId":"zz-bench-s","message":{"role":"user","content":"turn %d lorem ipsum dolor"}}`, i, i))
+		} else {
+			lines = append(lines, fmt.Sprintf(`{"type":"assistant","uuid":"a-%d","timestamp":"2026-07-01T10:00:01Z","sessionId":"zz-bench-s","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"reply %d xxxxxxxxxxxxxxxxxxxxxxxx"}],"usage":{"input_tokens":10,"output_tokens":5}}}`, i, i))
+		}
+	}
+	path := filepath.Join(dir, "zz-bench-s.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		b.Fatal(err)
+	}
+	database, err := db.Open(filepath.Join(b.TempDir(), "bench.sqlite"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer database.Close()
+	ing := New(database, nil)
+	if _, _, err := ing.IngestFile(context.Background(), path, false); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		tail := fmt.Sprintf(`{"type":"assistant","uuid":"zz-tail-%d","timestamp":"2026-07-01T11:00:00Z","sessionId":"zz-bench-s","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"tail %d"}],"usage":{"input_tokens":1,"output_tokens":1}}}`, i, i) + "\n"
+		af, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := af.WriteString(tail); err != nil {
+			b.Fatal(err)
+		}
+		af.Close()
+		b.StartTimer()
+		if _, _, err := ing.IngestFile(context.Background(), path, false); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

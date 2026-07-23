@@ -244,7 +244,7 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 		return 0, false, err
 	}
 
-	n, err := ing.commit(kind, res.Session, res.Messages, res.ClioIDs, FileState{
+	fst := FileState{
 		SourceFile:      path,
 		LastSize:        size,
 		LastMTime:       mtime,
@@ -253,7 +253,24 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 		HeadFingerprint: newHeadFP,
 		LastIngestedAt:  time.Now().Unix(),
 		UnparsedLines:   res.Unparsed,
-	})
+		UsagePolicy:     usageCountersPreserve, // nil Usage: leave stored counters alone
+	}
+	if u := res.Usage; u != nil {
+		switch {
+		case u.Outcome == usageScanFailed:
+			// Atomic no-op + stale flag: aggregates untouched, counters preserved
+			// (a partial scan's counts are meaningless), flag raised until a
+			// successful rescan clears it.
+			fst.UsageStale = 1
+		case u.AccumulateCounters:
+			fst.UsageSkipped, fst.UsageUnmapped = u.Skipped, u.Unmapped
+			fst.UsagePolicy = usageCountersAccumulate
+		default:
+			fst.UsageSkipped, fst.UsageUnmapped = u.Skipped, u.Unmapped
+			fst.UsagePolicy = usageCountersReplace
+		}
+	}
+	n, err := ing.commit(kind, res.Session, res.Messages, res.ClioIDs, res.Usage, fst)
 	if err != nil {
 		if errors.Is(err, errStaleSnapshot) || errors.Is(err, errSourceConflict) {
 			return 0, false, nil // changed under us, or refused as a cross-source conflict (recorded for doctor)
@@ -422,7 +439,7 @@ func (ing *Ingester) checkSourceConflict(tx *sql.Tx, uuid, source, sourceFile st
 	return false, derr
 }
 
-func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Message, excludedToolUses []string, fs FileState) (int, error) {
+func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Message, excludedToolUses []string, usage *usageResult, fs FileState) (int, error) {
 	tx, err := ing.db.Begin()
 	if err != nil {
 		return 0, err
@@ -512,6 +529,44 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 		}
 	}
 
+	// Usage aggregate: replace/delete only with a completed scan result; a
+	// failed scan (usageScanFailed) or nil usage writes nothing here — the old
+	// rows are retained and the file's usage_stale flag (in fs) marks them.
+	// This block is main-commit-path only by construction: the cross-source
+	// conflict early-exit above returns before reaching it (usage no-op).
+	if usage != nil {
+		switch usage.Outcome {
+		case usageReplace:
+			if _, err := tx.Exec(`DELETE FROM session_usage WHERE session_uuid = ?`, sess.UUID); err != nil {
+				return 0, fmt.Errorf("clear session usage: %w", err)
+			}
+			for _, u := range usage.Rows {
+				if _, err := tx.Exec(`INSERT INTO session_usage(session_uuid, source, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, reasoning_tokens, tool_tokens, total_tokens, categories_json)
+					VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+					sess.UUID, u.Source, u.Model, u.InputTokens, u.OutputTokens, u.CacheRead, u.CacheCreation, u.Reasoning, u.Tool, u.TotalTokens, nullEmpty(u.CategoriesJSON)); err != nil {
+					return 0, fmt.Errorf("insert session usage: %w", err)
+				}
+			}
+		case usageDelete:
+			if _, err := tx.Exec(`DELETE FROM session_usage WHERE session_uuid = ?`, sess.UUID); err != nil {
+				return 0, fmt.Errorf("delete session usage: %w", err)
+			}
+		}
+		for _, q := range usage.Snapshots {
+			// Timestamp-guarded: an older rollout scanned after a newer one must
+			// never overwrite the newer snapshot, regardless of file scan order.
+			if _, err := tx.Exec(`INSERT INTO quota_snapshots(source, limit_id, observed_at, used_percent, window_minutes, resets_at, plan_type, raw_json)
+				VALUES (?,?,?,?,?,?,?,?)
+				ON CONFLICT(source, limit_id) DO UPDATE SET observed_at=excluded.observed_at,
+				used_percent=excluded.used_percent, window_minutes=excluded.window_minutes,
+				resets_at=excluded.resets_at, plan_type=excluded.plan_type, raw_json=excluded.raw_json
+				WHERE excluded.observed_at > quota_snapshots.observed_at`,
+				q.Source, q.LimitID, q.ObservedAt, q.UsedPercent, nullZero(q.WindowMinutes), nullZero(q.ResetsAt), nullEmpty(q.PlanType), nullEmpty(q.RawJSON)); err != nil {
+				return 0, fmt.Errorf("upsert quota snapshot: %w", err)
+			}
+		}
+	}
+
 	var totalUserTurns int
 	if err := tx.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid = ? AND role = ?`,
 		sess.UUID, model.RoleUser).Scan(&totalUserTurns); err != nil {
@@ -573,16 +628,39 @@ func (ing *Ingester) upsertIngestState(tx *sql.Tx, fs FileState, monotonic bool)
 		// concurrent writer landing the same append) must not double-count.
 		unparsedExpr = "CASE WHEN excluded.last_byte_offset > ingest_state.last_byte_offset THEN ingest_state.unparsed_lines + excluded.unparsed_lines ELSE ingest_state.unparsed_lines END"
 	}
-	q := `INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, head_fingerprint, last_ingested_at, unparsed_lines)
-		VALUES (?,?,?,?,?,?,?,?)
+	// Usage counters follow the pass-scope policy: whole-file passes replace,
+	// Codex incremental accumulates (strict advance, like unparsed_lines), and a
+	// failed scan preserves the stored counts while raising usage_stale.
+	var skippedExpr, unmappedExpr, staleExpr string
+	switch fs.UsagePolicy {
+	case usageCountersAccumulate:
+		skippedExpr = "CASE WHEN excluded.last_byte_offset > ingest_state.last_byte_offset THEN ingest_state.usage_skipped + excluded.usage_skipped ELSE ingest_state.usage_skipped END"
+		unmappedExpr = "CASE WHEN excluded.last_byte_offset > ingest_state.last_byte_offset THEN ingest_state.usage_unmapped + excluded.usage_unmapped ELSE ingest_state.usage_unmapped END"
+		staleExpr = "excluded.usage_stale"
+	case usageCountersPreserve:
+		skippedExpr = "ingest_state.usage_skipped"
+		unmappedExpr = "ingest_state.usage_unmapped"
+		// Preserve is the no-scan path (scan-failed, or a source that produced
+		// no usage result): counters stay stored; MAX keeps a stored stale flag
+		// from being cleared without a real rescan while still letting the
+		// scan-failed pass (excluded=1) raise it.
+		staleExpr = "MAX(ingest_state.usage_stale, excluded.usage_stale)"
+	default: // usageCountersReplace
+		skippedExpr = "excluded.usage_skipped"
+		unmappedExpr = "excluded.usage_unmapped"
+		staleExpr = "excluded.usage_stale"
+	}
+	q := `INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, head_fingerprint, last_ingested_at, unparsed_lines, usage_skipped, usage_unmapped, usage_stale)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(source_file) DO UPDATE SET last_size=excluded.last_size, last_mtime=excluded.last_mtime,
 		last_byte_offset=excluded.last_byte_offset, tail_fingerprint=excluded.tail_fingerprint,
 		head_fingerprint=excluded.head_fingerprint, last_ingested_at=excluded.last_ingested_at,
+		usage_skipped=` + skippedExpr + `, usage_unmapped=` + unmappedExpr + `, usage_stale=` + staleExpr + `,
 		unparsed_lines=` + unparsedExpr
 	if monotonic {
 		q += ` WHERE excluded.last_byte_offset >= ingest_state.last_byte_offset`
 	}
-	_, err := tx.Exec(q, fs.SourceFile, fs.LastSize, fs.LastMTime, fs.LastByteOffset, fs.TailFingerprint, fs.HeadFingerprint, fs.LastIngestedAt, fs.UnparsedLines)
+	_, err := tx.Exec(q, fs.SourceFile, fs.LastSize, fs.LastMTime, fs.LastByteOffset, fs.TailFingerprint, fs.HeadFingerprint, fs.LastIngestedAt, fs.UnparsedLines, fs.UsageSkipped, fs.UsageUnmapped, fs.UsageStale)
 	return err
 }
 
@@ -819,6 +897,9 @@ func (ing *Ingester) purgeSource(src string) error {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM tool_targets WHERE session_uuid = ?`, uuid); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM session_usage WHERE session_uuid = ?`, uuid); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM sessions WHERE uuid = ?`, uuid); err != nil {

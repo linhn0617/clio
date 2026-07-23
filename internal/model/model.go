@@ -68,6 +68,46 @@ const (
 	TargetTool    = "tool"
 )
 
+// Model sentinels for session_usage rows whose source cannot attribute usage
+// to a single model (Codex cumulative counters are always "(mixed)").
+const (
+	ModelUnknown = "(unknown)"
+	ModelMixed   = "(mixed)"
+)
+
+// SessionUsage is one session's token usage aggregate for one model (or a
+// sentinel). Raw token category counts only — no monetary amounts, ever.
+// TotalTokens is the source's native total when it provides one (Codex,
+// Gemini) or the fixed derived sum input+output+cache_read+cache_creation
+// (Claude); ranking surfaces order by it.
+type SessionUsage struct {
+	SessionUUID    string
+	Source         string
+	Model          string
+	InputTokens    int64
+	OutputTokens   int64
+	CacheRead      int64
+	CacheCreation  int64
+	Reasoning      int64
+	Tool           int64
+	TotalTokens    int64
+	CategoriesJSON string // per-category summed source-specific extras, canonical JSON; "" when none
+}
+
+// QuotaSnapshot is a last-observed rate-limit state extracted from a session
+// file (Codex rollouts persist these). It is never live data: ObservedAt is
+// mandatory and every surface must render its age.
+type QuotaSnapshot struct {
+	Source        string
+	LimitID       string
+	ObservedAt    int64
+	UsedPercent   float64
+	WindowMinutes int64
+	ResetsAt      int64
+	PlanType      string
+	RawJSON       string
+}
+
 // RawEvent is a single line of a .jsonl session file. Only fields clio uses are
 // declared; unknown fields are ignored for forward compatibility.
 type RawEvent struct {

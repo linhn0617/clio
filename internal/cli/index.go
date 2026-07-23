@@ -25,6 +25,11 @@ func newIndexCmd() *cobra.Command {
 			// concurrent writers are serialized by WAL + busy_timeout,
 			// and ingest is idempotent.
 			if lockPath, err := config.LockPath(); err == nil && lock.IsHeld(lockPath) {
+				if full {
+					// A requested full rebuild (e.g. the usage backfill after an
+					// upgrade) must never be silently skipped as success.
+					return fmt.Errorf("clio mcp holds the index lock — a full re-index cannot run now; stop Claude Code (or the clio MCP server) and re-run `clio index --full`")
+				}
 				fmt.Fprintln(os.Stdout, "clio mcp is running and keeping the index current — nothing to do.")
 				return nil
 			}
