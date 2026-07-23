@@ -5,6 +5,53 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-07-23
+
+Session-level token usage: see which sessions burned your tokens, and jump
+straight into them. Spec-driven and adversarially cross-model reviewed
+(7 rounds to GO on the spec, 4 rounds to a clean gate on the implementation).
+
+### Added
+
+- **`clio usage`** — token usage by session, project, or model, sectioned
+  **per source** (token counts from different tools use different tokenizers
+  and are never combined into a cross-source total). `--by session` rows carry
+  a uuid you can pass to `clio show`; project/model rows carry a copy-pasteable
+  (shell-safe) drill-down command; `--model` filters to one model. Raw token
+  counts only — clio never stores, computes, or displays monetary amounts.
+- **`clio usage --quota`** — last-observed rate-limit snapshots extracted from
+  session files (currently Codex persists these). Never live data: every line
+  shows its observation age, and snapshots older than their window (or past
+  their reset time) render as STALE. Quota data is CLI-only and never exposed
+  over MCP.
+- **Usage extraction in ingest** for all three sources: Claude Code (dedicated
+  whole-file usage pass with literal last-wins uuid dedup — the filtered
+  message index is never used as the usage source), Codex (latest cumulative
+  `token_count`, model always `(mixed)`), Gemini (per-message tokens summed
+  during replay, per-model). Aggregates are stored per (session, model) in the
+  new `session_usage` table.
+- Token totals in `clio list` (text + `--json`) and the TUI browse/activity
+  views; MCP `activity_summary` gains `group_by: "usage"` (token aggregates
+  only). A `[stale]` marker — propagated to group rows and subtotals — means
+  the file's last usage scan failed and values are last-known, not current.
+- `clio doctor` reports usage coverage, skipped/unmapped usage diagnostics,
+  and stale-usage file counts.
+
+### Changed
+
+- `clio index --full` now **refuses with a non-zero exit** when the clio MCP
+  server holds the index lock, instead of reporting a silent "nothing to do"
+  success — a requested full rebuild must never be skipped silently.
+
+### Notes
+
+- **Backfill required for existing indexes:** usage for sessions indexed
+  before v0.14.0 appears after a one-time `clio index --full` (stop Claude
+  Code / the clio MCP server first).
+- Performance (certified, fail-closed harness in the archived change dir):
+  DB growth +0.1%, full-index wall-clock -0.2%, tail-ingest +9.98 ms absolute
+  on a 5,000-message session, write-lock hold change noise-level (-1.4%).
+
 ## [0.13.0] - 2026-07-20
 
 Gemini CLI history support. Spec-first, adversarially reviewed, and — for the
