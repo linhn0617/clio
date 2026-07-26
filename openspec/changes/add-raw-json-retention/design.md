@@ -93,8 +93,8 @@ commit; documented, and bounded by D3's restorability requirement.
 **D3 — "Restorable", not merely "exists". [R1-P1-restore]**
 A session is prunable iff ALL hold: its most recent activity is strictly older
 than the cutoff; its `source_file` is a **regular, readable** file (not just
-`Stat`-able); it lies **under a currently-scanned source root** for its recorded
-`source` adapter (so `index --full` will rediscover it); and its `ingest_state`
+`Stat`-able); it lies **under any currently-scanned source root** (so `index --full` rediscovers
+it and routes it to the owning adapter via Owns()); and its `ingest_state`
 snapshot is a **completed, current** ingest of the file — ALL of
 `last_size == fi.Size()`, `last_mtime == fi.ModTime()`, `last_byte_offset ==
 last_size` (fully ingested to EOF), AND `aborted == 0`. The `aborted` flag is

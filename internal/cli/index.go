@@ -11,6 +11,7 @@ import (
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
 	"github.com/linhn0617/clio/internal/lock"
+	"github.com/linhn0617/clio/internal/sessions"
 )
 
 func newIndexCmd() *cobra.Command {
@@ -62,6 +63,23 @@ func newIndexCmd() *cobra.Command {
 			}
 			fmt.Fprintf(os.Stdout, "indexed: %d files (%d ingested, %d skipped), %d messages added\n",
 				st.FilesScanned, st.FilesIngested, st.FilesSkipped, st.MessagesAdded)
+			// A full rebuild is the restore path for `clio prune-raw`. IngestAll
+			// logs per-file failures and continues, so a pruned session whose file
+			// became unreadable/undiscoverable would stay pruned silently — surface
+			// it with a non-zero exit rather than reporting a clean success.
+			if full {
+				residual, rerr := sessions.PrunedResiduals(cmd.Context(), database)
+				if rerr != nil {
+					return fmt.Errorf("pruned-residual check failed: %w", rerr)
+				}
+				if len(residual) > 0 {
+					fmt.Fprintf(os.Stderr, "warning: %d session(s) still have pruned raw_json after a full reindex (source file unreadable/undiscoverable?):\n", len(residual))
+					for _, u := range residual {
+						fmt.Fprintf(os.Stderr, "  %s\n", u)
+					}
+					return fmt.Errorf("%d pruned session(s) could not be restored", len(residual))
+				}
+			}
 			return nil
 		},
 	}

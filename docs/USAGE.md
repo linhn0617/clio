@@ -323,6 +323,46 @@ last usage scan failed and values are last-known, not current.
 的快照會標 STALE。額度資料只在 CLI 顯示、永不經 MCP 暴露。用量列上的
 `[stale]` 代表該檔最近一次 usage 掃描失敗，數值是最後已知、非當前。
 
+### `clio prune-raw` — reclaim space / 回收空間
+
+Blank stored `raw_json` (used only by `clio show --format raw|json`) for OLD
+sessions whose raw form is **restorable** from the source file. This is a
+reversible cache eviction — `clio index --full` re-derives the raw form — so
+search, content, token usage, and activity data are untouched. Only sessions
+whose indexed snapshot still matches the on-disk file (size+mtime+offset, and a
+verified — not aborted — ingest) are pruned; anything unverifiable is skipped
+and counted by reason. Space is freed inside the DB immediately but the file
+shrinks on disk only with `--vacuum` (or a later VACUUM).
+
+清空舊 session 的 `raw_json`（只有 `clio show --format raw|json` 用到），前提是
+其原始檔還在、可還原——這是**可還原的快取驅逐**（`clio index --full` 會重建），
+搜尋、內容、token 用量、活動資料都不動。只 prune「索引快照仍與磁碟檔一致
+（size+mtime+offset 且非中止的 ingest）」的 session；無法確認的一律跳過並依原因
+計數。空間在 DB 內立即釋放，但檔案要 `--vacuum`（或之後 VACUUM）才會縮小。
+
+| Flag | English | 中文 | Default |
+|------|---------|------|---------|
+| `--older-than` | Prune sessions older than this (14d, 30d, 12h, YYYY-MM-DD) | 早於此的 session | required |
+| `--dry-run` | Report only; write nothing (wins over --vacuum) | 只報告不寫入 | off |
+| `--vacuum` | VACUUM after pruning to shrink the file | prune 後 VACUUM 縮檔 | off |
+| `--source` | One source, or `all` | 來源過濾 | default source |
+| `--project` | Only sessions under this project prefix | 依專案前綴過濾 | — |
+
+```bash
+clio prune-raw --older-than 30d --dry-run     # preview / 預覽
+clio prune-raw --older-than 30d --vacuum      # prune + shrink on disk / 回收
+clio index --full                             # restore raw form anytime / 隨時還原
+```
+
+After upgrading, a session becomes prunable only once a `clio index --full` has
+re-validated it (existing rows are fail-closed until then). `clio show
+--format raw|json` on a pruned session prints a note and the restore command
+instead of blank lines; `--format markdown` is unaffected.
+
+升級後，session 要先經一次 `clio index --full` 重新驗證才可 prune（既有列在此前
+一律 fail-closed）。prune 過的 session 跑 `clio show --format raw|json` 會印提示與
+還原指令而非空行；`--format markdown` 不受影響。
+
 ### `clio index` — (re)build the index / 建立索引
 
 | Flag | English | 中文 |

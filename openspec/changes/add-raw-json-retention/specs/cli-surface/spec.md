@@ -7,7 +7,7 @@
 `raw_json` is the empty pruned sentinel and render an honest signal rather than
 empty lines: `--format raw` emits a per-session note that the raw form was
 pruned and can be restored with `clio index --full` (and still prints any
-non-pruned lines); `--format json` emits `"raw_json": null` for pruned messages
+non-pruned lines); `--format json` emits `"RawJSON": null` for pruned messages (the pre-existing capitalized message key is preserved for backward compatibility)
 and a top-level `"raw_pruned": true` flag. `--format markdown` is unaffected.
 
 #### Scenario: Raw format notes a pruned session
@@ -18,7 +18,7 @@ and a top-level `"raw_pruned": true` flag. `--format markdown` is unaffected.
 #### Scenario: JSON format flags pruned messages
 - **WHEN** `clio show <uuid> --format json` targets a session with pruned
   messages
-- **THEN** those messages carry `raw_json: null` and the payload carries
+- **THEN** those messages carry `RawJSON: null` (existing key preserved) and the payload carries
   `raw_pruned: true`
 
 #### Scenario: Markdown is unaffected

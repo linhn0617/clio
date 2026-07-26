@@ -604,10 +604,13 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 // logged, never escalated (the abort itself is already the caller's error).
 func (ing *Ingester) recordUnusableStatePass(path string, size, mtime, priorUnparsed int64) {
 	n := 1 + priorUnparsed
-	_, err := ing.db.Exec(`INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, head_fingerprint, last_ingested_at, unparsed_lines)
-		VALUES (?,?,?,0,'','',?,?)
+	// aborted=1: this pass could not commit a usable snapshot. On conflict it also
+	// sets aborted=1 (the stored offset is preserved, so offset==size alone could
+	// otherwise look restorable — prune-raw's predicate requires aborted=0).
+	_, err := ing.db.Exec(`INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, head_fingerprint, last_ingested_at, unparsed_lines, aborted)
+		VALUES (?,?,?,0,'','',?,?,1)
 		ON CONFLICT(source_file) DO UPDATE SET last_size=excluded.last_size, last_mtime=excluded.last_mtime,
-		last_ingested_at=excluded.last_ingested_at, unparsed_lines=ingest_state.unparsed_lines + ?`,
+		last_ingested_at=excluded.last_ingested_at, aborted=1, unparsed_lines=ingest_state.unparsed_lines + ?`,
 		path, size, mtime, time.Now().Unix(), n, n)
 	if err != nil {
 		ing.log.Warn("record unusable-state pass failed", "file", path, "err", err)
@@ -650,12 +653,15 @@ func (ing *Ingester) upsertIngestState(tx *sql.Tx, fs FileState, monotonic bool)
 		unmappedExpr = "excluded.usage_unmapped"
 		staleExpr = "excluded.usage_stale"
 	}
-	q := `INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, head_fingerprint, last_ingested_at, unparsed_lines, usage_skipped, usage_unmapped, usage_stale)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)
+	// aborted=0: reaching upsertIngestState means this pass committed successfully
+	// (called only from commit()); a full ingest clears any prior aborted flag.
+	q := `INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, head_fingerprint, last_ingested_at, unparsed_lines, usage_skipped, usage_unmapped, usage_stale, aborted)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,0)
 		ON CONFLICT(source_file) DO UPDATE SET last_size=excluded.last_size, last_mtime=excluded.last_mtime,
 		last_byte_offset=excluded.last_byte_offset, tail_fingerprint=excluded.tail_fingerprint,
 		head_fingerprint=excluded.head_fingerprint, last_ingested_at=excluded.last_ingested_at,
 		usage_skipped=` + skippedExpr + `, usage_unmapped=` + unmappedExpr + `, usage_stale=` + staleExpr + `,
+		aborted=0,
 		unparsed_lines=` + unparsedExpr
 	if monotonic {
 		q += ` WHERE excluded.last_byte_offset >= ingest_state.last_byte_offset`

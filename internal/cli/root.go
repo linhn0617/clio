@@ -30,6 +30,7 @@ func newRootCmd() *cobra.Command {
 		newShowCmd(),
 		newActivityCmd(),
 		newUsageCmd(),
+		newPruneRawCmd(),
 		newAskCmd(),
 		newTUICmd(),
 		newRecallCmd(),

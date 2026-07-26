@@ -592,3 +592,44 @@ func TestRunReportsUsageCoverageAndDiagnostics(t *testing.T) {
 		}
 	}
 }
+
+func TestRunReportsPrunedRawJSON(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "x.sqlite")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, source_file, turn_count) VALUES ('s1','f1.jsonl',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO messages(session_uuid, seq, role, content, raw_json) VALUES ('s1',0,'assistant','hi',''),('s1',1,'user','yo','{"a":1}')`); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Result{}
+	for _, r := range Run(d, dir, dbPath) {
+		byName[r.Name] = r
+	}
+	p, ok := byName["pruned raw_json"]
+	if !ok {
+		t.Fatal("pruned raw_json check missing")
+	}
+	if !strings.Contains(p.Detail, "1 messages pruned") {
+		t.Fatalf("pruned detail=%q want '1 messages pruned'", p.Detail)
+	}
+}
+
+func TestRunPrunedRawZeroWhenNone(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "x.sqlite")
+	d, _ := db.Open(dbPath)
+	defer d.Close()
+	byName := map[string]Result{}
+	for _, r := range Run(d, dir, dbPath) {
+		byName[r.Name] = r
+	}
+	if p := byName["pruned raw_json"]; !p.OK || p.Detail != "0" {
+		t.Fatalf("clean db pruned raw_json=%+v want OK/0", p)
+	}
+}

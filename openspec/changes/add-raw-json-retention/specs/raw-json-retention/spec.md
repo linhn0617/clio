@@ -9,8 +9,8 @@ empty pruned sentinel) for messages of eligible sessions in a single write
 transaction. `--older-than` reuses the since-grammar (`14d`/`12h`/`YYYY-MM-DD`)
 and MUST reject zero/negative/malformed values. A session is eligible iff ALL of:
 its most recent activity (`COALESCE(ended_at, started_at, 0)`) is strictly older
-than the cutoff; its `source_file` is a regular, readable file; it lies under a
-currently-scanned source root for its recorded source adapter; and its `ingest_state` row is a completed current ingest
+than the cutoff; its `source_file` is a regular, readable file; it lies under any
+currently-scanned source root; and its `ingest_state` row is a completed current ingest
 (`last_size==fi.Size()`, `last_mtime==fi.ModTime()`, `last_byte_offset==last_size`,
 AND `aborted==0` — offset alone is insufficient because an aborted pass preserves
 a prior offset on conflict; migration 0012's `aborted` flag (existing rows

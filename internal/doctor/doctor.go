@@ -208,6 +208,24 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 		}
 	}
 
+	// Pruned raw_json (clio prune-raw): report the exact pruned-message count and
+	// the whole-DB freelist size reclaimable on VACUUM (labeled as whole-DB, not
+	// raw-only — the original raw_json lengths are gone after pruning). Pre-0011
+	// DBs (no messages table changes) still have raw_json; the query is safe there.
+	var prunedMsgs int64
+	if perr := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE raw_json = ''`).Scan(&prunedMsgs); perr != nil {
+		add("pruned raw_json", false, perr.Error())
+	} else if prunedMsgs == 0 {
+		add("pruned raw_json", true, "0")
+	} else {
+		var pageCount, pageSize, freelist int64
+		database.QueryRow(`PRAGMA page_count`).Scan(&pageCount)
+		database.QueryRow(`PRAGMA page_size`).Scan(&pageSize)
+		database.QueryRow(`PRAGMA freelist_count`).Scan(&freelist)
+		add("pruned raw_json", true, fmt.Sprintf("%d messages pruned; ~%.1f MB reclaimable on VACUUM (whole-DB freelist, not raw-only)",
+			prunedMsgs, float64(freelist*pageSize)/1e6))
+	}
+
 	// File permissions: the DB and its WAL/SHM sidecars hold indexed content and must
 	// be private (0600). Absent sidecars (no writes yet) are skipped.
 	var badPerms []string

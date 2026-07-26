@@ -65,8 +65,9 @@ func newShowCmd() *cobra.Command {
 			case "json":
 				type subagentOut struct {
 					sessions.Session
-					Messages []sessions.Message `json:"messages,omitempty"`
+					Messages []jsonMessage `json:"messages,omitempty"`
 				}
+				rawPruned := anyPruned(msgs)
 				subs := make([]subagentOut, 0, len(children))
 				for _, c := range children {
 					so := subagentOut{Session: c}
@@ -76,20 +77,26 @@ func newShowCmd() *cobra.Command {
 						if err != nil {
 							return err
 						}
-						so.Messages = cm
+						so.Messages = toJSONMessages(cm)
+						rawPruned = rawPruned || anyPruned(cm)
 					}
 					subs = append(subs, so)
 				}
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
 				return enc.Encode(struct {
-					Session   sessions.Session   `json:"session"`
-					Messages  []sessions.Message `json:"messages"`
-					Subagents []subagentOut      `json:"subagents,omitempty"`
-				}{sess, msgs, subs})
+					Session   sessions.Session `json:"session"`
+					Messages  []jsonMessage    `json:"messages"`
+					Subagents []subagentOut    `json:"subagents,omitempty"`
+					RawPruned bool             `json:"raw_pruned,omitempty"`
+				}{sess, toJSONMessages(msgs), subs, rawPruned})
 			case "raw":
-				if err := writeRaw(os.Stdout, msgs); err != nil {
+				sawPruned, err := writeRaw(os.Stdout, msgs)
+				if err != nil {
 					return err
+				}
+				if sawPruned {
+					prunedNote(shortID(sess.UUID))
 				}
 				if includeSubagents {
 					for _, c := range children {
@@ -97,8 +104,12 @@ func newShowCmd() *cobra.Command {
 						if err != nil {
 							return err
 						}
-						if err := writeRaw(os.Stdout, cm); err != nil {
+						sp, err := writeRaw(os.Stdout, cm)
+						if err != nil {
 							return err
+						}
+						if sp {
+							prunedNote(shortID(c.UUID)) // per-session, not one aggregate note
 						}
 					}
 				}
@@ -144,20 +155,67 @@ func newShowCmd() *cobra.Command {
 
 // writeRaw prints each message's raw_json, collapsing only runs of consecutive
 // identical lines (a session-ingest line expands into adjacent messages that
-// share its raw_json). Non-adjacent identical lines are kept distinct.
-func writeRaw(w io.Writer, msgs []sessions.Message) error {
+// share its raw_json). Non-adjacent identical lines are kept distinct. Pruned
+// messages (empty raw_json, blanked by `clio prune-raw`) are skipped; sawPruned
+// reports whether any were, so the caller can note the pruned raw form.
+func writeRaw(w io.Writer, msgs []sessions.Message) (sawPruned bool, err error) {
 	have := false
 	var last string
 	for _, m := range msgs {
+		if m.RawJSON == "" {
+			sawPruned = true
+			continue
+		}
 		if have && m.RawJSON == last {
 			continue
 		}
 		if _, err := fmt.Fprintln(w, m.RawJSON); err != nil {
-			return err
+			return sawPruned, err
 		}
 		last, have = m.RawJSON, true
 	}
-	return nil
+	return sawPruned, nil
+}
+
+// prunedNote prints a per-session note (to stderr) that a session's raw form
+// was pruned and how to restore it.
+func prunedNote(sessionID string) {
+	fmt.Fprintf(os.Stderr, "note: raw form of session %s was pruned to save space — restore it with `clio index --full`\n", sessionID)
+}
+
+// anyPruned reports whether any message has a blanked (pruned) raw_json.
+func anyPruned(msgs []sessions.Message) bool {
+	for _, m := range msgs {
+		if m.RawJSON == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// jsonMessage renders a message for --format json with raw_json as null when
+// pruned (rather than an empty string), so a pruned raw form is unambiguous.
+// Keys match the pre-existing default marshaling of sessions.Message (Go field
+// names) so the JSON shape is unchanged except RawJSON becoming nullable.
+type jsonMessage struct {
+	Seq     int     `json:"Seq"`
+	TS      int64   `json:"TS"`
+	Role    string  `json:"Role"`
+	Content string  `json:"Content"`
+	RawJSON *string `json:"RawJSON"`
+}
+
+func toJSONMessages(msgs []sessions.Message) []jsonMessage {
+	out := make([]jsonMessage, 0, len(msgs))
+	for _, m := range msgs {
+		jm := jsonMessage{Seq: m.Seq, TS: m.TS, Role: m.Role, Content: m.Content}
+		if m.RawJSON != "" {
+			rj := m.RawJSON
+			jm.RawJSON = &rj
+		}
+		out = append(out, jm)
+	}
+	return out
 }
 
 func orPlaceholder(s, ph string) string {
