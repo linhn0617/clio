@@ -26,14 +26,14 @@ clio 把 Claude Code 的 session 檔（`~/.claude/projects/*.jsonl`）索引進�
 
 **1. 安裝執行檔**
 
-**預編譯（推薦）** —— 從 [最新 release](https://github.com/linhn0617/clio/releases/latest)（目前為 [**v0.14.0**](https://github.com/linhn0617/clio/releases/tag/v0.14.0)；macOS/Linux `amd64`+`arm64`、Windows `amd64`）下載你平台的檔案，放進 `PATH`，並用 `SHASUMS256.txt` 驗證。binary 未經簽章：macOS
+**預編譯（推薦）** —— 從 [最新 release](https://github.com/linhn0617/clio/releases/latest)（目前為 [**v0.15.0**](https://github.com/linhn0617/clio/releases/tag/v0.15.0)；macOS/Linux `amd64`+`arm64`、Windows `amd64`）下載你平台的檔案，放進 `PATH`，並用 `SHASUMS256.txt` 驗證。binary 未經簽章：macOS
 首次執行可能被 Gatekeeper 擋下——到「系統設定 → 隱私權與安全性」允許，或用
 `xattr -d com.apple.quarantine <clio 路徑>` 清除隔離旗標。
 
 **或用 `go install`：**
 
 ```
-go install github.com/linhn0617/clio/cmd/clio@v0.14.0   # 或用 @latest 取得最新
+go install github.com/linhn0617/clio/cmd/clio@v0.15.0   # 或用 @latest 取得最新
 ```
 
 這會把 `clio` 放進 `$(go env GOPATH)/bin`，確認該目錄在 `PATH` 裡。

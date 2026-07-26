@@ -5,6 +5,47 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-07-26
+
+Reclaim disk space: `clio prune-raw` blanks stored raw_json for old sessions as
+a reversible cache eviction. Spec-driven and adversarially cross-model reviewed
+(8 rounds to GO on the spec, 7 rounds to a clean gate on the implementation).
+
+### Added
+
+- **`clio prune-raw --older-than <dur> [--dry-run] [--vacuum]`** — blanks
+  `messages.raw_json` (used only by `clio show --format raw|json`) for sessions
+  older than the cutoff whose raw form is **restorable** from the still-present
+  source file. This is a reversible cache eviction: `clio index --full`
+  re-derives it. Search, `content`, token usage, quota, and activity data end
+  byte-identical. Only demonstrably-restorable sessions are pruned (indexed
+  snapshot matches the file: size+mtime+offset, and a verified — not aborted —
+  ingest); anything unverifiable is skipped and counted by reason. `--dry-run`
+  reports without writing; `--vacuum` shrinks the file on disk (refuses under
+  the MCP lock). No monetary/token data is touched.
+- `clio show --format raw|json` on a pruned session degrades honestly — a
+  per-session note (raw) or `RawJSON: null` + `raw_pruned: true` (json) — instead
+  of blank output; `--format markdown` is unaffected.
+- `clio doctor` reports pruned-message counts and reclaimable-on-VACUUM bytes.
+
+### Changed
+
+- Migration 0012 narrows the `messages` update trigger to `AFTER UPDATE OF
+  content`, so pruning raw_json does not churn the FTS trigram index, and adds
+  an `ingest_state.aborted` signal (fail-closed on upgrade) that gates prune
+  restorability.
+- `clio index --full` now exits non-zero if any pruned session could not be
+  restored (e.g. its source file became unreadable), so an unrestored prune is
+  never silent.
+
+### Notes
+
+- Prune is reversible only for sessions clio can rediscover and re-parse; after
+  upgrading, a session becomes prunable once a `clio index --full` has
+  re-validated it (existing ingest rows are fail-closed until then).
+- Space is freed inside the DB immediately but the file shrinks on disk only
+  with `--vacuum` (or a later `VACUUM`).
+
 ## [0.14.0] - 2026-07-23
 
 Session-level token usage: see which sessions burned your tokens, and jump
