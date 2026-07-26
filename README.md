@@ -71,8 +71,10 @@ clio show <id> --include-subagents         # ...and inline its Claude Code subag
 clio activity --by file --since 7d         # files touched / commands run / tools used
 clio search "race" --source codex          # also index & search OpenAI Codex CLI history (opt-in; default: Claude Code only)
 clio activity --by command --source codex  # ...and break down Codex commands / files / tools too
+clio usage --since 30d                     # token usage by session / project / model
 clio recall                                # recent-activity digest for the current project
 clio doctor                     # health check
+clio prune-raw --older-than 30d --vacuum   # reclaim space: blank restorable old raw_json (reversible via index --full)
 ```
 
 To remove the integration later: `clio uninstall-mcp`.
