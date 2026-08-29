@@ -39,9 +39,16 @@ func testDB(t *testing.T) *db.DB {
 	return d
 }
 
+// fixtureTS is the single timestamp shared by every fixture row. Ranking adds a
+// continuous recencyBonus(ts) (internal/search/rank.go), so two otherwise
+// identical messages inserted in different wall-clock seconds are no longer
+// tied — under `go test -race` on CI the inserts crossed a second boundary and
+// the newest session out-ranked the rest, breaking the uuid-tiebreak tests.
+var fixtureTS = time.Now().Unix()
+
 func addSession(t *testing.T, d *db.DB, uuid, project, title string) {
 	t.Helper()
-	now := time.Now().Unix()
+	now := fixtureTS
 	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title) VALUES (?,?,?,?,?,?,?)`,
 		uuid, project, uuid+".jsonl", now, now, 0, title); err != nil {
 		t.Fatal(err)
@@ -51,7 +58,7 @@ func addSession(t *testing.T, d *db.DB, uuid, project, title string) {
 func addMsg(t *testing.T, d *db.DB, sess string, seq int, role, content string) {
 	t.Helper()
 	if _, err := d.Exec(`INSERT INTO messages(session_uuid, seq, ts, role, content, raw_json) VALUES (?,?,?,?,?,?)`,
-		sess, seq, time.Now().Unix(), role, content, "{}"); err != nil {
+		sess, seq, fixtureTS, role, content, "{}"); err != nil {
 		t.Fatal(err)
 	}
 }
