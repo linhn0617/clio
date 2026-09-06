@@ -46,7 +46,11 @@ func extractTargets(toolName string, input json.RawMessage) []model.ToolTarget {
 	if !ok || strings.TrimSpace(v) == "" {
 		return out
 	}
-	return append(out, model.ToolTarget{Kind: spec.kind, Value: capValue(redactString(v))})
+	value := capValue(redactString(v))
+	if strings.TrimSpace(value) == "" {
+		return out // the value was nothing but a private block: no empty fact
+	}
+	return append(out, model.ToolTarget{Kind: spec.kind, Value: value})
 }
 
 // NormalizeTargetPath turns an absolute path into the exact form extractTargets

@@ -196,6 +196,17 @@ func TestFileHistoryHookSilentWhenNothingFits(t *testing.T) {
 	}
 }
 
+// The cap holds on the encoded envelope: control characters in the path
+// expand to \uXXXX when JSON-encoded.
+func TestFileHistoryHookCapHoldsAfterEncoding(t *testing.T) {
+	weird := "/" + strings.Repeat("\x01", 1700) + "/gone.go" // never created → gate skipped
+	dbPath := seedFileHistoryDB(t, fileHistoryKey(weird), time.Now().Unix())
+	out := fileHistoryHook(readPayload(weird), dbPath, 10)
+	if n := len([]rune(out)); n > hookMaxChars {
+		t.Fatalf("encoded hook output is %d chars > %d", n, hookMaxChars)
+	}
+}
+
 func TestFormatFileHistoryCapped(t *testing.T) {
 	var rows []sessions.FileTouch
 	for i := 0; i < 200; i++ {

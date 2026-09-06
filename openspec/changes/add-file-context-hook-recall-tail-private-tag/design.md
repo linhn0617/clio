@@ -300,6 +300,13 @@ inject into a Claude Code session.
   leaf (measured ~10.3 s for the same input), so the change doubles a stall that already
   existed rather than creating one; recorded as a `debt:` comment at the call site and
   as a follow-up (bound the probe count per string). Raised by the codex review.
+- [A message or tool-input value that is nothing but a private block] → not stored at all
+  (the emptiness check runs after redaction, codex pr-review), so it never counts as a
+  turn and leaves no empty activity fact.
+- [The hook's 8,000-character cap is enforced on the JSON-encoded envelope, shrinking
+  the digest until the encoding fits] → JSON escaping of control characters in a
+  pathological path could otherwise push the output past Claude Code's 10,000 limit
+  (codex pr-review).
 - [A `<private>` that spans a tool_result's nested content blocks is stripped from the
   joined `content` but survives in `raw_json`] → documented asymmetry of an unsupported
   form (spec scenario); consistent handling would need per-block stripping in

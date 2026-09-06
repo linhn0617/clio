@@ -247,6 +247,28 @@ func TestParsePrivateBlockInToolResultStripped(t *testing.T) {
 	}
 }
 
+// A message that is nothing but a private block is not stored at all (it
+// would otherwise be an empty turn that still counts toward turn_count).
+func TestParsePrivateOnlyMessageNotStored(t *testing.T) {
+	p := NewParser(0)
+	line := `{"type":"user","sessionId":"s1","message":{"role":"user","content":"<private>secret</private>"}}`
+	msgs, _ := parseOne(t, p, line)
+	if len(msgs) != 0 {
+		t.Fatalf("private-only message must not be stored, got %+v", msgs)
+	}
+	// The same for a private-only tool input: no empty command fact.
+	toolLine := `{"type":"assistant","sessionId":"s1","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"<private>secret</private>"}}]}}`
+	msgs, _ = parseOne(t, p, toolLine)
+	if len(msgs) != 1 {
+		t.Fatalf("tool_use row still expected, got %+v", msgs)
+	}
+	for _, tg := range msgs[0].Targets {
+		if tg.Kind == model.TargetCommand {
+			t.Errorf("no command fact should be stored for a private-only command, got %q", tg.Value)
+		}
+	}
+}
+
 // Tool-input summaries are truncated to 200 bytes; the private span must be
 // gone before that cut, or a long block leaves its head in messages.content.
 func TestParsePrivateBlockInLongToolInputStripped(t *testing.T) {
@@ -266,16 +288,22 @@ func TestParsePrivateBlockInLongToolInputStripped(t *testing.T) {
 }
 
 // A tool_result's nested blocks are joined before redaction, so a span across
-// them is stripped from content while raw_json keeps both halves (documented).
+// them is one private element: with nothing else in the result, no row is
+// stored at all (and so no raw_json either). With surrounding text the row is
+// kept and only the joined content loses the span.
 func TestParsePrivateBlockAcrossToolResultBlocks(t *testing.T) {
 	p := NewParser(0)
 	line := `{"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"<private>alpha"},{"type":"text","text":"beta</private>"}]}]}}`
+	if msgs, _ := parseOne(t, p, line); len(msgs) != 0 {
+		t.Fatalf("private-only joined result must not be stored, got %+v", msgs)
+	}
+	line = `{"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":[{"type":"text","text":"head <private>alpha"},{"type":"text","text":"beta</private> tail"}]}]}}`
 	msgs, _ := parseOne(t, p, line)
 	if len(msgs) != 1 || msgs[0].Role != model.RoleToolResult {
 		t.Fatalf("want one tool_result, got %+v", msgs)
 	}
-	if strings.Contains(msgs[0].Content, "alpha") || strings.Contains(msgs[0].Content, "beta") {
-		t.Errorf("joined content should have the span removed: %q", msgs[0].Content)
+	if strings.Contains(msgs[0].Content, "alpha") || strings.Contains(msgs[0].Content, "beta") || !strings.Contains(msgs[0].Content, "tail") {
+		t.Errorf("joined content should lose the span and keep the rest: %q", msgs[0].Content)
 	}
 	if !strings.Contains(msgs[0].RawJSON, "alpha") || !strings.Contains(msgs[0].RawJSON, "beta") {
 		t.Errorf("raw_json walks blocks separately and keeps both halves: %s", msgs[0].RawJSON)

@@ -98,10 +98,28 @@ func fileHistoryHook(payload []byte, dbPath string, limit int) string {
 	if fi, err := os.Stat(p.ToolInput.FilePath); err == nil && fi.ModTime().Unix() > newest {
 		return ""
 	}
-	digest := formatFileHistoryCapped(p.ToolInput.FilePath, rows, hookMaxChars)
-	if digest == "" {
-		return "" // nothing fits the cap: stay silent rather than send an empty context
+	// The cap must hold on the ENCODED envelope: JSON escaping can expand a
+	// pathological path (control characters → \uXXXX) well past the digest's
+	// own length, and Claude Code measures its 10,000-character limit on what
+	// it receives. Shrink the digest until the encoding fits.
+	for budget := hookMaxChars; budget > 0; budget = budget * 3 / 4 {
+		digest := formatFileHistoryCapped(p.ToolInput.FilePath, rows, budget)
+		if digest == "" {
+			return "" // nothing fits: stay silent rather than send an empty context
+		}
+		out := encodeHookEnvelope(digest)
+		if out == "" {
+			return ""
+		}
+		if len([]rune(out)) <= hookMaxChars {
+			return out
+		}
 	}
+	return ""
+}
+
+// encodeHookEnvelope wraps the digest in Claude Code's PreToolUse output shape.
+func encodeHookEnvelope(digest string) string {
 	env := map[string]any{
 		"hookSpecificOutput": map[string]any{
 			"hookEventName":     "PreToolUse",

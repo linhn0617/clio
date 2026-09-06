@@ -43,10 +43,18 @@ same way when they are strings or string leaves.
 
 #### Scenario: Block spanning a tool_result's nested blocks
 
-- **WHEN** a tool_result's `content` array holds `<private>alpha` and `beta</private>` as
-  two text blocks
-- **THEN** the stored `content` (the joined text) SHALL have the element removed, and
-  `raw_json` SHALL keep both halves (documented asymmetry of the unsupported form)
+- **WHEN** a tool_result's `content` array holds `head <private>alpha` and
+  `beta</private> tail` as two text blocks
+- **THEN** the stored `content` (the joined text) SHALL have the element removed and
+  keep `head`/`tail`, and `raw_json` SHALL keep both halves (documented asymmetry of
+  the unsupported form)
+
+#### Scenario: Message that is only a private block
+
+- **WHEN** a user message, or a tool input value, is nothing but
+  `<private>secret</private>`
+- **THEN** no message row (and no activity fact) SHALL be stored for it, so it never
+  counts as a turn
 
 #### Scenario: Applies to other sources
 
