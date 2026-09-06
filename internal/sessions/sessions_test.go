@@ -682,3 +682,188 @@ func TestActivitySummaryCountsParentAndChildrenAsOne(t *testing.T) {
 		t.Fatalf("both messages should still count, got %d", buckets[0].Messages)
 	}
 }
+
+// addSessionAt inserts a top-level session with an explicit ended_at so tests
+// can pin recency order instead of racing time.Now().
+func addSessionAt(t *testing.T, d *db.DB, uuid, project string, endedAt int64, parent string) {
+	t.Helper()
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session) VALUES (?,?,?,?,?,?,?,?)`,
+		uuid, project, uuid+".jsonl", endedAt-60, endedAt, 2, "title-"+uuid, nullIfEmpty(parent)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// The recall digest opens with the last assistant *text* message of the newest
+// session as ListSessions orders it; tool_use rows are not text.
+func TestGetRecallLastAssistantText(t *testing.T) {
+	d := testDB(t)
+	addSessionAt(t, d, "old", "/proj", 1000, "")
+	addSessionAt(t, d, "new", "/proj", 2000, "")
+	addMsg(t, d, "old", 0, "assistant", "old closing words")
+	addMsg(t, d, "new", 0, "user", "do the thing")
+	addMsg(t, d, "new", 1, "assistant", "Done: the thing. Next: the other thing.")
+	addMsg(t, d, "new", 2, "tool_use", "Bash go test ./...")
+
+	r, err := GetRecall(context.Background(), d, "/proj", 0, 5, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.LastAssistant == nil {
+		t.Fatal("expected a last-assistant excerpt")
+	}
+	if r.LastAssistant.SessionUUID != "new" || r.LastAssistant.Text != "Done: the thing. Next: the other thing." {
+		t.Fatalf("got %+v", *r.LastAssistant)
+	}
+	if r.LastAssistant.TS == 0 {
+		t.Fatal("excerpt should carry the message timestamp")
+	}
+}
+
+// The excerpt ignores the activity window: a session older than --since still
+// supplies "where we left off" even though Recent sessions is empty.
+func TestGetRecallExcerptIgnoresSince(t *testing.T) {
+	d := testDB(t)
+	fourWeeksAgo := time.Now().Add(-28 * 24 * time.Hour).Unix()
+	addSessionAt(t, d, "old", "/proj", fourWeeksAgo, "")
+	if _, err := d.Exec(`INSERT INTO messages(session_uuid, seq, ts, role, content, raw_json) VALUES ('old',0,?, 'assistant','Finished migration','{}')`, fourWeeksAgo); err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now().Add(-14 * 24 * time.Hour).Unix()
+	r, err := GetRecall(context.Background(), d, "/proj", since, 5, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Sessions) != 0 {
+		t.Fatalf("Recent sessions stays since-bounded: %+v", r.Sessions)
+	}
+	if r.LastAssistant == nil || r.LastAssistant.Text != "Finished migration" {
+		t.Fatalf("excerpt must survive the since window: %+v", r.LastAssistant)
+	}
+
+	// The fallback keeps the digest's page size: a child newer than its (present,
+	// also-idle) parent must still be nested, not promoted by a Limit-1 page.
+	addSessionAt(t, d, "idle-child", "/proj", fourWeeksAgo+10, "old")
+	if _, err := d.Exec(`INSERT INTO messages(session_uuid, seq, ts, role, content, raw_json) VALUES ('idle-child',0,?, 'assistant','child words','{}')`, fourWeeksAgo+10); err != nil {
+		t.Fatal(err)
+	}
+	r, err = GetRecall(context.Background(), d, "/proj", since, 5, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.LastAssistant == nil || r.LastAssistant.SessionUUID != "old" {
+		t.Fatalf("fallback page must nest the child under its parent: %+v", r.LastAssistant)
+	}
+}
+
+// Inside the window the excerpt is the digest's own first row, even when the
+// since-bounded and unbounded listings would nest subagents differently
+// (codex review: child C newer than top-level T, parent P outside the window).
+func TestGetRecallExcerptMatchesDigestFirstRow(t *testing.T) {
+	d := testDB(t)
+	addSessionAt(t, d, "P", "/proj", 50, "")
+	addSessionAt(t, d, "T", "/proj", 200, "")
+	addSessionAt(t, d, "C", "/proj", 300, "P")
+	addMsg(t, d, "P", 0, "assistant", "p words")
+	addMsg(t, d, "T", 0, "assistant", "t words")
+	addMsg(t, d, "C", 0, "assistant", "c words")
+	r, err := GetRecall(context.Background(), d, "/proj", 100, 5, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Sessions) == 0 || r.Sessions[0].UUID != "C" {
+		t.Fatalf("since-bounded listing should promote C first: %+v", r.Sessions)
+	}
+	if r.LastAssistant == nil || r.LastAssistant.SessionUUID != "C" {
+		t.Fatalf("excerpt must come from the digest's first row: %+v", r.LastAssistant)
+	}
+}
+
+// A trailing blank assistant row must not hide the real closing text.
+func TestGetRecallSkipsBlankAssistantRow(t *testing.T) {
+	d := testDB(t)
+	addSessionAt(t, d, "s", "/proj", 1000, "")
+	addMsg(t, d, "s", 0, "assistant", "Done")
+	addMsg(t, d, "s", 1, "assistant", "   ")
+	r, err := GetRecall(context.Background(), d, "/proj", 0, 5, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.LastAssistant == nil || r.LastAssistant.Text != "Done" {
+		t.Fatalf("blank row should be skipped: %+v", r.LastAssistant)
+	}
+}
+
+// An undated message row falls back to the session's end time; equal ended_at
+// resolves by uuid DESC, matching ListSessions.
+func TestGetRecallExcerptTSFallbackAndTiebreak(t *testing.T) {
+	d := testDB(t)
+	addSessionAt(t, d, "aaa", "/proj", 2000, "")
+	addSessionAt(t, d, "zzz", "/proj", 2000, "")
+	if _, err := d.Exec(`INSERT INTO messages(session_uuid, seq, ts, role, content, raw_json) VALUES ('zzz',0,NULL,'assistant','Done','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	addMsg(t, d, "aaa", 0, "assistant", "not me")
+	r, err := GetRecall(context.Background(), d, "/proj", 0, 5, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.LastAssistant == nil || r.LastAssistant.SessionUUID != "zzz" {
+		t.Fatalf("uuid DESC tiebreak should pick zzz: %+v", r.LastAssistant)
+	}
+	if r.LastAssistant.TS != 2000 {
+		t.Fatalf("NULL ts should fall back to ended_at=2000, got %d", r.LastAssistant.TS)
+	}
+}
+
+func TestGetRecallNoAssistantTextIsNil(t *testing.T) {
+	d := testDB(t)
+	addSessionAt(t, d, "s", "/proj", 1000, "")
+	addMsg(t, d, "s", 0, "user", "hello")
+	addMsg(t, d, "s", 1, "tool_use", "Bash ls")
+	r, err := GetRecall(context.Background(), d, "/proj", 0, 5, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.LastAssistant != nil {
+		t.Fatalf("no assistant text → nil, got %+v", *r.LastAssistant)
+	}
+	if len(r.Sessions) != 1 {
+		t.Fatalf("rest of the digest must still be built: %+v", r.Sessions)
+	}
+}
+
+// A subagent child newer than its present parent is hidden by ListSessions, so
+// the excerpt comes from the parent; an orphan child (parent absent) is promoted
+// and supplies the excerpt, matching what `clio list` shows first.
+func TestGetRecallNewestFollowsListSessions(t *testing.T) {
+	d := testDB(t)
+	addSessionAt(t, d, "parent", "/proj", 1000, "")
+	addSessionAt(t, d, "child", "/proj", 2000, "parent")
+	addMsg(t, d, "parent", 0, "assistant", "parent words")
+	addMsg(t, d, "child", 0, "assistant", "child words")
+	r, err := GetRecall(context.Background(), d, "/proj", 0, 5, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.LastAssistant == nil || r.LastAssistant.SessionUUID != "parent" {
+		t.Fatalf("child of a present parent must not win: %+v", r.LastAssistant)
+	}
+
+	d2 := testDB(t)
+	addSessionAt(t, d2, "orphan", "/proj", 2000, "gone-parent")
+	addMsg(t, d2, "orphan", 0, "assistant", "orphan words")
+	r2, err := GetRecall(context.Background(), d2, "/proj", 0, 5, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r2.LastAssistant == nil || r2.LastAssistant.SessionUUID != "orphan" {
+		t.Fatalf("promoted orphan should supply the excerpt: %+v", r2.LastAssistant)
+	}
+}

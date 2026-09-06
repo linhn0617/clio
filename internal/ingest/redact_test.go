@@ -422,3 +422,46 @@ func TestRedactConnstringDelimiters(t *testing.T) {
 		}
 	}
 }
+
+// <private>…</private> is a user-level opt-out: the whole element, content
+// included, must vanish before any secret/JSON handling sees it.
+func TestStripPrivateViaRedactString(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"single block", "plan the migration <private>the customer is Acme</private> by Friday", "plan the migration  by Friday"},
+		{"two blocks", "a <private>x</private> b <private>y</private> c", "a  b  c"},
+		{"case-insensitive tag", "a <PRIVATE>x</Private> b", "a  b"},
+		{"tag with attributes", `a <private reason="nda">x</private> b`, "a  b"},
+		{"spans newlines", "a <private>\nline1\nline2\n</private> b", "a  b"},
+		{"unterminated opener left intact", "a <private>x b", "a <private>x b"},
+		{"closing tag alone left intact", "a x</private> b", "a x</private> b"},
+		{"JSON object inside block removed whole", `before <private>{"customer":"Acme"}</private> after`, "before  after"},
+		{"JSON array inside block removed whole", `before <private>[{"k":"Acme"}]</private> after`, "before  after"},
+		{"self-closing tag is not an opener", "x <private/> y <private>s</private> z", "x <private/> y  z"},
+		{"self-closing with attributes is not an opener", `x <private reason="a"/> y <private>s</private> z`, `x <private reason="a"/> y  z`},
+		{"closing tag with trailing whitespace", "x <private>s</private > y", "x  y"},
+		{"nested blocks removed as one element", "x <private>alpha <private>beta</private> gamma</private> y", "x  y"},
+		{"nested then sibling", "x <private><private>s</private></private> y <private>t</private> z", "x  y  z"},
+		{"unterminated after a closed block keeps the tail", "a <private>x</private> b <private>y", "a  b <private>y"},
+	}
+	for _, c := range cases {
+		if got := redactString(c.in); got != c.want {
+			t.Errorf("%s: redactString(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+func TestStripPrivateHidesSecretWithoutMarker(t *testing.T) {
+	got := redactString("key: <private>sk-aaaaaaaaaaaaaaaaaaaaaaaa</private> done")
+	if strings.Contains(got, "REDACTED") || strings.Contains(got, "sk-") {
+		t.Errorf("secret inside a private block must vanish without a marker, got %q", got)
+	}
+}
+
+// redactJSON's decode-failure fallback bypasses redactString, so it must strip
+// <private> on its own (design D8).
+func TestStripPrivateOnRedactJSONFallback(t *testing.T) {
+	got := string(redactJSON([]byte(`not json <private>Acme</private> tail`)))
+	if strings.Contains(got, "Acme") {
+		t.Errorf("fallback path leaked private content: %q", got)
+	}
+}

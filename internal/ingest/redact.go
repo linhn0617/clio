@@ -55,6 +55,63 @@ var redactRules = []redactRule{
 	{regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:[^\s:/@]+@[^\s'")>\]},;]+`), "[REDACTED:connstring]"},
 }
 
+// privateOpenRe / privateCloseRe delimit a user-marked <private>…</private>
+// element. A self-closing <private/> is not an opener (it would otherwise
+// swallow everything up to the next closing tag); the closing tag may carry
+// trailing whitespace.
+var (
+	privateOpenRe  = regexp.MustCompile(`(?i)<private(?:\s[^>]*[^/>])?\s*>`)
+	privateCloseRe = regexp.MustCompile(`(?i)</private\s*>`)
+)
+
+// stripPrivate removes every <private> element from s, content included. It
+// tracks nesting depth so an inner <private> never ends the outer element
+// early (a non-greedy regex would leave the outer tail indexed — caught by the
+// final whole-change verifier). Two sibling blocks remove exactly two spans;
+// an unterminated opener leaves the text from that opener on intact. It runs
+// before secret redaction so a secret inside a private block vanishes without
+// leaving a [REDACTED:…] marker that would reveal one was there. The scan is
+// block-local by construction: it only ever sees one string.
+// debt: with thousands of NESTED openers before one closer the inner loop
+// rescans to that closer once per opener (measured 40k nested → ~2.6 s);
+// unclosed or sibling blocks stay linear. If a transcript ever trips this,
+// pre-index closer positions instead of re-searching.
+func stripPrivate(s string) string {
+	if strings.IndexByte(s, '<') < 0 {
+		return s // no tag at all: skip the scan on every plain message
+	}
+	var out strings.Builder
+	pos := 0
+	for {
+		open := privateOpenRe.FindStringIndex(s[pos:])
+		if open == nil {
+			break
+		}
+		start, i := pos+open[0], pos+open[1]
+		depth := 1
+		for depth > 0 {
+			close := privateCloseRe.FindStringIndex(s[i:])
+			if close == nil {
+				break // unterminated: nothing from `start` on is removed
+			}
+			if inner := privateOpenRe.FindStringIndex(s[i : i+close[0]]); inner != nil {
+				depth++
+				i += inner[1]
+				continue
+			}
+			depth--
+			i += close[1]
+		}
+		if depth > 0 {
+			break
+		}
+		out.WriteString(s[pos:start])
+		pos = i
+	}
+	out.WriteString(s[pos:])
+	return out.String()
+}
+
 // Redact replaces recognized secret patterns in s. It is intentionally
 // conservative; see redactRules.
 func Redact(s string) string {
@@ -103,6 +160,10 @@ func isSecretKey(k string) bool {
 // surrounding prose), and applies the shape regexes to the non-JSON text around
 // those spans. Free-text secrets with no recognizable shape are best-effort.
 func redactString(s string) string {
+	// Strip <private> first, while the string is still whole: the JSON split
+	// below would otherwise hand a private block containing JSON to the regex
+	// in pieces that never match.
+	s = stripPrivate(s)
 	if !strings.ContainsAny(s, "{[") {
 		return Redact(s) // fast path: no JSON to find
 	}
@@ -155,7 +216,9 @@ func redactJSON(line []byte) []byte {
 	if result, ok := redactJSONValue(line); ok {
 		return []byte(result)
 	}
-	return []byte(Redact(string(line)))
+	// This is the one persisted-text path that bypasses redactString, so it
+	// strips <private> itself to keep the invariant.
+	return []byte(Redact(stripPrivate(string(line))))
 }
 
 // redactJSONValue decodes b as JSON, walks it with redactWalk, and re-encodes

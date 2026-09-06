@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/linhn0617/clio/internal/db"
+	"github.com/linhn0617/clio/internal/search"
 )
 
 const (
@@ -1426,5 +1427,37 @@ func TestIngestTitleFallsBackWhenOnlyBoilerplate(t *testing.T) {
 	}
 	if title != "" {
 		t.Fatalf("title=%q, want empty (no substantive user text in the whole session)", title)
+	}
+}
+
+// End-to-end: a <private> span never reaches the FTS index.
+func TestIngestPrivateBlockNotSearchable(t *testing.T) {
+	projects := t.TempDir()
+	ev := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/Users/lin/Herd/x","sessionId":"priv-1","message":{"role":"user","content":"plan the migration <private>the customer is Acme</private> by Friday"}}`
+	writeSession(t, projects, "-Users-lin-Herd-x", "priv-1", ev)
+	database := openTestDB(t)
+	if _, err := New(database, nil).IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := search.Search(context.Background(), database, search.Options{Query: "Acme", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("private content is searchable: %+v", hits)
+	}
+	hits, err = search.Search(context.Background(), database, search.Options{Query: "migration", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("surrounding text must stay searchable, got %d hits", len(hits))
+	}
+	var raw string
+	if err := database.QueryRow(`SELECT raw_json FROM messages WHERE session_uuid='priv-1'`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(raw, "Acme") {
+		t.Fatalf("raw_json still carries private content: %s", raw)
 	}
 }

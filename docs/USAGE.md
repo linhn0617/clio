@@ -374,14 +374,38 @@ clio index            # incremental / 增量
 clio index --full     # rebuild from scratch / 從頭重建
 ```
 
+### `clio file-history <path>` — who touched this file / 誰動過這個檔
+
+```bash
+clio file-history internal/search/rank.go          # sessions that read/edited it, newest first / 讀過或改過它的 session，最新在前
+clio file-history internal/search/rank.go --since 30d --limit 5
+```
+
+```
+clio — past sessions that touched /Users/lin/Herd/clio/internal/search/rank.go
+  - 2026-09-06 10:36  https://github.com/thedotmack/claude-mem 看一下這個 repo 專案與我的 cl… (a11f08b2)  Read
+(Details: clio show <id>, or the clio MCP read_session tool.)
+```
+
+EN: exact path match (relative paths resolve against the working directory); subagent
+activity rolls up to the parent session; prints nothing (exit 0) when the file has no
+indexed history. With `--hook` it reads a Claude Code PreToolUse payload from stdin
+instead and answers in hook JSON — that is what `install-hook` registers.
+
+中文：路徑精確比對（相對路徑以工作目錄解析）；子代理的活動併到父 session；檔案沒有索引
+紀錄時不印任何東西（exit 0）。加 `--hook` 時改從 stdin 讀 Claude Code 的 PreToolUse
+payload、以 hook JSON 回答——`install-hook` 註冊的就是這個形式。
+
 ### Other commands / 其他指令
 
 ```bash
 clio install-mcp      # index + register MCP in ~/.claude.json / 索引並註冊 MCP
 clio uninstall-mcp    # remove clio from ~/.claude.json (keeps your data) / 移除整合（不刪資料）
-clio recall           # recent-activity digest for the current project / 目前專案的近況摘要
-clio install-hook     # opt in: inject the recall digest at each session start / 啟用：每個 session 開始注入近況摘要
-clio uninstall-hook   # remove the recall SessionStart hook / 移除近況 SessionStart hook
+clio recall           # recent-activity digest, headed by the last session's closing message / 近況摘要，開頭是上一個 session 的收尾訊息
+clio recall --tail-runes 0            # ...without that closing-message section / 不要收尾訊息那一節
+clio install-hook     # opt in: recall at SessionStart + file-history before each Read / 啟用：開場 recall ＋ 讀檔前的 file-history
+clio install-hook --no-file-context   # recall hook only (also removes a file-history hook installed earlier) / 只裝 recall hook（並移除先前裝的 file-history hook）
+clio uninstall-hook   # remove both clio hooks / 移除 clio 的兩個 hook
 clio doctor           # diagnose paths, DB integrity, ingest health / 健康檢查
 clio mcp              # run the stdio MCP server (Claude Code launches this) / 跑 MCP server（通常由 Claude Code 啟動）
 ```
@@ -444,6 +468,14 @@ EN:
 - Read-only against `~/.claude/projects/`; your original files are never modified.
 - Secret patterns (API keys, tokens, private keys, `.env` lines) are redacted at
   ingest, in both searchable text and the stored raw event.
+- `<private>…</private>` in a prompt or a file Claude reads removes the whole
+  element (content included) from the index — searchable text, stored raw event
+  and session title. Claude Code still saw it; the transcript file is untouched.
+  Literal open/close pairs inside one message, nesting allowed; already-indexed
+  sessions need `clio index --full`.
+- The SessionStart hook injects the previous session's closing message verbatim
+  (not a summary; `clio recall --tail-runes 0` disables that section) and the
+  PreToolUse hook injects session titles; both come from your own index only.
 - All local; no telemetry, no cloud sync.
 - `install-mcp`/`install-hook`/`uninstall-*` *do* rewrite `~/.claude.json` /
   `~/.claude/settings.json` (read-modify-atomic-write, with a `.bak` of the
@@ -459,6 +491,12 @@ EN:
 - 對 `~/.claude/projects/` 唯讀；絕不修改你的原始檔。
 - ingest 時遮蔽機密（API key、token、private key、`.env` 行），可搜尋文字與儲存的
   原始事件都會處理。
+- prompt 或 Claude 讀到的檔案裡的 `<private>…</private>` 會把整個元素（含內容）從索引
+  拿掉——可搜尋文字、儲存的原始事件與 session 標題。Claude Code 本身還是看過；逐字稿檔
+  不動。限同一則訊息內的字面開閉標籤，可巢狀；已索引的 session 要 `clio index --full`。
+- SessionStart hook 注入的是上一個 session 收尾訊息的原文（不是摘要；`clio recall
+  --tail-runes 0` 可關掉那一節），PreToolUse hook 注入的是 session 標題；都只來自你自己
+  的索引。
 - 全部本機；無遙測、無雲端同步。
 - `install-mcp`/`install-hook`/`uninstall-*` **會**改寫 `~/.claude.json` /
   `~/.claude/settings.json`（read-modify-atomic-write，並保留改動前內容的
@@ -488,8 +526,9 @@ clio list [--since 7d] [--project X] [--min-turns N] [--touched P] [--tool T] [-
 clio show <uuid-or-prefix> [--format markdown|json|raw] [--no-tool-output]
 clio activity --by file|command|tool|pattern|url [--since 7d] [--project X]
 clio index [--full]                              # (re)index manually
-clio recall                                      # recent-activity digest (current project)
+clio recall [--tail-runes N]                     # recent-activity digest (current project), headed by the last session's closing message
+clio file-history <path> [--since 7d] [--limit N] # sessions that touched a file, newest first
 clio doctor                                      # health check
 clio uninstall-mcp                               # remove MCP integration
-clio install-hook / uninstall-hook               # opt in/out of the session-start recall digest
+clio install-hook [--no-file-context] / uninstall-hook   # opt in/out of the SessionStart recall + PreToolUse file-history hooks
 ```

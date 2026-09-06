@@ -228,7 +228,14 @@ func toolUseSummary(input json.RawMessage) string {
 	for _, k := range []string{"command", "file_path", "path", "pattern", "query", "url", "description"} {
 		if v, ok := m[k]; ok {
 			if s, ok := v.(string); ok && s != "" {
-				return redactString(firstLine(s, 200))
+				// Redact (and strip <private>) before truncating, as codex.go does:
+				// cutting first can drop a closing tag or split a secret so neither
+				// pattern matches on the remainder.
+				// debt: redactString probes a JSON decoder at every '{'/'[' and is
+				// near-quadratic on bracket floods (100k '[' ≈ 10 s); the raw_json walk
+				// already pays this for the same string, so this call doubles it. If
+				// ingest stalls on such a transcript, cap the probes per string.
+				return firstLine(redactString(s), 200)
 			}
 		}
 	}

@@ -2126,3 +2126,35 @@ func TestGeminiRealSampleWithAssistantEndToEndConversation(t *testing.T) {
 		t.Fatalf("user seq=%d, assistant seq=%d — want the question before the reply", userSeq, asstSeq)
 	}
 }
+
+// <private> stripping is source-independent: a Gemini transcript loses the span too.
+func TestGeminiPrivateBlockStripped(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "priv-proj", "chats")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const uuid = "33333333-cccc-4ccc-8ccc-cccccccccccc"
+	lines := `{"sessionId":"` + uuid + `","projectHash":"cafef00d","startTime":"2026-09-06T11:00:00.000Z","lastUpdated":"2026-09-06T11:00:01.000Z","kind":"main"}
+{"$set":{"messages":[{"id":"m1","timestamp":"2026-09-06T11:00:01.000Z","type":"user","content":[{"text":"show literal <private>sample</private> markup"}]}],"lastUpdated":"2026-09-06T11:00:01.000Z"}}
+`
+	if err := os.WriteFile(filepath.Join(dir, "session-2026-09-06T11-00-3333cccc.jsonl"), []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	database := openTestDB(t)
+	ing := New(database, nil)
+	ing.AddSource(geminiSource{root: root})
+	if _, err := ing.IngestAll(context.Background(), t.TempDir(), false); err != nil {
+		t.Fatal(err)
+	}
+	var content, raw string
+	if err := database.QueryRow(`SELECT content, raw_json FROM messages WHERE session_uuid=? AND role='user'`, uuid).Scan(&content, &raw); err != nil {
+		t.Fatalf("gemini user message not indexed: %v", err)
+	}
+	if strings.Contains(content, "sample") || strings.Contains(raw, "sample") {
+		t.Errorf("private span survived in a Gemini transcript: content=%q", content)
+	}
+	if !strings.Contains(content, "show literal") {
+		t.Errorf("surrounding text lost: %q", content)
+	}
+}

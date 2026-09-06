@@ -296,3 +296,27 @@ func activityRows(t *testing.T, database *db.DB, sess string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// The file-history lookup key must be built exactly like the stored value.
+func TestNormalizeTargetPathMatchesStoredValue(t *testing.T) {
+	cases := []string{
+		"/Users/lin/Herd/clio/internal/search/rank.go",
+		"/tmp/token=sk-aaaaaaaaaaaaaaaaaaaaaaaa/notes.md", // redacted at ingest
+		"/deep/" + strings.Repeat("x", 600) + "/file.go",  // capped at ingest
+	}
+	for _, p := range cases {
+		input, _ := json.Marshal(map[string]string{"file_path": p})
+		var stored string
+		for _, tg := range extractTargets("Read", input) {
+			if tg.Kind == model.TargetFile {
+				stored = tg.Value
+			}
+		}
+		if stored == "" {
+			t.Fatalf("no file target extracted for %q", p)
+		}
+		if got := NormalizeTargetPath(p); got != stored {
+			t.Errorf("key %q != stored %q for %q", got, stored, p)
+		}
+	}
+}

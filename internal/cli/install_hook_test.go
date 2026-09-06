@@ -278,3 +278,156 @@ func TestUninstallHookRemovesOnlyClio(t *testing.T) {
 		t.Error("unrelated security-scan hook was wrongly removed")
 	}
 }
+
+func preToolUseCommands(t *testing.T, root map[string]any) []string {
+	t.Helper()
+	hooks, _ := root["hooks"].(map[string]any)
+	pt, _ := hooks["PreToolUse"].([]any)
+	var cmds []string
+	for _, g := range pt {
+		gm, ok := g.(map[string]any)
+		if !ok {
+			continue
+		}
+		hs, _ := gm["hooks"].([]any)
+		for _, h := range hs {
+			if c, ok := h.(map[string]any)["command"].(string); ok {
+				cmds = append(cmds, c)
+			}
+		}
+	}
+	return cmds
+}
+
+// install-hook registers both hooks by default; --no-file-context keeps only recall.
+func TestInstallHookRegistersBothAndNoFileContextFlag(t *testing.T) {
+	settingsPath := setupInstallHookHome(t)
+	stubClioExecutable(t)
+	if err := runInstallHook(t); err != nil {
+		t.Fatal(err)
+	}
+	root := readSettingsJSON(t, settingsPath)
+	if got := hookCommands(t, root); len(got) != 1 || got[0] != "/fake/bin/clio recall" {
+		t.Fatalf("SessionStart commands = %v", got)
+	}
+	if got := preToolUseCommands(t, root); len(got) != 1 || got[0] != "/fake/bin/clio file-history --hook" {
+		t.Fatalf("PreToolUse commands = %v", got)
+	}
+
+	settingsPath2 := setupInstallHookHome(t)
+	cmd := newInstallHookCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--no-file-context"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	root2 := readSettingsJSON(t, settingsPath2)
+	if len(hookCommands(t, root2)) != 1 || len(preToolUseCommands(t, root2)) != 0 {
+		t.Fatalf("--no-file-context should register only recall: ss=%v pt=%v", hookCommands(t, root2), preToolUseCommands(t, root2))
+	}
+
+	// Opting out after a full install removes the file-history hook again.
+	cmd = newInstallHookCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--no-file-context"})
+	t.Setenv("HOME", filepath.Dir(filepath.Dir(settingsPath)))
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got := preToolUseCommands(t, readSettingsJSON(t, settingsPath)); len(got) != 0 {
+		t.Fatalf("--no-file-context on a full install must remove the hook, got %v", got)
+	}
+}
+
+// A settings file from an older clio (recall only) gains just the PreToolUse hook.
+func TestInstallHookUpgradesRecallOnlyConfig(t *testing.T) {
+	settingsPath := setupInstallHookHome(t)
+	stubClioExecutable(t)
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	orig := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/fake/bin/clio recall"}]}]}}`
+	if err := os.WriteFile(settingsPath, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runInstallHook(t); err != nil {
+		t.Fatal(err)
+	}
+	root := readSettingsJSON(t, settingsPath)
+	if got := hookCommands(t, root); len(got) != 1 {
+		t.Fatalf("SessionStart must stay a single clio entry, got %v", got)
+	}
+	if got := preToolUseCommands(t, root); len(got) != 1 {
+		t.Fatalf("PreToolUse hook should be added once, got %v", got)
+	}
+}
+
+// install-hook never touches ~/.claude.json's MCP registration.
+func TestInstallHookLeavesClaudeJSONUntouched(t *testing.T) {
+	settingsPath := setupInstallHookHome(t)
+	stubClioExecutable(t)
+	claudeJSON := filepath.Join(filepath.Dir(filepath.Dir(settingsPath)), ".claude.json")
+	orig := []byte(`{"mcpServers":{"other":{"command":"/x/other"}},"numStartups":3}`)
+	if err := os.WriteFile(claudeJSON, orig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runInstallHook(t); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(claudeJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(orig) {
+		t.Fatalf("~/.claude.json changed:\n%s", after)
+	}
+}
+
+// A clio entry parked under another matcher never fires but must still be removable.
+func TestUninstallHookRemovesEntryUnderOtherMatcher(t *testing.T) {
+	settingsPath := setupInstallHookHome(t)
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte(`{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/fake/bin/clio file-history --hook"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newUninstallHookCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got := preToolUseCommands(t, readSettingsJSON(t, settingsPath)); len(got) != 0 {
+		t.Fatalf("misplaced clio entry should still be removed, got %v", got)
+	}
+}
+
+func TestUninstallHookRemovesBothHooks(t *testing.T) {
+	settingsPath := setupInstallHookHome(t)
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	orig := `{"hooks":{
+		"SessionStart":[{"hooks":[{"type":"command","command":"/fake/bin/clio recall"}]}],
+		"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"/opt/gate.sh"},{"type":"command","command":"/fake/bin/clio file-history --hook","timeout":10}]}]
+	}}`
+	if err := os.WriteFile(settingsPath, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newUninstallHookCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	root := readSettingsJSON(t, settingsPath)
+	if got := preToolUseCommands(t, root); len(got) != 1 || got[0] != "/opt/gate.sh" {
+		t.Fatalf("only the foreign PreToolUse hook should remain, got %v", got)
+	}
+	if got := hookCommands(t, root); len(got) != 0 {
+		t.Fatalf("SessionStart clio entry should be gone, got %v", got)
+	}
+}

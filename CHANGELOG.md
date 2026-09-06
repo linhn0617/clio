@@ -5,6 +5,47 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Three designs borrowed from a survey of claude-mem that give Claude cross-session
+context without any LLM call, daemon, vector store or network access (openspec
+change `add-file-context-hook-recall-tail-private-tag`).
+
+### Added
+
+- **`clio file-history <path>`** — the Claude Code sessions whose tool calls read
+  or edited one file, newest first, with the tools each used (exact path match on
+  the indexed `tool_targets`; subagent touches roll up to the parent). Silent
+  (exit 0) when there is no history or no index.
+- **PreToolUse(Read) hook** — `clio file-history --hook` reads the hook payload
+  from stdin and returns the file's timeline as `additionalContext`, so Claude
+  sees who touched a file before reading it. Guard rails: skipped when the file
+  on disk is newer than its newest indexed touch, the calling session's own
+  touches are excluded, output capped at 8,000 characters, 10-second hook
+  timeout, and every failure path is silent so a Read is never blocked.
+- **`<private>…</private>` opt-out at ingest** — the whole element, content
+  included, is removed from searchable text, stored raw events, tool summaries
+  and session titles across all sources. Block-local (one open/close pair inside
+  one message); `<private/>` is not an opener. Sessions indexed by an older
+  clio keep their text until `clio index --full`.
+
+### Changed
+
+- **`clio recall`** now opens with "Last session left off": the previous
+  session's final assistant message, verbatim, bounded by `--tail-runes`
+  (default 600, `0` omits). The excerpt follows the first row of the digest's
+  own session list and, when the project has been idle longer than `--since`,
+  falls back to the project's newest session so a long break still starts with
+  context.
+- **`clio install-hook`** registers both hooks in one atomic settings write
+  (`settings.json.bak` is the pre-install file); `--no-file-context` keeps only
+  the recall hook and removes a file-history hook installed earlier;
+  `uninstall-hook` removes both. Users of an older `install-hook` should re-run
+  it to add the file-history hook.
+- Tool-input summaries are now redacted before their 200-byte truncation
+  (matching the Codex adapter), so a long secret or `<private>` block can no
+  longer leave its head in the summary.
+
 ## [0.15.0] - 2026-07-26
 
 Reclaim disk space: `clio prune-raw` blanks stored raw_json for old sessions as
