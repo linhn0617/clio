@@ -34,6 +34,7 @@ func newRootCmd() *cobra.Command {
 		newAskCmd(),
 		newTUICmd(),
 		newRecallCmd(),
+		newFileHistoryCmd(),
 		newMCPCmd(),
 		newDoctorCmd(),
 		newInstallMCPCmd(),

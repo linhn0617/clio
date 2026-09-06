@@ -70,13 +70,19 @@ clio show <id> --include-subagents         # ...並內嵌其 Claude Code 子代�
 clio activity --by file --since 7d        # 動過的檔／跑過的指令／用過的工具
 clio search "race" --source codex          # 也索引／搜尋 OpenAI Codex CLI 歷史（opt-in；預設只看 Claude Code）
 clio activity --by command --source codex  # ...Codex 的指令／檔案／工具活動也能拆解
-clio recall                               # 目前專案的近況摘要
+clio recall                               # 目前專案的近況摘要（開頭是上一個 session 停在哪）
+clio file-history internal/search/rank.go  # 哪些過去的 session 讀過／改過這個檔，最新在前
 clio doctor                     # 健康檢查
 ```
 
 之後要移除整合：`clio uninstall-mcp`。
 
-想讓每個新 session 一開始就帶近況摘要？用 `clio install-hook` 啟用（`clio uninstall-hook` 移除）。
+想讓 Claude 自動在 session 之間帶上下文？用 `clio install-hook` 啟用（`clio uninstall-hook` 移除）。它會在 `~/.claude/settings.json` 註冊兩個 Claude Code hook：
+
+- **SessionStart → `clio recall`**：每個新 session 開場給專案的近期 session、檔案與指令，最前面是*上一個 session 的收尾訊息*（Claude 自己的最後一段話，原文照登、不是摘要，可能引述那個 session 當時在讀的東西；`--tail-runes 0` 可關掉這一節）。
+- **PreToolUse(Read) → `clio file-history --hook`**：Claude 讀某個檔之前，先看到哪些過去的 session 動過它、什麼時候、用什麼工具。檔案沒有索引紀錄、或檔案在最後一次索引紀錄之後又被改過就不注入；永遠不會擋住讀檔；索引暖的時候約 10 ms。
+
+`clio install-hook --no-file-context` 只裝 recall hook。舊版 clio 裝過 `install-hook` 的話，再跑一次就會補上 file-history hook。
 
 ## 索引如何保持最新
 
@@ -105,6 +111,8 @@ clio doctor                     # 健康檢查
 
 - 對 `~/.claude/projects/` 唯讀；絕不修改你的原始檔。
 - secret redaction 是 pattern 比對、盡力而為：ingest 時會遮蔽高信號形狀（API key、token、private key、`.env` 行），可搜尋文字與儲存的原始事件都會處理；不符合已知 pattern 的自由文字密碼不會被攔到。
+- **`<private>…</private>` 排除標記**：把 prompt（或 Claude 讀到的檔案）裡的任一段用字面的 `<private>` … `</private>` 包起來，clio 會把整個元素連內容一起從可搜尋文字、儲存的原始事件與 session 標題中拿掉。Claude Code 本身還是看過那段；受影響的只有 clio 的索引，原始逐字稿檔永遠不會被改。支援的形式：同一則訊息內的字面開閉標籤，可巢狀（跨兩個訊息區塊、HTML 轉義過的標籤、或 `<private/>` 都會原樣保留）。舊版 clio 索引過的 session 要 `clio index --full` 才會套用。
+- `recall` hook 注入的是上一個 session 收尾訊息的原文，`file-history` hook 注入的是 session 標題；兩者都只讀你自己的索引。
 - 把 clio 註冊為 MCP server 是全有或全無的授權：任何註冊了它的 client 都能透過工具讀到你完整的已索引歷史。
 - 所有資料留在本機；無遙測、無雲端同步。資料庫位於 `~/Library/Application Support/clio/db.sqlite`（macOS）或 `~/.local/share/clio/db.sqlite`（Linux），權限 `0600`。
 

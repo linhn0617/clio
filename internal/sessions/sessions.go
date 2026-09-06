@@ -348,12 +348,23 @@ func ActivityByKind(ctx context.Context, database *db.DB, kind string, since int
 	return out, rows.Err()
 }
 
+// TailExcerpt is the last assistant text message of a session: where Claude's
+// own closing words say the session left off.
+type TailExcerpt struct {
+	SessionUUID string
+	TS          int64
+	Text        string
+}
+
 // Recall bundles a project's recent sessions, recently touched files, and
 // recently run commands — the material for clio's session-start recall digest.
+// LastAssistant is the newest listed session's closing assistant text, nil
+// when that session has none.
 type Recall struct {
-	Sessions []Session
-	Files    []ActivityCount
-	Commands []ActivityCount
+	LastAssistant *TailExcerpt
+	Sessions      []Session
+	Files         []ActivityCount
+	Commands      []ActivityCount
 }
 
 // GetRecall gathers a project's recent sessions plus its most-touched files and
@@ -372,7 +383,39 @@ func GetRecall(ctx context.Context, database *db.DB, projectPrefix string, since
 	if err != nil {
 		return Recall{}, err
 	}
-	return Recall{Sessions: sess, Files: files, Commands: commands}, nil
+	r := Recall{Sessions: sess, Files: files, Commands: commands}
+	// The excerpt follows the digest's own first row so the two never disagree;
+	// only when the since window is empty does it fall back to the project's
+	// newest session regardless of `since` — after a long break is exactly when
+	// "where did we leave off" matters most. The fallback keeps the digest's page
+	// size: subagent nesting hides a child only when its parent is on the page,
+	// so a Limit of 1 would promote every child whose parent is merely older.
+	newest := sess
+	if len(newest) == 0 {
+		newest, err = ListSessions(ctx, database, ListFilter{ProjectPrefix: projectPrefix, Limit: limitSessions})
+		if err != nil {
+			return Recall{}, err
+		}
+	}
+	if len(newest) > 0 {
+		// role='assistant' rows carry text only; tool_use/thinking are separate
+		// roles. Blank rows cannot come from clio's own parsers (they drop empty
+		// content) but are skipped anyway so a stray one never hides real text.
+		var e TailExcerpt
+		err := database.QueryRowContext(ctx,
+			`SELECT session_uuid, COALESCE(ts,0), content FROM messages WHERE session_uuid = ? AND role = 'assistant' AND TRIM(content) <> '' ORDER BY seq DESC LIMIT 1`,
+			newest[0].UUID).Scan(&e.SessionUUID, &e.TS, &e.Text)
+		switch {
+		case err == nil:
+			if e.TS == 0 {
+				e.TS = newest[0].EndedAt // undated message row: fall back to the session's end
+			}
+			r.LastAssistant = &e
+		case err != sql.ErrNoRows:
+			return Recall{}, err
+		}
+	}
+	return r, nil
 }
 
 // Bucket is one row of an activity summary.

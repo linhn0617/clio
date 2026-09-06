@@ -2,6 +2,9 @@ package ingest
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -111,5 +114,33 @@ func TestCodexSessionIDFromPath(t *testing.T) {
 	got := s.SessionIDFromPath("/x/.codex/sessions/2026/06/19/rollout-2026-06-19T10-00-00-0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee.jsonl")
 	if got != codexTestUUID {
 		t.Fatalf("SessionIDFromPath=%q want %q", got, codexTestUUID)
+	}
+}
+
+// <private> stripping is source-independent: a Codex transcript loses the span too.
+func TestCodexSourcePrivateBlockStripped(t *testing.T) {
+	root := t.TempDir()
+	const uuid = "0199dddd-eeee-7fff-8aaa-bbbbbbbbbbbb"
+	lines := `{"timestamp":"2026-09-06T10:00:00Z","type":"session_meta","payload":{"id":"` + uuid + `","cwd":"/p"}}
+{"timestamp":"2026-09-06T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"show literal <private>sample</private> markup"}]}}
+`
+	if err := os.WriteFile(filepath.Join(root, "rollout-2026-09-06T10-00-00-"+uuid+".jsonl"), []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	database := openTestDB(t)
+	ing := New(database, nil)
+	ing.AddSource(codexSource{root: root})
+	if _, err := ing.IngestAll(context.Background(), t.TempDir(), false); err != nil {
+		t.Fatal(err)
+	}
+	var content, raw string
+	if err := database.QueryRow(`SELECT content, raw_json FROM messages WHERE session_uuid=? AND role='user'`, uuid).Scan(&content, &raw); err != nil {
+		t.Fatalf("codex user message not indexed: %v", err)
+	}
+	if strings.Contains(content, "sample") || strings.Contains(raw, "sample") {
+		t.Errorf("private span survived in a Codex transcript: content=%q", content)
+	}
+	if !strings.Contains(content, "show literal") || !strings.Contains(content, "markup") {
+		t.Errorf("surrounding text lost: %q", content)
 	}
 }

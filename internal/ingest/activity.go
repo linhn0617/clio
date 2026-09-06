@@ -46,7 +46,18 @@ func extractTargets(toolName string, input json.RawMessage) []model.ToolTarget {
 	if !ok || strings.TrimSpace(v) == "" {
 		return out
 	}
-	return append(out, model.ToolTarget{Kind: spec.kind, Value: capValue(redactString(v))})
+	value := capValue(redactString(v))
+	if strings.TrimSpace(value) == "" {
+		return out // the value was nothing but a private block: no empty fact
+	}
+	return append(out, model.ToolTarget{Kind: spec.kind, Value: value})
+}
+
+// NormalizeTargetPath turns an absolute path into the exact form extractTargets
+// stored for it (secret-redacted, then capped), so a lookup key built from a
+// path Claude passed later still matches rows written at ingest time.
+func NormalizeTargetPath(abs string) string {
+	return capValue(redactString(abs))
 }
 
 // capValue caps s at maxTargetValueBytes on a valid UTF-8 boundary.

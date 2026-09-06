@@ -21,6 +21,7 @@ func newRecallCmd() *cobra.Command {
 		project    string
 		since      string
 		limit      int
+		tailRunes  int
 		noCommands bool
 	)
 	cmd := &cobra.Command{
@@ -28,7 +29,7 @@ func newRecallCmd() *cobra.Command {
 		Short: "Print a recent-activity digest for the current project (used by the SessionStart hook)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Never break session startup: any failure yields empty output, exit 0.
-			if out := recallDigest(project, since, limit, noCommands); out != "" {
+			if out := recallDigest(project, since, limit, tailRunes, noCommands); out != "" {
 				fmt.Fprint(os.Stdout, out)
 			}
 			return nil
@@ -37,13 +38,14 @@ func newRecallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&project, "project", "", "Project path prefix (default: detected from the working directory)")
 	cmd.Flags().StringVar(&since, "since", "14d", "Look back this far for touched files and run commands")
 	cmd.Flags().IntVar(&limit, "limit", 5, "Max items per section")
+	cmd.Flags().IntVar(&tailRunes, "tail-runes", 600, "Max length of the last session's closing message excerpt (0 omits it)")
 	cmd.Flags().BoolVar(&noCommands, "no-commands", false, "Omit the recent-commands section")
 	return cmd
 }
 
 // recallDigest builds the digest text, swallowing every error (returns "" on any
 // problem) so the SessionStart hook can never break Claude Code startup.
-func recallDigest(project, since string, limit int, noCommands bool) string {
+func recallDigest(project, since string, limit, tailRunes int, noCommands bool) string {
 	if project == "" {
 		project = detectProject()
 	}
@@ -74,7 +76,29 @@ func recallDigest(project, since string, limit int, noCommands bool) string {
 	if noCommands {
 		r.Commands = nil
 	}
+	applyTailBound(&r, tailRunes)
 	return formatRecall(project, r)
+}
+
+// applyTailBound collapses the closing-message excerpt to one line and cuts it
+// at runes runes (with an ellipsis); 0 drops the section entirely.
+func applyTailBound(r *sessions.Recall, runes int) {
+	if r.LastAssistant == nil {
+		return
+	}
+	if runes <= 0 {
+		r.LastAssistant = nil
+		return
+	}
+	text := strings.Join(strings.Fields(r.LastAssistant.Text), " ")
+	if text == "" {
+		r.LastAssistant = nil // nothing to show: keep the no-history silence intact
+		return
+	}
+	if rs := []rune(text); len(rs) > runes {
+		text = string(rs[:runes]) + "…"
+	}
+	r.LastAssistant.Text = text
 }
 
 // detectProject resolves the current project: the SessionStart hook pipes a JSON
@@ -135,11 +159,14 @@ func parseHookCwd(data []byte) string {
 
 // formatRecall renders the digest, or "" when there is nothing to recall.
 func formatRecall(project string, r sessions.Recall) string {
-	if len(r.Sessions) == 0 && len(r.Files) == 0 && len(r.Commands) == 0 {
+	if r.LastAssistant == nil && len(r.Sessions) == 0 && len(r.Files) == 0 && len(r.Commands) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "clio — recent activity in %s\n", project)
+	if e := r.LastAssistant; e != nil && e.Text != "" {
+		fmt.Fprintf(&b, "Last session left off (%s, %s):\n  %s\n", formatTS(e.TS), shortID(e.SessionUUID), e.Text)
+	}
 	if len(r.Sessions) > 0 {
 		b.WriteString("Recent sessions:\n")
 		for _, s := range r.Sessions {

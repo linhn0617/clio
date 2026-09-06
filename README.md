@@ -72,14 +72,20 @@ clio activity --by file --since 7d         # files touched / commands run / tool
 clio search "race" --source codex          # also index & search OpenAI Codex CLI history (opt-in; default: Claude Code only)
 clio activity --by command --source codex  # ...and break down Codex commands / files / tools too
 clio usage --since 30d                     # token usage by session / project / model
-clio recall                                # recent-activity digest for the current project
+clio recall                                # recent-activity digest for the current project (opens with where the last session left off)
+clio file-history internal/search/rank.go  # which past sessions read/edited this file, newest first
 clio doctor                     # health check
 clio prune-raw --older-than 30d --vacuum   # reclaim space: blank restorable old raw_json (reversible via index --full)
 ```
 
 To remove the integration later: `clio uninstall-mcp`.
 
-Want each new session to open with a recent-activity digest? Opt in with `clio install-hook` (undo with `clio uninstall-hook`).
+Want Claude to carry context between sessions automatically? Opt in with `clio install-hook` (undo with `clio uninstall-hook`). It registers two Claude Code hooks in `~/.claude/settings.json`:
+
+- **SessionStart → `clio recall`**: each new session opens with the project's recent sessions, files and commands, headed by the *previous session's closing message* (Claude's own last words, verbatim — not a summary, and it may quote whatever that session was reading; `--tail-runes 0` turns that section off).
+- **PreToolUse(Read) → `clio file-history --hook`**: before Claude reads a file, it sees which past sessions touched that file, when, and with which tools. Skipped when the file has no indexed history or was modified after its last indexed touch; never blocks the read; ~10 ms on a warm index.
+
+`clio install-hook --no-file-context` keeps only the recall hook. If you ran `install-hook` with an older clio, run it again to add the file-history hook.
 
 ## How indexing stays current
 
@@ -106,6 +112,8 @@ Retrieval quality (ranking, FTS/LIKE tiering, `ask` grouping and windowing) is p
 
 - Read-only access to `~/.claude/projects/`; original files are never modified.
 - Secret redaction is pattern-based and best-effort: high-signal shapes (API keys, tokens, private keys, `.env` lines) are redacted at ingest time, in both the searchable text and the stored raw event. Free-form secrets that match no known pattern are not caught.
+- **`<private>…</private>` opt-out**: wrap any span of a prompt (or of a file Claude reads) in a literal `<private>` … `</private>` pair and clio drops the whole element, content included, from the searchable text, the stored raw event and the session title. Claude Code itself still saw it; only clio's index is affected, and the original transcript file is never edited. Supported form: literal open/close pairs inside one message, nesting allowed (an element split across two message blocks, an HTML-escaped tag, or `<private/>` is left as-is). Sessions indexed by an older clio keep their text until `clio index --full`.
+- The `recall` hook injects the previous session's closing message verbatim and the `file-history` hook injects session titles; both read only your own index.
 - Registering clio as an MCP server is an all-or-nothing grant: any client you register it with can read your entire indexed history through its tools.
 - All data stays on your machine; no telemetry, no cloud sync. The database lives at `~/Library/Application Support/clio/db.sqlite` (macOS) or `~/.local/share/clio/db.sqlite` (Linux), with `0600` permissions.
 
