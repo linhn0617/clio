@@ -5,7 +5,7 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.16.0] - 2026-09-06
 
 Three designs borrowed from a survey of claude-mem that give Claude cross-session
 context without any LLM call, daemon, vector store or network access (openspec
