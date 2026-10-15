@@ -74,19 +74,27 @@ func TestStdioPurityE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Collect stdout lines until the search response (id 3) shows up, with a
-	// deadline so a hung server fails the test instead of the suite.
+	// Collect stdout lines until all three responses (ids 1, 2, 3) have
+	// arrived — tool calls run on a worker and may be written before the
+	// inline initialize/tools/list replies, so order is not guaranteed — with
+	// a deadline so a hung server fails the test instead of the suite.
 	var stdout bytes.Buffer
 	var lines []string
 	done := make(chan error, 1)
 	go func() {
 		sc := bufio.NewScanner(stdoutPipe)
 		sc.Buffer(make([]byte, 0, 1<<20), 1<<20)
+		pending := map[string]bool{`"id":1`: true, `"id":2`: true, `"id":3`: true}
 		for sc.Scan() {
 			l := sc.Text()
 			stdout.WriteString(l + "\n")
 			lines = append(lines, l)
-			if strings.Contains(l, `"id":3`) {
+			for id := range pending {
+				if strings.Contains(l, id) {
+					delete(pending, id)
+				}
+			}
+			if len(pending) == 0 {
 				break
 			}
 		}
