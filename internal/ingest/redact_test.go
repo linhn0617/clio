@@ -442,6 +442,9 @@ func TestStripPrivateViaRedactString(t *testing.T) {
 		{"nested blocks removed as one element", "x <private>alpha <private>beta</private> gamma</private> y", "x  y"},
 		{"nested then sibling", "x <private><private>s</private></private> y <private>t</private> z", "x  y  z"},
 		{"unterminated after a closed block keeps the tail", "a <private>x</private> b <private>y", "a  b <private>y"},
+		{"stray opener before a complete element: element still removed", "mark it <private> later: <private>secret</private> end", "mark it <private> later:  end"},
+		{"stray closer, stray opener, then a complete element", "x </private> y <private> z <private>s</private> w", "x </private> y <private> z  w"},
+		{"two stray openers then a complete element", "<private> a <private> b <private>s</private> c", "<private> a <private> b  c"},
 	}
 	for _, c := range cases {
 		if got := redactString(c.in); got != c.want {
