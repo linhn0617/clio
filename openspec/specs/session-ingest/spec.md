@@ -906,6 +906,13 @@ same way when they are strings or string leaves.
 - **WHEN** a message contains `<private>` with no closing tag
 - **THEN** the message SHALL be stored unchanged apart from normal redaction
 
+#### Scenario: Stray opener before a complete element
+
+- **WHEN** a message contains a lone `<private>` (no closer) and, later in the same
+  message, a complete `<private>secret</private>`
+- **THEN** the lone opener SHALL stay as literal text and the complete element SHALL
+  still be removed, so `secret` is never stored
+
 #### Scenario: Self-closing tag
 
 - **WHEN** a message contains `x <private/> y <private>s</private> z`

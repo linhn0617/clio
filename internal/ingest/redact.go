@@ -103,7 +103,13 @@ func stripPrivate(s string) string {
 			i += close[1]
 		}
 		if depth > 0 {
-			break
+			// Unterminated: this opener is literal text. Keep it and resume
+			// the scan right after it, so a later complete element is still
+			// removed (a stray "<private>" earlier in a message must not
+			// shield the real one that follows — found on the live index).
+			out.WriteString(s[pos : start+(open[1]-open[0])])
+			pos = start + (open[1] - open[0])
+			continue
 		}
 		out.WriteString(s[pos:start])
 		pos = i
