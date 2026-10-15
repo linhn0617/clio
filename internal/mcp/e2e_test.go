@@ -1,13 +1,16 @@
 package mcp_test
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestStdioPurityE2E builds the real binary and drives it over stdio in an
@@ -49,15 +52,68 @@ func TestStdioPurityE2E(t *testing.T) {
 		"HOME="+home,
 		"XDG_DATA_HOME="+filepath.Join(home, "data"),
 	)
-	cmd.Stdin = strings.NewReader(input)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	// Drive the server like a real client: keep stdin open until every
+	// response has arrived. mcp-go >= 1.0 runs tool calls on a worker pool
+	// and cancels in-flight requests as soon as stdin hits EOF, so feeding
+	// the whole script from a closed reader makes the search call fail with
+	// "context canceled" before it can answer.
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("clio mcp failed: %v\nstderr: %s", err, stderr.String())
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("clio mcp failed to start: %v", err)
+	}
+	if _, err := io.WriteString(stdin, input); err != nil {
+		t.Fatal(err)
 	}
 
-	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	// Collect stdout lines until all three responses (ids 1, 2, 3) have
+	// arrived — tool calls run on a worker and may be written before the
+	// inline initialize/tools/list replies, so order is not guaranteed — with
+	// a deadline so a hung server fails the test instead of the suite.
+	var stdout bytes.Buffer
+	var lines []string
+	done := make(chan error, 1)
+	go func() {
+		sc := bufio.NewScanner(stdoutPipe)
+		sc.Buffer(make([]byte, 0, 1<<20), 1<<20)
+		pending := map[string]bool{`"id":1`: true, `"id":2`: true, `"id":3`: true}
+		for sc.Scan() {
+			l := sc.Text()
+			stdout.WriteString(l + "\n")
+			lines = append(lines, l)
+			for id := range pending {
+				if strings.Contains(l, id) {
+					delete(pending, id)
+				}
+			}
+			if len(pending) == 0 {
+				break
+			}
+		}
+		done <- sc.Err()
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("reading stdout: %v\nstderr: %s", err, stderr.String())
+		}
+	case <-time.After(30 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatalf("timed out waiting for the search response.\nstdout:\n%s\nstderr: %s", stdout.String(), stderr.String())
+	}
+	_ = stdin.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("clio mcp exited with error: %v\nstderr: %s", err, stderr.String())
+	}
+
 	if len(lines) < 3 {
 		t.Fatalf("expected >=3 JSON-RPC responses, got %d:\n%s", len(lines), stdout.String())
 	}
