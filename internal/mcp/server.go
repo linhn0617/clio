@@ -139,6 +139,12 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 }
 
 // Serve runs the server over stdio, blocking until the client disconnects.
+//
+// Tool calls run on a single worker: mcp-go >= 1.0 defaults to a pool that
+// handles calls concurrently, but every clio tool starts with a best-effort
+// catch-up ingest against the same SQLite file, and two of those racing
+// would contend for the writer lock for no benefit (the tools are read-only
+// and local). A pool of one keeps the serial semantics clio had on 0.x.
 func Serve(s *server.MCPServer) error {
-	return server.ServeStdio(s)
+	return server.ServeStdio(s, server.WithWorkerPoolSize(1))
 }
