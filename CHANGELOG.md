@@ -5,6 +5,36 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-10-16
+
+Fix release: closes a `<private>` redaction gap found on a live index, and takes
+the pending dependency bumps (Go 1.26, mcp-go 1.x).
+
+### Fixed
+
+- **`<private>` stripping** — a lone `<private>` earlier in a message no longer
+  shields a later complete `<private>…</private>`: the stray opener stays as
+  literal text and the complete element is still removed (#47). On a live index
+  35 messages still carried a complete element after 0.16.0, 32 of them in this
+  shape. Run `clio index --full` after upgrading to strip them.
+- **`clio mcp` under mcp-go 1.x** — mcp-go 1.x runs tool calls on a worker pool
+  and cancels in-flight requests as soon as stdin reaches EOF. `Serve` now pins
+  the pool to a single worker: every tool starts with a best-effort catch-up
+  ingest, so concurrent calls would only contend for the SQLite write lock. The
+  stdio e2e test keeps stdin open until all responses have arrived (#44).
+
+### Changed
+
+- Dependencies: modernc.org/sqlite 1.57.0 → 1.60.1 (#43), mark3labs/mcp-go
+  0.58.0 → 1.2.1 (#44), mattn/go-runewidth 0.0.28 → 0.0.31 (#45). CI builds
+  and tests with Go 1.26 (#46).
+
+### Notes
+
+- `go.mod` now declares `go 1.26.0` (required by sqlite 1.60.1). `go install
+  …@v0.17.0` on an older toolchain fetches Go 1.26 automatically under the
+  default `GOTOOLCHAIN=auto`; prebuilt release assets are unaffected.
+
 ## [0.16.0] - 2026-09-06
 
 Three designs borrowed from a survey of claude-mem that give Claude cross-session
