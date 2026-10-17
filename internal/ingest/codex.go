@@ -244,9 +244,10 @@ func (s codexSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, sta
 					continue
 				}
 				args := json.RawMessage(p.Arguments)
-				summary := codexToolSummary(p.Name, args)
+				var rm redactMemo // summary and target redact the same command once
+				summary := codexToolSummaryMemo(p.Name, args, &rm)
 				add(ts, model.RoleToolUse, strings.TrimSpace(p.Name+" "+summary), raw,
-					[]model.ToolCall{{ToolName: p.Name, ParamsSummary: summary}}, codexExtractTargets(p.Name, args))
+					[]model.ToolCall{{ToolName: p.Name, ParamsSummary: summary}}, codexExtractTargetsMemo(p.Name, args, &rm))
 			case "function_call_output":
 				if skipped[p.CallID] {
 					continue
@@ -497,12 +498,17 @@ func isShellCommandFlag(f string) bool {
 // mirrors the shared extractTargets contract — empty names and clio's own MCP tools
 // yield nothing. Values are redacted then capped, like the Claude path.
 func codexExtractTargets(name string, args json.RawMessage) []model.ToolTarget {
+	return codexExtractTargetsMemo(name, args, nil)
+}
+
+// codexExtractTargetsMemo is codexExtractTargets with a shared redaction memo.
+func codexExtractTargetsMemo(name string, args json.RawMessage, rm *redactMemo) []model.ToolTarget {
 	if name == "" || strings.HasPrefix(name, clioMCPToolPrefix) {
 		return nil
 	}
 	out := []model.ToolTarget{{Kind: model.TargetTool, Value: name}}
 	if kind, value, ok := codexCommandTarget(name, args); ok {
-		out = append(out, model.ToolTarget{Kind: kind, Value: capValue(redactString(value))})
+		out = append(out, model.ToolTarget{Kind: kind, Value: capValue(rm.redact(value))})
 	}
 	return out
 }
@@ -511,10 +517,15 @@ func codexExtractTargets(name string, args json.RawMessage) []model.ToolTarget {
 // or file it acted on. It redacts the FULL value before truncating, so a secret never
 // survives as a partial (regex-missed) token. Empty for tool-only calls.
 func codexToolSummary(name string, args json.RawMessage) string {
+	return codexToolSummaryMemo(name, args, nil)
+}
+
+// codexToolSummaryMemo is codexToolSummary with a shared redaction memo.
+func codexToolSummaryMemo(name string, args json.RawMessage, rm *redactMemo) string {
 	if _, value, ok := codexCommandTarget(name, args); ok {
 		// firstLine caps on bytes; trim any rune split at the cap so the summary
 		// (and the message content built from it) stays valid UTF-8.
-		return trimToValidUTF8(firstLine(redactString(value), 200))
+		return trimToValidUTF8(firstLine(rm.redact(value), 200))
 	}
 	return ""
 }

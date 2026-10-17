@@ -125,8 +125,9 @@ func (p *Parser) ParseLine(line []byte) ([]model.Message, EventInfo, error) {
 				p.clioToolUseIDs[b.ID] = true
 				continue
 			}
-			summary := toolUseSummary(b.Input)
-			add(model.RoleToolUse, b.Name+" "+summary, []model.ToolCall{{ToolName: b.Name, ParamsSummary: summary}}, extractTargets(b.Name, b.Input))
+			var rm redactMemo // summary and target redact the same input string once
+			summary := toolUseSummaryMemo(b.Input, &rm)
+			add(model.RoleToolUse, b.Name+" "+summary, []model.ToolCall{{ToolName: b.Name, ParamsSummary: summary}}, extractTargetsMemo(b.Name, b.Input, &rm))
 		case "tool_result":
 			if p.clioToolUseIDs[b.ToolUseID] {
 				continue
@@ -222,7 +223,10 @@ func stripHarnessBoilerplate(s string) (rest string, matched bool) {
 }
 
 // toolUseSummary builds a compact "key fields" string for a tool invocation.
-func toolUseSummary(input json.RawMessage) string {
+func toolUseSummary(input json.RawMessage) string { return toolUseSummaryMemo(input, nil) }
+
+// toolUseSummaryMemo is toolUseSummary with a shared redaction memo (see redactMemo).
+func toolUseSummaryMemo(input json.RawMessage, rm *redactMemo) string {
 	var m map[string]any
 	if err := json.Unmarshal(input, &m); err != nil {
 		return ""
@@ -237,7 +241,7 @@ func toolUseSummary(input json.RawMessage) string {
 				// near-quadratic on bracket floods (100k '[' ≈ 10 s); the raw_json walk
 				// already pays this for the same string, so this call doubles it. If
 				// ingest stalls on such a transcript, cap the probes per string.
-				return firstLine(redactString(s), 200)
+				return firstLine(rm.redact(s), 200)
 			}
 		}
 	}

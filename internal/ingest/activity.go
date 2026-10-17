@@ -30,6 +30,11 @@ var activityField = map[string]struct{ field, kind string }{
 // the tool and its input provide one. clio's own MCP tools yield nothing. Values
 // are redacted and capped. The `tool` fact comes first.
 func extractTargets(toolName string, input json.RawMessage) []model.ToolTarget {
+	return extractTargetsMemo(toolName, input, nil)
+}
+
+// extractTargetsMemo is extractTargets with a shared redaction memo (see redactMemo).
+func extractTargetsMemo(toolName string, input json.RawMessage, rm *redactMemo) []model.ToolTarget {
 	if toolName == "" || strings.HasPrefix(toolName, clioMCPToolPrefix) {
 		return nil
 	}
@@ -46,7 +51,7 @@ func extractTargets(toolName string, input json.RawMessage) []model.ToolTarget {
 	if !ok || strings.TrimSpace(v) == "" {
 		return out
 	}
-	value := capValue(redactString(v))
+	value := capValue(rm.redact(v))
 	if strings.TrimSpace(value) == "" {
 		return out // the value was nothing but a private block: no empty fact
 	}

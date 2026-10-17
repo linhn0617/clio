@@ -9,51 +9,89 @@ import (
 	"strings"
 )
 
-// redactRule pairs a compiled pattern with the replacement applied to matches.
+// redactRule pairs a compiled pattern with the replacement applied to matches,
+// plus a cheap necessary-condition prefilter. The prefilter never changes what
+// is redacted: it only lets Redact skip a regexp that provably cannot match.
+//
+//   - needles: the match must contain at least one of these literal substrings
+//     (a regexp match that lacks them is impossible). nil means "no safe literal
+//     feature", which requires runAlways to be set: such a rule always runs.
+//   - also: if non-empty, the match must additionally contain at least one of
+//     these bytes (e.g. the ':' or '=' of KEY=value).
+//   - foldCase: the pattern is (?i). needles are then lower-case and matched
+//     against a lower-cased copy of the text. Go's (?i) uses Unicode simple
+//     folding (U+212A KELVIN SIGN matches k, U+017F LONG S matches s), so when a
+//     needle contains k or s and the text has any non-ASCII byte, the rule runs
+//     unconditionally (those are the only ASCII letters with non-ASCII fold
+//     partners; TestSimpleFoldOnlyKAndS pins that). Needles without k/s, and
+//     needles that are not letters, are unaffected by the non-ASCII fold.
+//   - foldFallback: derived from the above at init; not set by hand.
 type redactRule struct {
-	re   *regexp.Regexp
-	repl string
+	re           *regexp.Regexp
+	repl         string
+	needles      []string
+	also         string
+	foldCase     bool
+	runAlways    bool
+	foldFallback bool
 }
 
 // redactRules is a conservative set: high-signal secret shapes only, to avoid
 // eating legitimate text (false positives destroy searchability).
 var redactRules = []redactRule{
 	// PEM private key blocks (multi-line).
-	{regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`), "[REDACTED:private-key]"},
+	// prefilter: the pattern spells the literal "PRIVATE KEY" (case-sensitive) in both fences.
+	{re: regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`), repl: "[REDACTED:private-key]", needles: []string{"PRIVATE KEY"}},
 	// AWS access key id.
-	{regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`), "[REDACTED:aws-key]"},
+	// prefilter: the match starts with the literal "AKIA".
+	{re: regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`), repl: "[REDACTED:aws-key]", needles: []string{"AKIA"}},
 	// Google API key.
-	{regexp.MustCompile(`\bAIza[0-9A-Za-z_\-]{35}\b`), "[REDACTED:gcp-key]"},
+	// prefilter: the match starts with the literal "AIza".
+	{re: regexp.MustCompile(`\bAIza[0-9A-Za-z_\-]{35}\b`), repl: "[REDACTED:gcp-key]", needles: []string{"AIza"}},
 	// GitHub tokens (classic + fine-grained + app).
-	{regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{20,}\b`), "[REDACTED:github-token]"},
-	{regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,}\b`), "[REDACTED:github-token]"},
+	// prefilter: gh[pousr]_ expands to exactly these five literals.
+	{re: regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{20,}\b`), repl: "[REDACTED:github-token]", needles: []string{"ghp_", "gho_", "ghu_", "ghs_", "ghr_"}},
+	// prefilter: the match starts with the literal "github_pat_".
+	{re: regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,}\b`), repl: "[REDACTED:github-token]", needles: []string{"github_pat_"}},
 	// Slack tokens.
-	{regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`), "[REDACTED:slack-token]"},
+	// prefilter: the match starts with the literal "xox" (then [baprs]-).
+	{re: regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`), repl: "[REDACTED:slack-token]", needles: []string{"xox"}},
 	// OpenAI / Anthropic style keys.
-	{regexp.MustCompile(`\bsk-[A-Za-z0-9_\-]{20,}\b`), "[REDACTED:api-key]"},
+	// prefilter: the match starts with the literal "sk-".
+	{re: regexp.MustCompile(`\bsk-[A-Za-z0-9_\-]{20,}\b`), repl: "[REDACTED:api-key]", needles: []string{"sk-"}},
 	// Stripe keys (underscore form: sk_live_, pk_live_, rk_live_, _test_).
-	{regexp.MustCompile(`\b[rsp]k_(?:live|test)_[A-Za-z0-9]{10,}\b`), "[REDACTED:stripe-key]"},
+	// prefilter: [rsp]k_(?:live|test)_ always contains k_live_ or k_test_.
+	{re: regexp.MustCompile(`\b[rsp]k_(?:live|test)_[A-Za-z0-9]{10,}\b`), repl: "[REDACTED:stripe-key]", needles: []string{"k_live_", "k_test_"}},
 	// JWTs (header.payload.signature, base64url).
-	{regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`), "[REDACTED:jwt]"},
+	// prefilter: the match starts with the literal "eyJ".
+	{re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`), repl: "[REDACTED:jwt]", needles: []string{"eyJ"}},
 	// Bearer tokens in headers.
-	{regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._\-]{12,}`), "Bearer [REDACTED:token]"},
+	// prefilter: (?i) "Bearer" is in every match; compared against lower-cased ASCII text.
+	{re: regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._\-]{12,}`), repl: "Bearer [REDACTED:token]", needles: []string{"bearer"}, foldCase: true},
 	// Basic auth credentials, anchored on the explicit (Proxy-)Authorization header
 	// so the English word "basic" in prose is never matched (base64 of user:pass can
 	// be all letters, so a bare "Basic <word>" rule would eat phrases like "basic
 	// auth"). No length floor: the header shape is already high-signal and short
 	// credentials (e.g. "a:b") must not leak. The capture keeps the header name.
-	{regexp.MustCompile(`(?i)((?:Proxy-)?Authorization:\s*Basic\s+)[A-Za-z0-9+/=]+`), "${1}[REDACTED:token]"},
+	// prefilter: every match contains "Authorization:" contiguously (the optional
+	//            Proxy- prefix sits before it); (?i), lower-cased ASCII text.
+	{re: regexp.MustCompile(`(?i)((?:Proxy-)?Authorization:\s*Basic\s+)[A-Za-z0-9+/=]+`), repl: "${1}[REDACTED:token]", needles: []string{"authorization:"}, foldCase: true},
 	// Cookie / Set-Cookie header values (session ids, CSRF tokens). Anchored on the
 	// header colon form AND requiring a name=value (so prose like "cookie: enabled" is
 	// left untouched). Redact to end-of-line (HTTP-correct): security beats
 	// searchability, so a quoted value like session="secret" is never left exposed even
 	// though same-line trailing content is also redacted.
-	{regexp.MustCompile(`(?i)((?:Set-)?Cookie:\s*)[^\r\n]*=[^\r\n]*`), "${1}[REDACTED:cookie]"},
+	// prefilter: every match contains "Cookie:" contiguously; (?i), lower-cased ASCII text.
+	{re: regexp.MustCompile(`(?i)((?:Set-)?Cookie:\s*)[^\r\n]*=[^\r\n]*`), repl: "${1}[REDACTED:cookie]", needles: []string{"cookie:"}, foldCase: true},
 	// KEY=value / KEY: value where KEY names a secret. Value redacted, key kept.
-	{regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|TOKEN|CREDENTIAL)[A-Z0-9_]*)\s*([:=])\s*["']?[^\s"']{6,}["']?`), `$1$2[REDACTED:secret]`},
+	// prefilter: the keyword group is mandatory and each alternative contains one of
+	//            these (API[_-]?KEY etc. all contain "key"), and the match needs a
+	//            [:=] separator; (?i), lower-cased ASCII text.
+	{re: regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|TOKEN|CREDENTIAL)[A-Z0-9_]*)\s*([:=])\s*["']?[^\s"']{6,}["']?`), repl: `$1$2[REDACTED:secret]`, needles: []string{"secret", "password", "passwd", "key", "token", "credential"}, also: ":=", foldCase: true},
 	// Connection strings: scheme://user:pass@host (requires user:pass@ authority).
 	// Stop at common delimiters so trailing punctuation like ),;> is preserved.
-	{regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:[^\s:/@]+@[^\s'")>\]},;]+`), "[REDACTED:connstring]"},
+	// prefilter: the match spells "://" and the user:pass@ authority needs an "@".
+	{re: regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:[^\s:/@]+@[^\s'")>\]},;]+`), repl: "[REDACTED:connstring]", needles: []string{"://"}, also: "@", foldCase: true},
 }
 
 // privateOpenRe / privateCloseRe delimit a user-marked <private>…</private>
@@ -119,9 +157,80 @@ func stripPrivate(s string) string {
 	return out.String()
 }
 
+func init() {
+	for i := range redactRules {
+		r := &redactRules[i]
+		if r.foldCase {
+			for _, n := range r.needles {
+				if strings.ContainsAny(n, "ks") {
+					r.foldFallback = true
+				}
+			}
+		}
+	}
+}
+
+// prefilterOff makes Redact run every rule unconditionally. Tests flip it to
+// compare the filtered and unfiltered paths; production never sets it.
+var prefilterOff bool
+
+// mayMatch reports whether r could match s. It is a necessary condition only:
+// false means the regexp provably cannot match (skip it), true means "run it".
+// lower is strings.ToLower(s) (a superset test for ASCII needles: lower-casing
+// never removes an ASCII letter run, and may only add spurious ones, which merely
+// run the regexp); ascii says s is pure ASCII.
+func (r *redactRule) mayMatch(s, lower string, ascii bool) bool {
+	if r.runAlways {
+		return true
+	}
+	hay := s
+	if r.foldCase {
+		if !ascii && r.foldFallback {
+			return true
+		}
+		hay = lower
+	}
+	found := false
+	for _, n := range r.needles {
+		if strings.Contains(hay, n) {
+			found = true
+			break
+		}
+	}
+	return found && (r.also == "" || strings.ContainsAny(s, r.also))
+}
+
 // Redact replaces recognized secret patterns in s. It is intentionally
-// conservative; see redactRules.
+// conservative; see redactRules. Each rule's regexp only runs when its cheap
+// necessary-condition prefilter passes; the output is identical to running
+// every rule (redactUnfiltered, pinned by tests and a real-corpus comparison).
 func Redact(s string) string {
+	if prefilterOff {
+		return redactUnfiltered(s)
+	}
+	ascii := true
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			ascii = false
+			break
+		}
+	}
+	lower := strings.ToLower(s) // no allocation when s has no upper-case letter
+	for i := range redactRules {
+		r := &redactRules[i]
+		if r.mayMatch(s, lower, ascii) {
+			if ns := r.re.ReplaceAllString(s, r.repl); ns != s {
+				s = ns
+				lower = strings.ToLower(s) // text changed: refresh the folded copy
+			}
+		}
+	}
+	return s
+}
+
+// redactUnfiltered runs every rule on s with no prefilter. It is the reference
+// implementation Redact must match byte for byte.
+func redactUnfiltered(s string) string {
 	for _, r := range redactRules {
 		s = r.re.ReplaceAllString(s, r.repl)
 	}
@@ -190,6 +299,30 @@ func redactString(s string) string {
 	}
 	out.WriteString(Redact(s[textStart:]))
 	return out.String()
+}
+
+// redactMemo remembers the last redactString result. One tool call redacts the
+// same input string for its summary and again for its activity target; sharing
+// the memo makes that one pass with a byte-identical result (redactString is a
+// pure function of its input). A nil *redactMemo just calls redactString.
+// debt: the third pass over the same string (the raw_json walk in redactJSON)
+// and the final pass over name+" "+summary are not shared: redaction is not
+// idempotent in general (TestRedactNotIdempotentOnAdversarialText), so only
+// passes over the identical input can be merged without changing output.
+type redactMemo struct {
+	in, out string
+	set     bool
+}
+
+func (m *redactMemo) redact(s string) string {
+	if m == nil {
+		return redactString(s)
+	}
+	if m.set && m.in == s {
+		return m.out
+	}
+	m.in, m.out, m.set = s, redactString(s), true
+	return m.out
 }
 
 // redactJSONAt tries to decode a single JSON object or array at the start of t.
