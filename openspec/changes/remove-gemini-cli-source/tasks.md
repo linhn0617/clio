@@ -3,7 +3,7 @@
 - [x] 1.1 Delete `internal/ingest/gemini.go`, `gemini_test.go`, `testdata/gemini/`
 - [x] 1.2 Remove the Gemini registration (`addGeminiSource`), `geminiUsageCanon`,
       `config.GeminiTmpDir`, `model.SourceGemini` and the registry seed entry
-- [x] 1.3 Re-home the generic `errUnusableStateRecord` / `unusableStateCounter` into `ingest.go`
+- [x] 1.3 Delete the orphaned `errUnusableStateRecord` / `unusableStateCounter` path (no remaining producer once Gemini is gone)
 - [x] 1.4 Strip Gemini cases from cli/mcp/registry/config/ingest tests
 
 ## 2. Data
