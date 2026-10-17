@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
@@ -23,13 +24,40 @@ type Result struct {
 	Name   string
 	OK     bool
 	Detail string
+	// Skipped marks a check that was deliberately not run (--quick). It is OK=true
+	// so it never fails the run, but the report shows [skip] instead of ok.
+	Skipped bool
 }
+
+// Options tunes RunWith. The zero value is the full, HOME-independent run.
+type Options struct {
+	// Quick swaps the whole-file PRAGMA integrity_check for quick_check and skips the
+	// FTS content check and the dbstat bloat measurement — the three checks that scan
+	// the entire database and made doctor take over a minute on a ~1 GB index.
+	Quick bool
+	// Integration enables the checks that look outside the index (hooks, MCP
+	// registration, lease, freshness). Off by default so Run stays independent of the
+	// caller's HOME; the CLI turns it on and supplies the paths.
+	Integration                              bool
+	SettingsPath, ClaudeConfigPath, LockPath string
+}
+
+// quickSuffix is the detail of every check --quick skips.
+const quickSuffix = "skipped (--quick)"
 
 // Run executes all checks and returns their results.
 func Run(database *db.DB, projectsDir, dbPath string) []Result {
+	return RunWith(database, projectsDir, dbPath, Options{})
+}
+
+// RunWith is Run with options.
+func RunWith(database *db.DB, projectsDir, dbPath string, opts Options) []Result {
 	var out []Result
 	add := func(name string, ok bool, detail string) {
-		out = append(out, Result{name, ok, detail})
+		out = append(out, Result{Name: name, OK: ok, Detail: detail})
+	}
+	skip := func(name string) {
+		out = append(out, Result{Name: name, OK: true, Detail: quickSuffix, Skipped: true})
 	}
 
 	var availRoots []string
@@ -81,12 +109,21 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 		}
 	}
 
-	// DB integrity.
+	// DB integrity. quick_check skips the index-vs-table cross checks integrity_check
+	// does, which is where the time goes on a large DB; it still walks every page, so
+	// structural corruption is caught.
+	pragma, label := "integrity_check", ""
+	if opts.Quick {
+		pragma, label = "quick_check", " (quick_check)"
+	}
 	var integ string
-	if err := database.QueryRow(`PRAGMA integrity_check`).Scan(&integ); err != nil {
+	if err := database.QueryRow(`PRAGMA ` + pragma).Scan(&integ); err != nil {
 		add("db integrity", false, err.Error())
 	} else {
-		add("db integrity", integ == "ok", integ)
+		add("db integrity", integ == "ok", integ+label)
+	}
+	if opts.Quick {
+		skip("integrity_check")
 	}
 
 	// FTS sync: messages vs fts row counts, then (only when counts match) a
@@ -106,6 +143,9 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 		add("fts index", false, e.Error())
 	case msgCount != ftsCount:
 		add("fts index", false, fmt.Sprintf("%d messages / %d fts rows", msgCount, ftsCount))
+	case opts.Quick:
+		add("fts index", true, fmt.Sprintf("%d messages / %d fts rows", msgCount, ftsCount))
+		skip("fts content check")
 	default:
 		if ok, detail, ierr := ftsContentIntegrityOK(dbPath); ierr != nil {
 			add("fts index", false, fmt.Sprintf("%d messages / %d fts rows, content check failed: %s", msgCount, ftsCount, ierr.Error()))
@@ -244,8 +284,12 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 			prunedMsgs, float64(freelist*pageSize)/1e6))
 	}
 
-	ftsOK, ftsDetail := ftsBloat(database)
-	add("fts bloat", ftsOK, ftsDetail)
+	if opts.Quick {
+		skip("fts bloat")
+	} else {
+		ftsOK, ftsDetail := ftsBloat(database)
+		add("fts bloat", ftsOK, ftsDetail)
+	}
 
 	// File permissions: the DB and its WAL/SHM sidecars hold indexed content and must
 	// be private (0600). Absent sidecars (no writes yet) are skipped.
@@ -293,6 +337,17 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 			ok := ratio < 3.0 || srcBytes == 0
 			add("db size", ok, fmt.Sprintf("db %.1f MB, ~%.1fx source", float64(fi.Size())/1e6, ratio))
 		}
+	}
+
+	if opts.Integration {
+		// debt: no check that the running MCP server's version matches this binary;
+		// it needs the lease file to carry a version. Add once a stale-binary MCP
+		// (reinstall without restarting Claude Code) shows up as a real complaint.
+		out = append(out,
+			checkHookBinary(opts.SettingsPath),
+			checkMCPRegistration(opts.ClaudeConfigPath),
+			checkLease(opts.LockPath),
+			checkIndexFreshness(database, time.Now()))
 	}
 
 	return out
