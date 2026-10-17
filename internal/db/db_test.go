@@ -115,7 +115,12 @@ func TestMigration0014DropsGeminiRows(t *testing.T) {
 	}
 	seed("g1", "gemini", "/h/.gemini/tmp/p/chats/session-1.jsonl")
 	seed("c1", "claude-code", "/h/.claude/projects/p/c1.jsonl")
+	// A non-chats .jsonl under the Gemini root was handed to the claude-code
+	// fallback by the old walker: its session and watermark must survive.
+	seed("c2", "claude-code", "/h/.gemini/tmp/p/stray.jsonl")
+	// Orphaned Gemini watermarks (sessions row already gone), both separators.
 	mustExec(`INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, last_ingested_at) VALUES ('/h/.gemini/tmp/p/chats/orphan.jsonl',1,1,1,'',1)`)
+	mustExec(`INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, last_ingested_at) VALUES ('C:\Users\x\.gemini\tmp\p\chats\orphan.jsonl',1,1,1,'',1)`)
 	mustExec(`INSERT INTO source_conflicts(source_file, uuid, seen_source, conflicting_source, first_seen_at, last_seen_at) VALUES ('/x','g1','gemini','claude-code',1,1)`)
 
 	if err := d.migrate(); err != nil {
@@ -137,14 +142,16 @@ func TestMigration0014DropsGeminiRows(t *testing.T) {
 		{`SELECT count(*) FROM sessions WHERE source='gemini'`, 0},
 		{`SELECT count(*) FROM messages WHERE session_uuid='g1'`, 0},
 		{`SELECT count(*) FROM session_usage WHERE source='gemini'`, 0},
-		{`SELECT count(*) FROM ingest_state WHERE source_file LIKE '%.gemini%'`, 0},
+		{`SELECT count(*) FROM ingest_state WHERE source_file LIKE '%orphan%'`, 0},
+		{`SELECT count(*) FROM ingest_state WHERE source_file = '/h/.gemini/tmp/p/stray.jsonl'`, 1},
 		{`SELECT count(*) FROM source_conflicts`, 0},
 		{`SELECT count(*) FROM sessions WHERE uuid='c1'`, 1},
+		{`SELECT count(*) FROM sessions WHERE uuid='c2'`, 1},
 		{`SELECT count(*) FROM messages WHERE session_uuid='c1'`, 1},
-		{`SELECT count(*) FROM ingest_state`, 1},
-		{`SELECT count(*) FROM session_usage`, 1},
+		{`SELECT count(*) FROM ingest_state`, 2},
+		{`SELECT count(*) FROM session_usage`, 2},
 		{`SELECT count(*) FROM messages_fts WHERE messages_fts MATCH '"needle-gemini"'`, 0},
-		{`SELECT count(*) FROM messages_fts WHERE messages_fts MATCH '"needle-claude-code"'`, 1},
+		{`SELECT count(*) FROM messages_fts WHERE messages_fts MATCH '"needle-claude-code"'`, 2},
 	} {
 		if got := count(c.q); got != c.want {
 			t.Errorf("%s = %d, want %d", c.q, got, c.want)
