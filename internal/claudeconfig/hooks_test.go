@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/linhn0617/clio/internal/shellwords"
 )
 
 func readSettings(t *testing.T, path string) map[string]any {
@@ -356,7 +358,7 @@ func TestShellQuote(t *testing.T) {
 		if got := ShellQuote(in); got != want {
 			t.Errorf("ShellQuote(%q) = %q, want %q", in, got, want)
 		}
-		toks, ok := splitCommand(ShellQuote(in) + " recall")
+		toks, ok := shellwords.Split(ShellQuote(in) + " recall")
 		if !ok || len(toks) != 2 || toks[0] != in {
 			t.Errorf("round trip of %q gave %q ok=%v", in, toks, ok)
 		}
@@ -750,5 +752,89 @@ func TestRemoveClioHooksClearsReadBashGroup(t *testing.T) {
 	}
 	if _, still := readSettings(t, path)["hooks"]; still {
 		t.Error("Read|Bash clio entry should be removed and the hooks key dropped")
+	}
+}
+
+func installPT(t *testing.T, pt string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"PreToolUse":`+pt+`}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestCoversRead(t *testing.T) {
+	for m, want := range map[string]bool{
+		"Read": true, "Read|Bash": true, "Bash|Read": true, "Read|Edit": true, "": true,
+		"Bash": false, "Edit": false, "ReadX": false, "Reader": false, "Re(ad": false, // bad regex → not covering
+	} {
+		if got := coversRead(m); got != want {
+			t.Errorf("coversRead(%q) = %v, want %v", m, got, want)
+		}
+	}
+}
+
+// Any matcher that already covers Read counts as installed; no second group is added.
+func TestAddPreToolUseHookExistingCoveringMatcherIsInstalled(t *testing.T) {
+	for _, group := range []string{
+		`{"matcher":"Bash|Read","hooks":[{"type":"command","command":"` + clioFH + `"}]}`,
+		`{"matcher":"Read|Edit","hooks":[{"type":"command","command":"` + clioFH + `"}]}`,
+		`{"hooks":[{"type":"command","command":"` + clioFH + `"}]}`,
+	} {
+		path := installPT(t, "["+group+"]")
+		if has, _ := HasPreToolUseReadHook(path); !has {
+			t.Errorf("%s: covering matcher must count as installed", group)
+		}
+		if legacy, _ := HasLegacyPreToolUseReadHook(path); legacy {
+			t.Errorf("%s: only an exact Read group is upgradable", group)
+		}
+		if err := AddPreToolUseReadHook(path, clioFH); err != nil {
+			t.Fatal(err)
+		}
+		if pt := preToolUseGroups(t, readSettings(t, path)); len(pt) != 1 {
+			t.Errorf("%s: no second group may be added, got %v", group, pt)
+		}
+	}
+}
+
+// Two covering groups each holding clio converge on the first one met.
+func TestAddPreToolUseHookCollapsesDuplicates(t *testing.T) {
+	path := installPT(t, `[
+		{"matcher":"Read|Bash","hooks":[{"type":"command","command":"`+clioFH+`"}]},
+		{"matcher":"Read|Bash","hooks":[{"type":"command","command":"/opt/gate.sh"},{"type":"command","command":"`+clioFH+`"}]},
+		{"matcher":"Read|Bash","hooks":[{"type":"command","command":"`+clioFH+`"}]}]`)
+	if err := AddPreToolUseReadHook(path, clioFH); err != nil {
+		t.Fatal(err)
+	}
+	g := groupsByMatcher(t, readSettings(t, path))
+	n := 0
+	for _, cmds := range g {
+		for _, c := range cmds {
+			if c == clioFH {
+				n++
+			}
+		}
+	}
+	if n != 1 || len(preToolUseGroups(t, readSettings(t, path))) != 2 {
+		t.Fatalf("want one clio entry and the foreign group kept (2 groups), got %v", g)
+	}
+}
+
+// Read|Bash already holds clio and a mixed Read group has a leftover entry: the
+// leftover goes, nothing is "upgraded".
+func TestAddPreToolUseHookLegacyLeftoverRemovedWithoutUpgradeSignal(t *testing.T) {
+	path := installPT(t, `[
+		{"matcher":"Read|Bash","hooks":[{"type":"command","command":"`+clioFH+`"}]},
+		{"matcher":"Read","hooks":[{"type":"command","command":"/opt/gate.sh"},{"type":"command","command":"`+clioFH+`"}]}]`)
+	if legacy, _ := HasLegacyPreToolUseReadHook(path); legacy {
+		t.Error("an existing Read|Bash entry means no matcher gets changed")
+	}
+	if err := AddPreToolUseReadHook(path, clioFH); err != nil {
+		t.Fatal(err)
+	}
+	g := groupsByMatcher(t, readSettings(t, path))
+	if len(g["Read"]) != 1 || g["Read"][0] != "/opt/gate.sh" || len(g["Read|Bash"]) != 1 {
+		t.Fatalf("got %v", g)
 	}
 }
