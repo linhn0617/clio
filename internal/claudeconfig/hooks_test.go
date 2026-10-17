@@ -319,6 +319,8 @@ func TestIsClioHookCommandsQuotedPaths(t *testing.T) {
 		`/bin/x; /x/clio recall`:                        false, // shell metacharacter, not a path
 		`/usr/bin/env /opt/clio recall`:                 false, // a wrapper, not a split path
 		`/usr/bin/env ~/bin/clio recall`:                false,
+		`/usr/bin/env ./bin/clio recall`:                false, // relative wrapper argument
+		`/Users/me/My Apps/bin/clio recall`:             true,  // a split path whose later piece contains /
 	} {
 		if got := isClioRecall(cmd); got != want {
 			t.Errorf("isClioRecall(%q) = %v, want %v", cmd, got, want)
@@ -331,6 +333,7 @@ func TestIsClioHookCommandsQuotedPaths(t *testing.T) {
 		`/Users/me/My Tools/clio file-history --hook`:   true, // old unquoted, broken shape
 		`/Users/me/My Tools/clio file-history`:          false,
 		`/usr/bin/sudo /opt/clio file-history --hook`:   false, // a wrapper, not a split path
+		`/usr/bin/sudo ../opt/clio file-history --hook`: false, // relative wrapper argument
 	} {
 		if got := isClioFileHistory(cmd); got != want {
 			t.Errorf("isClioFileHistory(%q) = %v, want %v", cmd, got, want)

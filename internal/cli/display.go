@@ -14,6 +14,7 @@ func parseSince(s string) (int64, error) {
 }
 
 func shortID(uuid string) string {
+	uuid = termsafe.Strip(uuid)
 	if len(uuid) > 8 {
 		return uuid[:8]
 	}

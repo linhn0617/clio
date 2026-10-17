@@ -1026,7 +1026,8 @@ func (ing *Ingester) sessionUUIDFromDB(src string) string {
 // disk, or "" if there is none. Only the file name is matched: a subagent
 // transcript sits under <parent uuid>/subagents/, so its directory names the
 // parent without being a copy of it. An error means the answer is unknown and
-// the caller must not purge.
+// the caller must not purge; a stat failure other than "not exist" (EACCES, EIO)
+// is such an error, since it does not prove the copy is gone.
 func (ing *Ingester) liveDuplicateSource(uuid, src string) (string, error) {
 	if uuid == "" {
 		return "", nil
@@ -1052,8 +1053,12 @@ func (ing *Ingester) liveDuplicateSource(uuid, src string) (string, error) {
 	}
 	rows.Close() // release the single connection before stat-ing
 	for _, other := range hits {
-		if _, err := os.Stat(other); err == nil {
+		_, err := os.Stat(other)
+		if err == nil {
 			return other, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("stat %s: %w", other, err)
 		}
 	}
 	return "", nil

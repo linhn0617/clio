@@ -564,9 +564,11 @@ func isClioRecall(command string) bool {
 // taken for ours. A wrapper such as `/usr/bin/env /opt/clio recall` is told apart
 // heuristically: a split path's later pieces continue a directory name, while a
 // wrapper's later argument is a path of its own, so any piece after the first that
-// starts with / or ~ marks a foreign command. The limits: a real path with a
+// starts with /, ~, ./ or ../ (or is . or ..) marks a foreign command. The limits: a real path with a
 // space followed by / (`/a /b/clio`) is not recognised, and a wrapper whose
-// argument is relative (`/usr/bin/env bin/clio recall`) is still taken for clio's.
+// argument is relative without ./ or ../ (`/usr/bin/env bin/clio recall`) is
+// still taken for clio's; `./` and `../` pieces are told apart, at the cost of a
+// real directory name ending in ` .` (`/a/My ./clio`) no longer being recognised.
 func isUnquotedClio(command, suffix string) bool {
 	if !strings.HasSuffix(command, suffix) {
 		return false
@@ -577,7 +579,8 @@ func isUnquotedClio(command, suffix string) bool {
 		return false
 	}
 	for _, f := range strings.Fields(exe)[1:] {
-		if strings.HasPrefix(f, "/") || strings.HasPrefix(f, "~") {
+		if strings.HasPrefix(f, "/") || strings.HasPrefix(f, "~") ||
+			strings.HasPrefix(f, "./") || strings.HasPrefix(f, "../") || f == "." || f == ".." {
 			return false
 		}
 	}

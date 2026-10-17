@@ -1783,6 +1783,56 @@ func TestDeleteMissingSubagentIsNotParentCopy(t *testing.T) {
 	}
 }
 
+// codex: a stat failure other than ErrNotExist on the duplicate copy (EACCES, EIO)
+// does not prove the copy is gone, so the purge must skip the file, not delete it.
+func TestDeleteMissingKeepsSessionWhenDuplicateStatFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	projects := t.TempDir()
+	old := writeSession(t, projects, "-old", "u", sessionEvent("u", "duplicate survivor"))
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := writeSession(t, projects, "-a-copy", "u")
+	if err := os.WriteFile(cp, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ing.IngestAll(context.Background(), projects, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(old); err != nil {
+		t.Fatal(err)
+	}
+	copyDir := filepath.Dir(cp)
+	if err := os.Chmod(copyDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(copyDir, 0o755) })
+
+	if _, err := ing.DeleteMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionCount(t, d); got != 1 {
+		t.Fatalf("session purged although the duplicate's stat failed; sessions=%d want 1", got)
+	}
+	var msgs int
+	d.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='u'`).Scan(&msgs)
+	if msgs == 0 {
+		t.Fatal("messages purged although the duplicate's stat failed")
+	}
+	var src string
+	if err := d.QueryRow(`SELECT source_file FROM sessions WHERE uuid='u'`).Scan(&src); err != nil || src != old {
+		t.Fatalf("sessions.source_file = %q (%v), want unchanged %q", src, err, old)
+	}
+}
+
 // codex: a failed duplicate lookup must not read as "no copy" (fail-open).
 func TestLiveDuplicateSourceReportsQueryError(t *testing.T) {
 	d := openTestDB(t)

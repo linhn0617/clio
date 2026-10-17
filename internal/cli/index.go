@@ -14,6 +14,7 @@ import (
 	"github.com/linhn0617/clio/internal/ingest"
 	"github.com/linhn0617/clio/internal/lock"
 	"github.com/linhn0617/clio/internal/sessions"
+	"github.com/linhn0617/clio/internal/termsafe"
 )
 
 func newIndexCmd() *cobra.Command {
@@ -107,7 +108,7 @@ func newIndexCmd() *cobra.Command {
 				if len(residual) > 0 {
 					fmt.Fprintf(os.Stderr, "warning: %d session(s) still have pruned raw_json after a full reindex (source file unreadable/undiscoverable, or deleted — `clio index --purge-missing` drops deleted ones):\n", len(residual))
 					for _, u := range residual {
-						fmt.Fprintf(os.Stderr, "  %s\n", u)
+						fmt.Fprintf(os.Stderr, "  %s\n", termsafe.Strip(u))
 					}
 					return fmt.Errorf("%d pruned session(s) could not be restored", len(residual))
 				}

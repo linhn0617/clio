@@ -124,6 +124,7 @@ func oneLine(s string) string {
 
 // shortID abbreviates a session UUID for list rows.
 func shortID(uuid string) string {
+	uuid = termsafe.Strip(uuid)
 	if r := []rune(uuid); len(r) > 8 {
 		return string(r[:8])
 	}
