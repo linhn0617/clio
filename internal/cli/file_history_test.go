@@ -258,11 +258,33 @@ func newBashFixture(t *testing.T) bashFixture {
 			t.Fatal(err)
 		}
 	}
+	// A symlink inside cwd that leads out of it, and one that stays inside.
+	if err := os.Symlink(sibling, filepath.Join(cwd, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(cwd, "a.go"), filepath.Join(cwd, "lnk.go")); err != nil {
+		t.Fatal(err)
+	}
 	outside := filepath.Join(sibling, "o.go")
 	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return bashFixture{cwd: cwd, outside: outside}
+}
+
+// The scan stops after bashMaxTokens words, so a long command cannot make the
+// hook stat an unbounded number of paths.
+func TestBashFileCandidatesTokenLimit(t *testing.T) {
+	f := newBashFixture(t)
+	junk := func(n int) string { return strings.TrimSpace(strings.Repeat("nope.txt ", n)) }
+	within := "cat " + junk(bashMaxTokens-2) + " a.go" // a.go is the bashMaxTokens-th word
+	if got := candPaths(bashFileCandidates(within, f.cwd, bashMaxFiles)); len(got) != 1 {
+		t.Errorf("word %d must still be scanned, got %q", bashMaxTokens, got)
+	}
+	beyond := "cat " + junk(bashMaxTokens-1) + " a.go" // one word too late
+	if got := bashFileCandidates(beyond, f.cwd, bashMaxFiles); len(got) != 0 {
+		t.Errorf("word %d must not be scanned, got %q", bashMaxTokens+1, candPaths(got))
+	}
 }
 
 func TestBashFileCandidates(t *testing.T) {
@@ -287,7 +309,22 @@ func TestBashFileCandidates(t *testing.T) {
 		{"redirect and comma trimmed", "cat a.go>out.txt, b.go:", f.cwd, []string{abs("a.go"), abs("b.go")}},
 		{"dedupe keeps first order", "cat b.go a.go b.go ./a.go", f.cwd, []string{abs("b.go"), abs("a.go")}},
 		{"fourth file truncated", "cat a.go b.go c.go d.go", f.cwd, []string{abs("a.go"), abs("b.go"), abs("c.go")}},
-		{"heredoc body path counts", "cat <<EOF\nsee c.go\nEOF", f.cwd, []string{abs("c.go")}},
+		{"heredoc body is not a candidate", "cat <<EOF\nsee c.go\nEOF", f.cwd, nil},
+		{"quoted heredoc delimiter", "cat <<'EOF'\nc.go\nEOF", f.cwd, nil},
+		{"dash heredoc with tab-indented terminator", "cat <<-EOF\n\tc.go\n\tEOF", f.cwd, nil},
+		{"heredoc body with apostrophe then more commands", "cat a.go <<EOF\ndon't b.go\nEOF\ncat d.go", f.cwd, []string{abs("a.go"), abs("d.go")}},
+		{"heredoc line stays scanned before the body", "cat <<EOF a.go\nb.go\nEOF", f.cwd, []string{abs("a.go")}},
+		{"comment skipped", "cat a.go # b.go c.go\ncat d.go", f.cwd, []string{abs("a.go"), abs("d.go")}},
+		{"hash inside a word is not a comment", "cat a.go#b.go", f.cwd, nil},
+		{"redirect targets skipped", "cat a.go > b.go >> c.go 2>&1", f.cwd, []string{abs("a.go")}},
+		{"input redirect target skipped", "cat < b.go", f.cwd, nil},
+		{"commit message with a path inside is one spaced token", "git commit -m 'drop a.go'", f.cwd, nil},
+		{"unterminated quote yields nothing", "cat a.go 'oops", f.cwd, nil},
+		{"cd makes relative tokens unreliable", "cd sub && cat a.go", f.cwd, nil},
+		{"pushd too", "pushd sub; cat a.go", f.cwd, nil},
+		{"cd keeps absolute tokens", "cd x && cat " + abs("a.go"), f.cwd, []string{abs("a.go")}},
+		{"symlink leading out of cwd skipped", "cat link/o.go", f.cwd, nil},
+		{"symlink staying inside cwd kept under its own spelling", "cat lnk.go", f.cwd, []string{abs("lnk.go")}},
 		{"empty cwd skips relative", "cat a.go", "", nil},
 		{"empty cwd skips absolute too", "cat " + abs("a.go"), "", nil},
 		{"no file tokens", "git status", f.cwd, nil},
@@ -295,7 +332,7 @@ func TestBashFileCandidates(t *testing.T) {
 	}
 	for _, c := range cases {
 		cmd := c.cmd
-		got := bashFileCandidates(cmd, c.cwd, bashMaxFiles)
+		got := candPaths(bashFileCandidates(cmd, c.cwd, bashMaxFiles))
 		if strings.Join(got, "|") != strings.Join(c.want, "|") {
 			t.Errorf("%s: %q → %q, want %q", c.name, cmd, got, c.want)
 		}
@@ -340,20 +377,87 @@ func TestFileHistoryHookBashInjectsForExistingFile(t *testing.T) {
 	}
 }
 
-// No candidate → the DB is never opened: a path that does not exist proves it
-// (an opened-but-missing DB would also be silent, so also assert no side effect).
-func TestFileHistoryHookBashZeroCandidatesDoesNotTouchDB(t *testing.T) {
+// openCounter wraps db.OpenReadOnly so tests can prove whether the index was opened.
+type openCounter struct{ n int }
+
+func (c *openCounter) open(path string) (*db.DB, error) {
+	c.n++
+	return db.OpenReadOnly(path)
+}
+
+// No candidate → the index is never opened (read-only opens leave no trace on
+// disk, so an injected opener is the observable).
+func TestFileHistoryHookBashZeroCandidatesDoesNotOpenDB(t *testing.T) {
 	f := newBashFixture(t)
-	missing := filepath.Join(t.TempDir(), "nope", "db.sqlite")
-	for _, cmd := range []string{"git status", "cat nope.go", "cat " + f.outside, "ls adir"} {
-		if out := fileHistoryHook(bashPayload(cmd, f.cwd, "s"), missing, 10); out != "" {
-			t.Errorf("%q: expected silence, got %q", cmd, out)
+	dbPath := seedFileHistoryDB(t, filepath.Join(f.cwd, "a.go"), time.Now().Unix())
+	for _, cmd := range []string{"git status", "git commit -m 'drop a.go'", "cat nope.go", "cat " + f.outside, "ls adir", "cd sub && cat a.go", "cat 'oops"} {
+		var oc openCounter
+		if out := fileHistoryHookWith(bashPayload(cmd, f.cwd, "s"), dbPath, 10, oc.open); out != "" || oc.n != 0 {
+			t.Errorf("%q: want silence and no open, got out=%q opens=%d", cmd, out, oc.n)
 		}
 	}
-	// A DB that would answer if consulted: zero candidates must still be silent.
-	dbPath := seedFileHistoryDB(t, filepath.Join(f.cwd, "a.go"), time.Now().Unix())
-	if out := fileHistoryHook(bashPayload("git status", f.cwd, "s"), dbPath, 10); out != "" {
-		t.Errorf("zero candidates must be silent, got %q", out)
+}
+
+// Several candidates share one read-only connection.
+func TestFileHistoryHookBashOpensIndexOnce(t *testing.T) {
+	f := newBashFixture(t)
+	a := filepath.Join(f.cwd, "a.go")
+	old := time.Now().Add(-2 * time.Hour)
+	_ = os.Chtimes(a, old, old)
+	dbPath := seedFileHistoryDB(t, a, time.Now().Add(-time.Hour).Unix())
+	var oc openCounter
+	out := fileHistoryHookWith(bashPayload("cat a.go b.go c.go", f.cwd, "cur"), dbPath, 10, oc.open)
+	if out == "" || oc.n != 1 {
+		t.Fatalf("want output from one open, got out=%q opens=%d", out, oc.n)
+	}
+}
+
+// Two small files and one large: the large one must be able to use the budget
+// the small ones left over, not just an equal third.
+func TestFileHistoryHookBashBudgetIsSequential(t *testing.T) {
+	f := newBashFixture(t)
+	a, b, c := filepath.Join(f.cwd, "a.go"), filepath.Join(f.cwd, "b.go"), filepath.Join(f.cwd, "c.go")
+	old := time.Now().Add(-2 * time.Hour)
+	for _, p := range []string{a, b, c} {
+		_ = os.Chtimes(p, old, old)
+	}
+	dbPath := seedFileHistoryDB(t, a, time.Now().Add(-time.Hour).Unix())
+	ts := time.Now().Add(-time.Hour).Unix()
+	addTouches(t, dbPath, b, 1, 1000, ts)
+	addTouches(t, dbPath, c, 200, 2000, ts)
+	ctx := hookContext(t, fileHistoryHook(bashPayload("cat a.go b.go c.go", f.cwd, "cur"), dbPath, 500))
+	if !strings.Contains(ctx, "touched "+a) || !strings.Contains(ctx, "touched "+b) {
+		t.Fatalf("small segments missing:\n%.300s", ctx)
+	}
+	// An equal split would leave c.go about 2,600 characters ≈ 26 rows.
+	if rows := strings.Count(ctx[strings.Index(ctx, "touched "+c):], "\n  - "); rows < 50 {
+		t.Errorf("large segment got only %d rows; leftover budget was not passed on", rows)
+	}
+	if n := len([]rune(ctx)); n > hookMaxChars {
+		t.Errorf("digest is %d chars > %d", n, hookMaxChars)
+	}
+}
+
+// addTouches adds n distinct sessions that edited path, ids starting at base.
+func addTouches(t *testing.T, dbPath, path string, n, base int, ts int64) {
+	t.Helper()
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	for i := base; i < base+n; i++ {
+		id := itoa(int64(i))
+		for _, s := range []string{
+			`INSERT INTO sessions(uuid, project_path, source_file, ended_at, turn_count, title) VALUES ('s` + id + `','/p','p.jsonl',` + itoa(ts) + `,2,'` + strings.Repeat("t", 60) + `')`,
+			`INSERT INTO messages(id, session_uuid, seq, ts, role, content, raw_json) VALUES (` + id + `,'s` + id + `',0,` + itoa(ts) + `,'tool_use','Edit x','{}')`,
+			`INSERT INTO tool_calls(message_id, tool_name, params_summary) VALUES (` + id + `,'Edit','x')`,
+			`INSERT INTO tool_targets(message_id, session_uuid, ts, kind, value) VALUES (` + id + `,'s` + id + `',` + itoa(ts) + `,'file','` + path + `')`,
+		} {
+			if _, err := d.Exec(s); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }
 
@@ -413,24 +517,19 @@ func TestFileHistoryHookBashCapHolds(t *testing.T) {
 	a := filepath.Join(f.cwd, "a.go")
 	old := time.Now().Add(-2 * time.Hour)
 	_ = os.Chtimes(a, old, old)
-	dbPath := seedFileHistoryDB(t, a, time.Now().Add(-time.Hour).Unix())
-	d, _ := db.Open(dbPath)
-	for i := 2; i < 200; i++ {
-		id := itoa(int64(i))
-		for _, s := range []string{
-			`INSERT INTO sessions(uuid, project_path, source_file, ended_at, turn_count, title) VALUES ('s` + id + `','/p','p.jsonl',1,2,'` + strings.Repeat("t", 60) + `')`,
-			`INSERT INTO messages(id, session_uuid, seq, ts, role, content, raw_json) VALUES (` + id + `,'s` + id + `',0,1,'tool_use','Edit x','{}')`,
-			`INSERT INTO tool_calls(message_id, tool_name, params_summary) VALUES (` + id + `,'Edit','x')`,
-			`INSERT INTO tool_targets(message_id, session_uuid, ts, kind, value) VALUES (` + id + `,'s` + id + `',1,'file','` + a + `')`,
-		} {
-			if _, err := d.Exec(s); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	d.Close()
+	ts := time.Now().Add(-time.Hour).Unix()
+	dbPath := seedFileHistoryDB(t, a, ts)
+	addTouches(t, dbPath, a, 198, 2, ts)
 	out := fileHistoryHook(bashPayload("cat a.go", f.cwd, "cur"), dbPath, 500)
 	if out == "" || len([]rune(out)) > hookMaxChars {
 		t.Fatalf("want non-empty output within %d chars, got %d", hookMaxChars, len([]rune(out)))
 	}
+}
+
+func candPaths(cs []candidateFile) []string {
+	var out []string
+	for _, c := range cs {
+		out = append(out, c.path)
+	}
+	return out
 }

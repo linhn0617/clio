@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -14,6 +15,7 @@ import (
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
 	"github.com/linhn0617/clio/internal/sessions"
+	"github.com/linhn0617/clio/internal/shellwords"
 	"github.com/linhn0617/clio/internal/termsafe"
 )
 
@@ -84,6 +86,17 @@ type hookPayload struct {
 // the hook's DB cost stays at a small constant per call.
 const bashMaxFiles = 3
 
+// bashMaxTokens bounds how many words of a Bash command are examined: a stat per
+// word on a pathological command line must not stretch the hook's latency.
+const bashMaxTokens = 64
+
+// candidateFile is a file the hook may look up; info (when the file exists) is
+// kept from candidate selection so the staleness gate needs no second stat.
+type candidateFile struct {
+	path string
+	info os.FileInfo
+}
+
 // historyPointer closes every digest; with several files it is emitted once.
 const historyPointer = "(Details: clio show <id>, or the clio MCP read_session tool.)\n"
 
@@ -99,32 +112,51 @@ type hookSegment struct {
 // normal flow. Read looks up its file_path; Bash looks up the (at most
 // bashMaxFiles) existing files under cwd that the command names.
 func fileHistoryHook(payload []byte, dbPath string, limit int) string {
+	return fileHistoryHookWith(payload, dbPath, limit, db.OpenReadOnly)
+}
+
+// fileHistoryHookWith is fileHistoryHook with the index opener injected: a
+// read-only open leaves no trace on disk, so tests count opens to prove the
+// zero-candidate path never touches the index.
+func fileHistoryHookWith(payload []byte, dbPath string, limit int, open func(string) (*db.DB, error)) string {
 	var p hookPayload
 	if len(payload) == 0 || json.Unmarshal(payload, &p) != nil {
 		return ""
 	}
-	var files []string
+	var files []candidateFile
 	switch p.ToolName {
 	case "Read":
 		if strings.TrimSpace(p.ToolInput.FilePath) != "" {
-			files = []string{p.ToolInput.FilePath}
+			fi, _ := os.Stat(p.ToolInput.FilePath) // nil on failure: the gate is skipped
+			files = []candidateFile{{p.ToolInput.FilePath, fi}}
 		}
 	case "Bash":
 		files = bashFileCandidates(p.ToolInput.Command, p.Cwd, bashMaxFiles)
 	}
 	// Zero candidates return before any DB access: most Bash calls end here.
+	if len(files) == 0 {
+		return ""
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		return ""
+	}
+	database, err := open(dbPath)
+	if err != nil {
+		return ""
+	}
+	defer database.Close()
 	var segs []hookSegment
 	for _, f := range files {
-		rows, newest, err := fileHistoryRows(dbPath, fileHistoryKey(f), p.SessionID, 0, limit)
+		rows, newest, err := sessions.FileHistory(context.Background(), database, fileHistoryKey(f.path), p.SessionID, 0, limit)
 		if err != nil || len(rows) == 0 {
 			continue
 		}
 		// Staleness gate: a file edited after its newest indexed touch would get a
-		// misleading timeline. A failed stat (file not on disk yet) skips the gate.
-		if fi, err := os.Stat(f); err == nil && fi.ModTime().Unix() > newest {
+		// misleading timeline.
+		if f.info != nil && f.info.ModTime().Unix() > newest {
 			continue
 		}
-		segs = append(segs, hookSegment{f, rows})
+		segs = append(segs, hookSegment{f.path, rows})
 	}
 	if len(segs) == 0 {
 		return ""
@@ -134,18 +166,22 @@ func fileHistoryHook(payload []byte, dbPath string, limit int) string {
 	// own length, and Claude Code measures its 10,000-character limit on what
 	// it receives. Shrink the digest until the encoding fits.
 	for budget := hookMaxChars; budget > 0; budget = budget * 3 / 4 {
-		var parts []string
+		// Segments are rendered in order against what is left: a file that cannot
+		// fit is dropped and its share stays available to the next one.
+		remaining := budget - len([]rune(historyPointer))
+		var b strings.Builder
 		for _, s := range segs {
-			// The budget is split evenly; a file whose segment cannot fit its
-			// share is dropped rather than starving the others.
-			if d := formatFileHistoryCapped(s.path, s.rows, budget/len(segs)); d != "" {
-				parts = append(parts, strings.TrimSuffix(d, historyPointer))
+			d := strings.TrimSuffix(formatFileHistoryCapped(s.path, s.rows, remaining+len([]rune(historyPointer))), historyPointer)
+			if d == "" || len([]rune(d)) > remaining {
+				continue
 			}
+			b.WriteString(d)
+			remaining -= len([]rune(d))
 		}
-		if len(parts) == 0 {
+		if b.Len() == 0 {
 			return "" // nothing fits: stay silent rather than send an empty context
 		}
-		out := encodeHookEnvelope(strings.Join(parts, "") + historyPointer)
+		out := encodeHookEnvelope(b.String() + historyPointer)
 		if out == "" {
 			return ""
 		}
@@ -246,23 +282,59 @@ func formatFileHistory(path string, rows []sessions.FileTouch) string {
 
 // bashFileCandidates returns up to max distinct existing regular files under cwd
 // that command names, in first-appearance order. It is a cheap lexical filter,
-// not a shell parser: a false candidate costs one DB lookup, a miss costs
-// nothing but the context hint. Relative tokens resolve against cwd; an empty or
-// relative cwd yields nothing.
-// debt: 沒做 $VAR／~／glob 展開、反斜線跳脫；若使用者常以 $PWD/x 或 glob 讀檔就要補
-func bashFileCandidates(command, cwd string, max int) []string {
+// not a shell: a false candidate costs one DB lookup, a miss costs nothing but
+// the context hint. Relative words resolve against the payload cwd, which is the
+// session's directory; Claude Code's Bash tool keeps its working directory
+// across calls, so after an earlier `cd` the real cwd is unknowable here — a
+// command containing cd/pushd therefore contributes absolute paths only. Heredoc
+// bodies, comments and redirect targets are not reads of the named file and are
+// skipped; a path must stay under cwd after symlinks are resolved.
+// debt: 沒做 $VAR／~／glob／命令替換展開；若使用者常以 $PWD/x 或 glob 讀檔就要補
+func bashFileCandidates(command, cwd string, max int) []candidateFile {
 	if !filepath.IsAbs(cwd) || strings.TrimSpace(command) == "" {
 		return nil
 	}
+	toks, ok := shellwords.Scan(stripHeredocBodies(command))
+	if !ok {
+		return nil
+	}
 	cwd = filepath.Clean(cwd)
-	var out []string
+	realCwd, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return nil
+	}
+	cdSeen := false
+	for _, t := range toks {
+		if !t.Op && (t.Text == "cd" || t.Text == "pushd") {
+			cdSeen = true
+		}
+	}
+	var out []candidateFile
 	seen := map[string]bool{}
-	for _, tok := range splitShellWords(command) {
-		tok = strings.Trim(tok, ",:")
+	skipNext := false
+	words := 0
+	for _, t := range toks {
+		if t.Op {
+			// A redirect operator consumes the next word as its target (`<<` and
+			// `<<<` introduce a heredoc/here-string, not a file to read).
+			skipNext = strings.ContainsAny(t.Text, "<>")
+			continue
+		}
+		if words++; words > bashMaxTokens {
+			break
+		}
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		tok := strings.Trim(t.Text, ",:")
 		if tok == "" || tok[0] == '-' || tok[0] == '$' {
 			continue
 		}
 		if !filepath.IsAbs(tok) {
+			if cdSeen {
+				continue
+			}
 			tok = filepath.Join(cwd, tok)
 		}
 		tok = filepath.Clean(tok)
@@ -270,15 +342,47 @@ func bashFileCandidates(command, cwd string, max int) []string {
 			continue
 		}
 		seen[tok] = true
-		if fi, err := os.Stat(tok); err != nil || !fi.Mode().IsRegular() {
+		real, err := filepath.EvalSymlinks(tok)
+		if err != nil || !pathUnder(realCwd, real) {
 			continue
 		}
-		out = append(out, tok)
-		if len(out) == max {
-			break
+		if fi, err := os.Stat(real); err == nil && fi.Mode().IsRegular() {
+			out = append(out, candidateFile{tok, fi})
+			if len(out) == max {
+				break
+			}
 		}
 	}
 	return out
+}
+
+// heredocStart finds `<<WORD`, `<<-WORD`, `<<'WORD'` or `<<"WORD"` (not `<<<`).
+var heredocStart = regexp.MustCompile(`(?:^|[^<])<<(-?)\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))`)
+
+// stripHeredocBodies removes heredoc bodies (the lines after a `<<WORD` line up
+// to the terminator line) so text that is only data never yields a candidate and
+// stray quotes inside it cannot unbalance the scan. The command line itself is
+// kept. A heredoc marker inside a quoted string over-strips; that only drops
+// candidates.
+func stripHeredocBodies(command string) string {
+	lines := strings.Split(command, "\n")
+	var out []string
+	for i := 0; i < len(lines); i++ {
+		out = append(out, lines[i])
+		for _, m := range heredocStart.FindAllStringSubmatch(lines[i], -1) {
+			word := m[2] + m[3] + m[4]
+			for i++; i < len(lines); i++ {
+				l := lines[i]
+				if m[1] == "-" {
+					l = strings.TrimLeft(l, "\t")
+				}
+				if l == word {
+					break
+				}
+			}
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // pathUnder reports whether path is strictly inside root, by path elements
@@ -286,43 +390,4 @@ func bashFileCandidates(command, cwd string, max int) []string {
 func pathUnder(root, path string) bool {
 	rel, err := filepath.Rel(root, path)
 	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// splitShellWords splits on whitespace and shell operators, treating '…' and "…" as grouping (the
-// quotes themselves are dropped) so a path containing spaces stays one word.
-// An unterminated quote swallows the rest of the command, which at worst
-// produces a word that matches no file.
-func splitShellWords(s string) []string {
-	var words []string
-	var cur strings.Builder
-	inWord := false
-	var quote rune
-	flush := func() {
-		if inWord {
-			words = append(words, cur.String())
-			cur.Reset()
-			inWord = false
-		}
-	}
-	for _, r := range s {
-		switch {
-		case quote != 0:
-			if r == quote {
-				quote = 0
-			} else {
-				cur.WriteRune(r)
-			}
-		case r == '\'' || r == '"':
-			quote, inWord = r, true
-		case r == ' ' || r == '\t' || r == '\n' || r == '\r' || strings.ContainsRune(";|&()<>", r):
-			// Operators split words even without spaces (`cat a;cat b`, `x>out`);
-			// an unquoted path that really contains one is not matched.
-			flush()
-		default:
-			cur.WriteRune(r)
-			inWord = true
-		}
-	}
-	flush()
-	return words
 }
