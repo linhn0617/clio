@@ -31,7 +31,7 @@ func headFingerprint(f *os.File) (string, error) {
 }
 
 // usageCounterPolicy selects how a pass updates the per-file usage diagnostic
-// counters: whole-file passes (Claude scan, Gemini replay, full ingest)
+// counters: whole-file passes (Claude scan, whole-file replay, full ingest)
 // replace; tail-scoped extraction (Codex incremental) accumulates on strict
 // offset advance; a failed scan preserves the stored counters and only raises
 // the stale flag.

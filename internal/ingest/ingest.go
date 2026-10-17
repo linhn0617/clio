@@ -56,15 +56,32 @@ func New(database *db.DB, log *slog.Logger) *Ingester {
 }
 
 // NewWithBuiltinSources returns an Ingester with every built-in source registered:
-// claude-code always, plus codex and gemini when their respective directories exist.
+// claude-code always, plus codex when its directory exists.
 // This is the composition root for CLI/MCP entry points — they call this instead of
 // New, so adding a future built-in source only requires a change here, not at every
 // call site.
 func NewWithBuiltinSources(database *db.DB, log *slog.Logger) *Ingester {
 	ing := New(database, log)
 	ing.addCodexSource()
-	ing.addGeminiSource()
 	return ing
+}
+
+// errUnusableStateRecord marks a parse abort caused by an unusable
+// state-carrying record (one that may carry the whole conversation state, so
+// skip-and-continue would silently discard it). IngestFile checks for it with
+// errors.Is and durably counts the aborted pass as unparsed
+// (recordUnusableStatePass) — the normal unparsed_lines accounting rides the
+// commit transaction, which never runs on this path. No built-in source
+// returns it today (it was raised only by the removed Gemini adapter); kept
+// as generic SPI.
+var errUnusableStateRecord = errors.New("unusable state record")
+
+// unusableStateCounter is implemented by an errUnusableStateRecord-wrapping
+// error that additionally carries priorUnparsed: the count of ordinary
+// skip+count records the parser accumulated earlier in the SAME now-aborted
+// pass. An error that doesn't implement it is treated as priorUnparsed=0.
+type unusableStateCounter interface {
+	PriorUnparsed() int64
 }
 
 // AddSource registers an additional ingestion adapter, consulted before the
@@ -158,7 +175,7 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 		return 0, false, nil
 	}
 
-	// A whole-file-replay source (e.g. Gemini's $set op-log) cannot be resumed
+	// A whole-file-replay source (e.g. an op-log format) cannot be resumed
 	// from a stored byte offset: a later record can overwrite or shrink
 	// already-ingested state, so any change forces a full replay from 0,
 	// committed as a full re-ingest. The stored offset still gates change
@@ -211,7 +228,7 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 
 	res, err := src.ParseFile(ing, f, startOffset, startSeq, path)
 	if err != nil {
-		// An unusable state record (e.g. an over-cap or unparsable Gemini $set)
+		// An unusable state record (e.g. an over-cap or unparsable state-carrying record)
 		// aborts the pass before commit: rows and the stored watermark stay put,
 		// so doctor's lag check keeps flagging the file. The failure itself must
 		// still be durably counted as unparsed (spec: "the failure SHALL be
@@ -993,11 +1010,11 @@ func (ing *Ingester) allSourceFiles() ([]string, error) {
 // ingest_state for src is removed. A final re-stat closes the scan->delete TOCTOU window.
 // sessionUUIDForPurge resolves the session uuid for a source path. It prefers
 // the DB (sessions.source_file), since purge only ever runs for a file
-// already confirmed gone (design.md §2): a Gemini file's uuid lives in its
+// already confirmed gone (design.md §2): a source file's uuid lives in its
 // metadata line, which is no longer readable once the file is deleted, so
 // SessionIDFromPath alone would resolve "" and leave orphaned rows. This is
 // safe for every source — the DB and the filename/metadata convention
-// already agree there when a row exists — so it is not Gemini-specific. It
+// already agree there when a row exists — so it is not source-specific. It
 // falls back to the owning source adapter's SessionIDFromPath (Codex's id is
 // not the filename), then to the claude-code filename convention, for a path
 // with no DB row (e.g. never successfully ingested).

@@ -437,48 +437,6 @@ func TestPruneRestoreCodexRoundTrip(t *testing.T) {
 	}
 }
 
-func TestPruneRestoreGeminiRoundTrip(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "xdg"))
-	sid := "gem-prune-1"
-	dir := filepath.Join(home, ".gemini", "tmp", "h1", "chats")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	chat := filepath.Join(dir, "session-2026-01-01T10-00-aaaa.jsonl")
-	meta := `{"sessionId":"` + sid + `","projectHash":"h1","startTime":"2026-01-01T10:00:00Z","lastUpdated":"2026-01-01T10:01:00Z","kind":"chat"}`
-	set := `{"$set":{"messages":[{"id":"m1","timestamp":"2026-01-01T10:00:01Z","type":"user","content":[{"text":"hi gemini"}]}]}}`
-	if err := os.WriteFile(chat, []byte(meta+"\n"+set+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	dbPath := filepath.Join(home, "xdg", "clio", "db.sqlite")
-	os.MkdirAll(filepath.Dir(dbPath), 0o755)
-	database, err := db.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ing := ingest.NewWithBuiltinSources(database, nil)
-	if _, err := ing.IngestAll(context.Background(), filepath.Join(home, ".claude", "projects"), false); err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-30 * 24 * time.Hour).Unix()
-	database.Exec(`UPDATE sessions SET ended_at=?, started_at=? WHERE uuid=?`, old, old, sid)
-	cutoff := time.Now().Add(-14 * 24 * time.Hour).Unix()
-	if m, _, _ := mustPrune(t, database, cutoff, sid); m == 0 {
-		t.Fatal("gemini session not pruned")
-	}
-	database.Close()
-	if out := runIndexFull(t); strings.Contains(out, "could not be restored") {
-		t.Fatalf("gemini restore failed:\n%s", out)
-	}
-	d2 := reopen(t)
-	defer d2.Close()
-	if rawJSONOf(t, d2, sid)[0] == "" {
-		t.Fatal("index --full did not restore gemini raw_json")
-	}
-}
-
 func TestPruneRawLeavesUsageAndTargetsByteIdentical(t *testing.T) {
 	database, _ := pruneSandbox(t, "sess-old", 30)
 	// Seed a usage row and a tool_target for the session.

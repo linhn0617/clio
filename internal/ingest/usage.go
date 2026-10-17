@@ -307,16 +307,6 @@ var codexUsageCanon = map[string]func(*model.SessionUsage, int64){
 	"reasoning_output_tokens": func(r *model.SessionUsage, n int64) { r.Reasoning += n },
 }
 
-// geminiUsageCanon maps Gemini per-message tokens keys to canonical columns;
-// "total" is the native total.
-var geminiUsageCanon = map[string]func(*model.SessionUsage, int64){
-	"input":    func(r *model.SessionUsage, n int64) { r.InputTokens += n },
-	"output":   func(r *model.SessionUsage, n int64) { r.OutputTokens += n },
-	"cached":   func(r *model.SessionUsage, n int64) { r.CacheRead += n },
-	"thoughts": func(r *model.SessionUsage, n int64) { r.Reasoning += n },
-	"tool":     func(r *model.SessionUsage, n int64) { r.Tool += n },
-}
-
 // hasNumericKey reports whether m carries key with a plain numeric value —
 // used to validate that a native-total source's record actually carries its
 // native total before its categories are accepted (a record with categories

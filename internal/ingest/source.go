@@ -27,7 +27,9 @@ type Source interface {
 	// WholeFileReplay reports whether this source's files must be reconstructed by a
 	// full replay from offset 0 rather than resumed from a stored byte offset (e.g. an
 	// op-log format where a later record can overwrite earlier state). Claude Code and
-	// Codex are true append-only event streams and return false; Gemini returns true.
+	// Codex are true append-only event streams and return false. No built-in source
+	// returns true today (the Gemini adapter that did was removed); the mechanism is kept
+	// as generic SPI.
 	WholeFileReplay() bool
 }
 
@@ -141,21 +143,4 @@ func (ing *Ingester) addCodexSource() {
 		return
 	}
 	ing.AddSource(codexSource{root: root})
-}
-
-// addGeminiSource registers the Gemini CLI source rooted at ~/.gemini/tmp, but
-// only when that directory exists. Mirrors addCodexSource: Gemini not being
-// installed is not an error, the source is simply not registered. Unexported
-// for the same reason as addCodexSource: tests inject a geminiSource with a
-// controlled root directly via AddSource.
-func (ing *Ingester) addGeminiSource() {
-	root, err := config.GeminiTmpDir()
-	if err != nil {
-		ing.log.Warn("gemini tmp dir unavailable", "err", err)
-		return
-	}
-	if fi, statErr := os.Stat(root); statErr != nil || !fi.IsDir() {
-		return
-	}
-	ing.AddSource(geminiSource{root: root})
 }

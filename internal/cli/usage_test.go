@@ -67,8 +67,8 @@ func TestFormatUsageGroupRowDrillDownPerRow(t *testing.T) {
 	if !strings.Contains(proj, "[stale: 2 sessions]") {
 		t.Fatalf("project row lacks stale count: %q", proj)
 	}
-	mdl := formatUsageGroupRow("model", sessions.UsageGroupRow{Source: "gemini", Key: "gemini-x", Sessions: 1, TotalTokens: 10})
-	if !strings.Contains(mdl, `clio usage --model 'gemini-x' --by session --source gemini`) {
+	mdl := formatUsageGroupRow("model", sessions.UsageGroupRow{Source: "codex", Key: "gpt-x", Sessions: 1, TotalTokens: 10})
+	if !strings.Contains(mdl, `clio usage --model 'gpt-x' --by session --source codex`) {
 		t.Fatalf("model row lacks model-selecting drill-down: %q", mdl)
 	}
 }
