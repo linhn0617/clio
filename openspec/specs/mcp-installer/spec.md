@@ -29,7 +29,11 @@ leave the config file untouched rather than overwriting the unexpected value. A 
 key or a JSON `null` value carries no server data and SHALL be treated as absent (a fresh
 object is created). The system SHALL NOT leave a `.bak` file behind on any exit path: the
 backup is removed after a successful write and also when a write step fails after the
-backup was created (the atomic rename keeps the original intact).
+backup was created (the atomic rename keeps the original intact). When the config path is
+a symlink (dotfiles setups), the system SHALL resolve it first and write, back up
+(`.bak`), and lock at the real target, so the link itself is never replaced; a symlink
+whose target does not exist SHALL be an error that leaves the link and the filesystem
+untouched.
 
 #### Scenario: Existing servers preserved
 
@@ -61,6 +65,18 @@ backup was created (the atomic rename keeps the original intact).
 - **WHEN** a write step fails after the `.bak` backup has been created
 - **THEN** the system SHALL remove the `.bak` (leaving no backup behind), the original
   config remaining intact via the atomic rename
+
+#### Scenario: Symlinked config is written through
+
+- **WHEN** `~/.claude.json` or `~/.claude/settings.json` is a symlink to an existing file
+  and a mutation succeeds
+- **THEN** the path SHALL still be a symlink, the target's content SHALL be updated, and
+  the `.bak` SHALL sit beside the target
+
+#### Scenario: Dangling symlink is refused
+
+- **WHEN** the config path is a symlink whose target does not exist
+- **THEN** the system SHALL return an error and create no file, leaving the symlink as is
 
 #### Scenario: Concurrent mutations are serialized (Unix)
 

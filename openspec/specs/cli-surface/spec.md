@@ -72,8 +72,10 @@ The system SHALL skip its own incremental ingest when an MCP server is the activ
 `clio list` and `clio search` SHALL accept `--touched <path-prefix>`, `--tool
 <name>`, and `--ran <command-substring>` to filter results by indexed activity. A
 new `clio activity --by file|command|tool|pattern|url [--since <when>] [--project
-<prefix>]` SHALL report counts grouped by the chosen activity kind, most frequent
-first.
+<path>]` SHALL report counts grouped by the chosen activity kind, most frequent
+first. The `--project <path>` filter of `clio list` and `clio activity` SHALL match
+sessions whose project path equals `<path>` or lies beneath it (a `/` boundary, a
+trailing `/` ignored), never a sibling that merely shares the prefix.
 
 #### Scenario: Filter sessions by touched file
 
@@ -90,6 +92,12 @@ first.
 
 - **WHEN** the user runs `clio activity --by command --since 7d`
 - **THEN** the system SHALL list commands run in the last 7 days with their counts
+
+#### Scenario: Project filter respects the path boundary
+
+- **WHEN** the user runs `clio list --project /x/foo` with sessions under `/x/foo`,
+  `/x/foo/sub`, and `/x/foo-bar`
+- **THEN** the first two SHALL be listed and `/x/foo-bar` SHALL NOT
 
 ### Requirement: Recall and hook commands
 
@@ -165,9 +173,13 @@ server), and exit cleanly when the user quits.
 
 `clio list` SHALL list only top-level sessions by default, excluding subagent child
 sessions (those with a populated `parent_session` whose parent session exists), and
-SHALL annotate a parent that spawned subagents with a `(+N subagents)` marker. A
+SHALL annotate a parent that spawned subagents with a `(+N subagents)` marker. A child
+SHALL be hidden whenever its parent is indexed and passes the same filters as the listing,
+independent of the page size (`--limit`): a parent ranking below the limit still hides its
+children. A
 `--include-subagents` flag SHALL include subagent sessions in the listing. A
-subagent whose parent session is not indexed SHALL still be listed (orphan
+subagent whose parent session is not indexed, or is excluded by the listing's own filters
+(for example older than `--since`, or in another project), SHALL still be listed (orphan
 promotion), so nothing becomes invisible.
 
 #### Scenario: Subagents are hidden from the default list
@@ -185,6 +197,17 @@ promotion), so nothing becomes invisible.
 
 - **WHEN** a subagent session's parent is not indexed
 - **THEN** that subagent SHALL still be listed at top level
+
+#### Scenario: Parent beyond the page limit still hides its child
+
+- **WHEN** `clio list --limit 1` runs, the most recent session is a subagent whose parent
+  is indexed but ranks below the limit
+- **THEN** the subagent SHALL NOT appear and the page SHALL show the next top-level session
+
+#### Scenario: A parent filtered out by the listing's filters promotes the child
+
+- **WHEN** `clio list --since 1d` runs and a recent subagent's parent is older than the cutoff
+- **THEN** that subagent SHALL be listed at top level
 
 ### Requirement: show surfaces a session's subagents
 
@@ -363,4 +386,44 @@ codex-specific check.
 - **WHEN** a new source is registered and only that source's root exists on the machine
 - **THEN** `clio index` and `clio install-mcp` SHALL proceed without the bootstrap check
   being edited for that source
+
+### Requirement: Terminal escape sequences are stripped from human-readable output
+
+Human-readable CLI output SHALL NOT replay terminal control sequences carried in
+indexed text. Transcripts can contain, for example, OSC 52 clipboard writes,
+window-title changes, or screen clears. The human-readable output of `clio show`
+(markdown), `list`, `search`, `ask`, `activity`, `recall`, `usage`, and
+`file-history` SHALL strip such sequences from every indexed string it prints
+(titles, project paths, snippets, excerpts, message content, tool names, activity
+values): ESC-introduced CSI, OSC, DCS, APC, PM, SOS, and other ESC sequences (an
+unterminated one is dropped to the end of the string, unless a new ESC appears
+first — that aborts the earlier sequence and parsing restarts there, as a terminal
+does), C0 control characters other than newline and tab (carriage return included),
+DEL, and C1 control characters, whether UTF-8 encoded or a raw byte outside a valid
+UTF-8 sequence; a C1 CSI, OSC, DCS, SOS, PM, or APC introducer or ST acts like its
+ESC form.
+Ordinary text, CJK, and emoji SHALL be preserved. Machine formats are unaffected:
+`--format json`, `--format raw`, `--json`, the file-history hook's JSON envelope,
+and MCP responses SHALL keep the stored text, with control characters escaped by
+the JSON encoder.
+
+#### Scenario: Escape sequences in a session are not replayed by show
+
+- **WHEN** a session message contains `ESC ] 52 ; c ; <base64> BEL` and `ESC [ 2 J`
+  and the user runs `clio show <id>`
+- **THEN** the output SHALL contain neither `ESC` nor `BEL`, and the surrounding
+  visible text SHALL still be printed
+
+#### Scenario: Escape sequences in a recall digest
+
+- **WHEN** the last assistant excerpt, a session title, a touched file, or a command
+  contains terminal escape sequences and `clio recall` renders the digest
+- **THEN** the digest SHALL contain no `ESC` byte
+
+#### Scenario: JSON and raw output are unchanged
+
+- **WHEN** the user runs `clio show <id> --format json` or `--format raw` on the
+  same session
+- **THEN** the stored message text SHALL be emitted as stored (control characters
+  JSON-escaped in `json`), not stripped
 
