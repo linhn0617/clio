@@ -5,6 +5,60 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-10-17
+
+Hardening pass from a six-way review of the shipped code (openspec change
+`2026-10-16-review-hardening`): sessions survive Claude Code's transcript
+cleanup, the FTS index is kept compact, and every human-readable surface is
+terminal-safe.
+
+### Added
+
+- **`clio index --purge-missing [--force]`** — the only command that now drops
+  sessions whose transcript is gone. It refuses when more than ten files vanished
+  together within 24 hours and that cluster is over half the candidates (an
+  unmounted disk looks exactly like that); `--force` overrides. Refused while
+  `clio mcp` holds the index lock.
+- **`clio doctor`** reports `retained sessions` (kept after their transcript was
+  deleted) and `fts bloat` (FTS size vs message text from `dbstat`; red when the
+  ratio exceeds 2.0 and the FTS index is at least 16 MB).
+- **`internal/termsafe`** — terminal escape sequences (CSI/OSC/DCS/APC/PM/SOS,
+  C0 controls except newline and tab, DEL, raw and UTF-8 C1) are stripped from
+  `list`, `show`, `subagent`, `activity`, `recall`, `file-history`, `usage`
+  (including `--quota`) and every TUI pane. `--json`, raw events and MCP output
+  are unchanged.
+
+### Changed
+
+- **Deleted transcripts no longer delete sessions.** Claude Code removes
+  transcripts after `cleanupPeriodDays` (30 by default); until now the next
+  `clio index` dropped those sessions too. The catch-up now only marks
+  `ingest_state.source_missing_at` (migration 0013, cleared if the file comes
+  back); a live copy of the same session uuid repoints the session instead of
+  purging it. The README documents the Claude Code setting.
+- **FTS maintenance.** `clio index --full` runs `optimize` on the FTS index
+  after purging, and `clio prune-raw --vacuum` optimizes before it vacuums. A
+  never-optimized index was measured at 3.8× its message text; optimize plus
+  vacuum brought a 3.4 GB file to 948 MB.
+- **Redaction** now applies to JSON object keys as well as values, so a token
+  used as a key is masked like one used as a value; two keys that redact to the
+  same name collapse to a single `[REDACTED:key]` entry.
+- **`clio list`** hides subagent sessions whenever their parent passes the same
+  filters, not only when the parent lands on the same page; a child whose parent
+  is filtered out or missing is still promoted.
+- **`clio recall`** excludes the calling session (and its subagents) from the
+  digest using the hook payload's `session_id`; `--project` matches on a path
+  boundary and is case-sensitive, so `/a/b` no longer matches `/a/bc`; touched
+  files are limited to the project root; output is capped at 9,500 characters
+  (commands, then files, then sessions, then the excerpt give way). `clio
+  install-hook` writes the SessionStart hook with
+  `matcher: startup|resume|clear|compact` and `timeout: 10`, and upgrades an
+  older entry in place.
+- **`clio install-hook`** shell-quotes the executable path, so a `clio` under a
+  directory containing spaces works; an older unquoted entry is recognised,
+  upgraded and removable by `uninstall-hook`. A `settings.json` symlink is
+  resolved first, so the lock, temp file and `.bak` sit next to the real file.
+
 ## [0.17.0] - 2026-10-16
 
 Fix release: closes a `<private>` redaction gap found on a live index, and takes
