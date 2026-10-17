@@ -301,7 +301,7 @@ func bashFileCandidates(command, cwd string, max int) []candidateFile {
 		return nil
 	}
 	cwd = filepath.Clean(cwd)
-	realCwd, err := filepath.EvalSymlinks(cwd)
+	realCwd, err := evalSymlinks(cwd)
 	if err != nil {
 		return nil
 	}
@@ -313,7 +313,7 @@ func bashFileCandidates(command, cwd string, max int) []candidateFile {
 	}
 	var out []candidateFile
 	seen := map[string]bool{}
-	skipNext, inTee := false, false
+	skipNext, inTee, cmdStart := false, false, true
 	words := 0
 	for _, t := range toks {
 		if t.Op {
@@ -321,8 +321,13 @@ func bashFileCandidates(command, cwd string, max int) []candidateFile {
 			// `<<<` introduce a heredoc/here-string, not a file to read).
 			skipNext = strings.ContainsAny(t.Text, "<>")
 			inTee = false
+			// A command position follows `;`, `|`, `&&`, `||`, `(` or a newline; a
+			// redirection operator (`2>&1`) does not start one.
+			cmdStart = t.Text == "\n" || (!skipNext && strings.ContainsAny(t.Text, ";|&("))
 			continue
 		}
+		atStart := cmdStart
+		cmdStart = false
 		if words++; words > bashMaxTokens {
 			break
 		}
@@ -330,7 +335,7 @@ func bashFileCandidates(command, cwd string, max int) []candidateFile {
 			skipNext = false
 			continue
 		}
-		if t.Text == "tee" {
+		if atStart && filepath.Base(t.Text) == "tee" {
 			inTee = true // every word up to the next operator is a write target
 			continue
 		}
@@ -358,7 +363,7 @@ func bashFileCandidates(command, cwd string, max int) []candidateFile {
 		if fi, err := os.Stat(tok); err != nil || !fi.Mode().IsRegular() {
 			continue
 		}
-		real, err := filepath.EvalSymlinks(tok)
+		real, err := evalSymlinks(tok)
 		if err != nil || !pathUnder(realCwd, real) {
 			continue
 		}
@@ -374,8 +379,9 @@ func bashFileCandidates(command, cwd string, max int) []candidateFile {
 	return out
 }
 
-// heredocStart finds `<<WORD`, `<<-WORD`, `<<'WORD'` or `<<"WORD"` (not `<<<`).
-var heredocStart = regexp.MustCompile(`(?:^|[^<])<<(-?)\s*(?:'([^']+)'|"([^"]+)"|\\?([^\s;|&()<>'"\\]+))`)
+// heredocStart finds `<<WORD`, `<<-WORD`, `<<'WORD'` or `<<"WORD"` (not `<<<`). A delimiter never
+// starts with a digit and `<<` is not preceded by `(`, so `$((1<<2))` and `((x<<2))` shifts are not heredocs.
+var heredocStart = regexp.MustCompile(`(?:^|[^<(])<<(-?)\s*(?:'([^']+)'|"([^"]+)"|\\?([^\s;|&()<>'"\\0-9][^\s;|&()<>'"\\]*))`)
 
 // stripHeredocBodies removes heredoc bodies (the lines after a `<<WORD` line up
 // to the terminator line) so text that is only data never yields a candidate and
@@ -402,6 +408,9 @@ func stripHeredocBodies(command string) string {
 	}
 	return strings.Join(out, "\n")
 }
+
+// evalSymlinks is swappable so a test can count resolutions.
+var evalSymlinks = filepath.EvalSymlinks
 
 // pathUnder reports whether path is strictly inside root, by path elements
 // (so /p2 is not under /p).

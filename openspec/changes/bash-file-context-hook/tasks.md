@@ -9,8 +9,8 @@
 
 - [x] 2.1 Tests first: fresh install, `Read` clio-only upgrade, mixed-group move, idempotence,
       both matchers detected, user matcher untouched, uninstall of `Read|Bash`
-- [x] 2.2 Matcher `Read|Bash`, `upgradeReadFileHistory`, `HasLegacyPreToolUseReadHook`,
-      install-hook upgrade message and `PreToolUse(Read|Bash)` wording
+- [x] 2.2 Matcher `Read|Bash`, `installFileHistory` (reports Added/Upgraded/Collapsed/Misplaced via
+      `InstallClioHooks`), `matcherCoversTool`, install-hook messages and `PreToolUse(Read|Bash)` wording
 
 ## 3. Docs and specs
 
@@ -27,6 +27,6 @@
 
 - [x] 5.1 Tokenizer: heredoc bodies, comments, redirect targets, `cd`/`pushd`, 64-word cap,
       symlink-resolved boundary, shared `internal/shellwords`
-- [x] 5.2 Installer: Read-covering matchers count as installed, duplicate collapse, upgrade
-      message only on a real retarget
+- [x] 5.2 Installer: a matcher covering both Read and Bash counts as installed, other matchers are
+      left alone with a warning, duplicate collapse, messages follow the real mutation
 - [x] 5.3 Hook: single read-only open (injectable), sequential budget, stat kept from selection

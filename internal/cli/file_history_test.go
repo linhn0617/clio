@@ -316,6 +316,12 @@ func TestBashFileCandidates(t *testing.T) {
 		{"heredoc delimiter with a dash", "cat <<END-OF\nc.go\nEND-OF\ncat b.go", f.cwd, []string{abs("b.go")}},
 		{"backslash heredoc delimiter", "cat <<\\EOF\nc.go\nEOF\ncat b.go", f.cwd, []string{abs("b.go")}},
 		{"double-quoted heredoc delimiter", "cat <<\"EOF\"\nc.go\nEOF\ncat b.go", f.cwd, []string{abs("b.go")}},
+		{"tee as an argument is not a command", "grep tee a.go", f.cwd, []string{abs("a.go")}},
+		{"tee at start of command", "tee a.go", f.cwd, nil},
+		{"absolute tee after a pipe", "echo x | /usr/bin/tee -a a.go", f.cwd, nil},
+		{"tee after && and (", "true && (echo x | tee a.go) && cat b.go", f.cwd, []string{abs("b.go")}},
+		{"arithmetic shift is not a heredoc", "echo $((1<<2))\ncat a.go", f.cwd, []string{abs("a.go")}},
+		{"((  )) shift is not a heredoc", "((x=1<<2))\ncat a.go", f.cwd, []string{abs("a.go")}},
 		{"tee targets are writes", "cat a.go | tee b.go c.go", f.cwd, []string{abs("a.go")}},
 		{"tee -a then more commands", "cat a.go | tee -a b.go; cat d.go", f.cwd, []string{abs("a.go"), abs("d.go")}},
 		{"heredoc line stays scanned before the body", "cat <<EOF a.go\nb.go\nEOF", f.cwd, []string{abs("a.go")}},
@@ -590,5 +596,24 @@ func TestFileHistoryHookBashBudgetSharedFairly(t *testing.T) {
 		if !strings.Contains(ctx, "touched "+filepath.Join(f.cwd, name)) {
 			t.Errorf("%s missing from the digest", name)
 		}
+	}
+}
+
+// A word naming nothing must cost one stat and no symlink resolution: Stat comes
+// before EvalSymlinks, so only the cwd (once) and real files are resolved.
+func TestBashFileCandidatesResolvesSymlinksOnlyForExistingFiles(t *testing.T) {
+	f := newBashFixture(t)
+	orig := evalSymlinks
+	defer func() { evalSymlinks = orig }()
+	calls := 0
+	evalSymlinks = func(p string) (string, error) { calls++; return orig(p) }
+	bashFileCandidates("cat nope.go missing.txt adir", f.cwd, bashMaxFiles)
+	if calls != 1 {
+		t.Errorf("EvalSymlinks called %d times for non-files, want 1 (cwd only)", calls)
+	}
+	calls = 0
+	bashFileCandidates("cat a.go nope.go", f.cwd, bashMaxFiles)
+	if calls != 2 {
+		t.Errorf("EvalSymlinks called %d times, want 2 (cwd + a.go)", calls)
 	}
 }
