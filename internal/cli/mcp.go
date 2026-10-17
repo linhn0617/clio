@@ -62,34 +62,54 @@ func newMCPCmd() *cobra.Command {
 			defer cancel()
 
 			projects, _ := config.ClaudeProjectsDir()
-			ing := ingest.NewWithBuiltinSources(rw, log)
 
+			// Always false until the leader's catch-up has finished (and published
+			// true under ingestMu): a process that merely holds the lease is not yet
+			// fresh, so early reads go through beforeRead.
 			var isLeaderNow atomic.Bool
-			isLeaderNow.Store(isLeader)
 
 			// No synchronous startup ingest here: Serve must answer immediately, and the
 			// leader's single startup catch-up runs inside leaderLoop (with the lease
-			// already being renewed). Until it finishes isLeaderNow stays false, so
-			// beforeRead's throttled catch-up covers reads that arrive early.
-			env := &leaderEnv{
-				ing:        ing,
-				ingestMu:   &sync.Mutex{},
-				renewEvery: leaderRenewInterval,
-				startWatcher: func(wctx context.Context) {
-					if err := watcher.New(ing, projects, log).Run(wctx); err != nil {
-						log.Warn("watcher stopped", "err", err)
-					}
-				},
-			}
+			// already being renewed).
+			env := &leaderEnv{ingestMu: &sync.Mutex{}, renewEvery: leaderRenewInterval}
+			rt := newMCPRuntime(rw, projects, log, env.tryWalk)
+			env.ing, env.startWatcher = rt.ing, rt.watch
 			beforeRead := newBeforeRead(ctx, env, &isLeaderNow, projects, log)
 
-			go runLeaseRole(ctx, lease, isLeader, &isLeaderNow, env, projects, log)
+			waitRole := startLeaseRole(ctx, lease, isLeader, &isLeaderNow, env, projects, log)
 
 			log.Warn("clio mcp server starting", "leader", isLeader)
 			srv := mcp.NewServer(ro, version, beforeRead)
-			return mcp.Serve(srv)
+			err = serveMCP(srv)
+			// Stop catch-up, watcher and renewer before the lease is released and the
+			// DB handles close (deferred above): they all use both.
+			cancel()
+			waitRole()
+			return err
 		},
 	}
+}
+
+// serveMCP is a seam so the command-level startup test can end Serve at will.
+var serveMCP = mcp.Serve
+
+// mcpRuntime is what the command builds its ingestion side from: the ingester the
+// leader lifecycle drives, and the blocking watcher run.
+type mcpRuntime struct {
+	ing   leaderIngester
+	watch func(ctx context.Context)
+}
+
+// newMCPRuntime is a seam for tests; guard is handed to the watcher's backstop.
+var newMCPRuntime = func(rw *db.DB, projects string, log *slog.Logger, guard func() func()) mcpRuntime {
+	ing := ingest.NewWithBuiltinSources(rw, log)
+	return mcpRuntime{ing: ing, watch: func(ctx context.Context) {
+		w := watcher.New(ing, projects, log)
+		w.BackstopGuard = guard
+		if err := w.Run(ctx); err != nil {
+			log.Warn("watcher stopped", "err", err)
+		}
+	}}
 }
 
 // leaderIngester is the slice of *ingest.Ingester the leader lifecycle uses; an
@@ -103,14 +123,23 @@ type leaderIngester interface {
 // leaderEnv bundles what leaderLoop and beforeRead share.
 type leaderEnv struct {
 	ing leaderIngester
-	// ingestMu serializes catch-up walks on the one Ingester: the leader's startup
-	// catch-up holds it (Lock) for its whole duration, beforeRead only TryLocks and
-	// skips (serving possibly-stale data) when it is taken. Waiting instead would
-	// block a read for as long as a full rebuild takes.
+	// ingestMu serializes full walks on the one Ingester: the leader's startup
+	// catch-up holds it (Lock) for its whole duration, beforeRead and the watcher
+	// backstop only TryLock and skip when it is taken. Waiting instead would block a
+	// read for as long as a full rebuild takes.
 	ingestMu   *sync.Mutex
 	renewEvery time.Duration
 	// startWatcher blocks until ctx is done.
 	startWatcher func(ctx context.Context)
+}
+
+// tryWalk takes ingestMu without blocking. It returns the release func, or nil if
+// another walk holds it.
+func (e *leaderEnv) tryWalk() func() {
+	if !e.ingestMu.TryLock() {
+		return nil
+	}
+	return e.ingestMu.Unlock
 }
 
 // newBeforeRead builds the best-effort, throttled read catch-up. It is a no-op
@@ -127,11 +156,21 @@ func newBeforeRead(ctx context.Context, env *leaderEnv, leaderFlag *atomic.Bool,
 		mu.Lock()
 		throttled := time.Since(lastCatchup) < time.Second
 		mu.Unlock()
-		if throttled || !env.ingestMu.TryLock() {
-			return // throttled, or another walk (leader startup / earlier read) is running
+		if throttled {
+			return
+		}
+		release := env.tryWalk()
+		if release == nil {
+			return // another walk (leader startup / earlier read) is running
+		}
+		// The leader publishes the flag while holding ingestMu, so a flag that turned
+		// true while we were acquiring means the walk is already done.
+		if leaderFlag.Load() {
+			release()
+			return
 		}
 		_, err := env.ing.IngestAll(ctx, projects, false)
-		env.ingestMu.Unlock()
+		release()
 
 		mu.Lock()
 		lastCatchup = time.Now()
@@ -142,11 +181,30 @@ func newBeforeRead(ctx context.Context, env *leaderEnv, leaderFlag *atomic.Bool,
 	}
 }
 
+// startLeaseRole launches runLeaseRole and returns a func that blocks until it (and
+// everything it started: catch-up, watcher, renewer) has exited. A starting leader
+// takes ingestMu here, synchronously, before the caller can Serve, so no early read
+// can win the lock and run a cold rebuild of its own; leaderLoop inherits and
+// releases it.
+func startLeaseRole(ctx context.Context, lease *lock.Lease, isLeader bool, leaderFlag *atomic.Bool, env *leaderEnv, projects string, log *slog.Logger) (wait func()) {
+	preHeld := isLeader && projects != ""
+	if preHeld {
+		env.ingestMu.Lock()
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runLeaseRole(ctx, lease, isLeader, preHeld, leaderFlag, env, projects, log)
+	}()
+	return func() { <-done }
+}
+
 // runLeaseRole drives leader/follower transitions until ctx is cancelled.
 // leaderFlag is kept current so beforeRead can skip catch-up when not needed.
-// leaderFlag.Store(true) is deferred into leaderLoop, after the startup
-// catch-up completes, so a just-promoted leader never serves stale reads.
-func runLeaseRole(ctx context.Context, lease *lock.Lease, isLeader bool, leaderFlag *atomic.Bool, env *leaderEnv, projects string, log *slog.Logger) {
+// leaderFlag.Store(true) happens in leaderLoop, after the startup catch-up
+// completes, so a just-promoted leader never serves stale reads.
+// preHeld says the caller already took env.ingestMu for the first leaderLoop.
+func runLeaseRole(ctx context.Context, lease *lock.Lease, isLeader, preHeld bool, leaderFlag *atomic.Bool, env *leaderEnv, projects string, log *slog.Logger) {
 	for {
 		if !isLeader {
 			leaderFlag.Store(false)
@@ -154,9 +212,10 @@ func runLeaseRole(ctx context.Context, lease *lock.Lease, isLeader bool, leaderF
 				return // ctx done
 			}
 		}
-		// leaderFlag.Store(true) is now done inside leaderLoop, after startup catch-up.
 		// Returns true if superseded (demote), false if ctx done.
-		if !leaderLoop(ctx, lease, leaderFlag, env, projects, log) {
+		demoted := leaderLoop(ctx, lease, leaderFlag, env, projects, log, preHeld)
+		preHeld = false
+		if !demoted {
 			return
 		}
 		// Demoted: clear the flag before going back to follower polling.
@@ -192,17 +251,25 @@ func pollUntilLeader(ctx context.Context, lease *lock.Lease, log *slog.Logger) b
 // cancelled. Renewal starts before the catch-up and spans the whole call: a
 // catch-up (a full rebuild can take minutes) longer than the lease TTL would
 // otherwise let another clio take over. If renewal reports ErrSuperseded mid
-// catch-up, the catch-up is cancelled and we demote at once.
-// leaderFlag is flipped to true only after the catch-up completes so that a
-// just-promoted follower never serves stale reads in the promotion window.
-func leaderLoop(ctx context.Context, lease *lock.Lease, leaderFlag *atomic.Bool, env *leaderEnv, projects string, log *slog.Logger) bool {
-	wctx, wcancel := context.WithCancel(ctx)
+// catch-up, the catch-up is cancelled and we demote at once. Everything started
+// here (renewer, watcher) has exited when it returns.
+// preHeld means the caller already holds env.ingestMu; the catch-up releases it.
+// leaderFlag is flipped to true only after the catch-up completes, while still
+// holding ingestMu, so a just-promoted follower never serves stale reads and no
+// early read can start a walk of its own in between.
+func leaderLoop(ctx context.Context, lease *lock.Lease, leaderFlag *atomic.Bool, env *leaderEnv, projects string, log *slog.Logger, preHeld bool) bool {
+	wctx, wcancel := context.WithCancelCause(ctx)
 
-	superseded := make(chan struct{})
-	var renewWG sync.WaitGroup
-	renewWG.Add(1)
+	var wg sync.WaitGroup
+	// Wait for renewer and watcher before returning: the caller reuses lease
+	// (TryPromote) right after a demotion and Lease is not safe for concurrent use.
+	defer func() {
+		wcancel(context.Canceled)
+		wg.Wait()
+	}()
+	wg.Add(1)
 	go func() {
-		defer renewWG.Done()
+		defer wg.Done()
 		renew := time.NewTicker(env.renewEvery)
 		defer renew.Stop()
 		for {
@@ -213,8 +280,7 @@ func leaderLoop(ctx context.Context, lease *lock.Lease, leaderFlag *atomic.Bool,
 				if err := lease.Renew(); err != nil {
 					if errors.Is(err, lock.ErrSuperseded) {
 						log.Warn("lease superseded; demoting to follower")
-						close(superseded)
-						wcancel() // abort an in-flight catch-up
+						wcancel(lock.ErrSuperseded) // also aborts an in-flight catch-up
 						return
 					}
 					log.Warn("lease renew failed", "err", err)
@@ -222,53 +288,78 @@ func leaderLoop(ctx context.Context, lease *lock.Lease, leaderFlag *atomic.Bool,
 			}
 		}
 	}()
-	// Wait for the renewer before returning: the caller reuses lease (TryPromote)
-	// right after a demotion and Lease is not safe for concurrent use.
-	defer func() {
-		wcancel()
-		renewWG.Wait()
-	}()
 
 	// Run the startup catch-up + watcher regardless of whether the Claude projects dir
 	// exists: on a Codex-only machine it is absent, but the Codex source still has
 	// history to ingest and live-watch. IngestAll/PurgeMissing/watcher all handle a
 	// missing root per-source.
 	if projects != "" {
-		env.ingestMu.Lock()
-		if _, err := env.ing.IngestAll(wctx, projects, false); err != nil {
-			log.Warn("startup catch-up failed", "err", err)
+		if !startupCatchup(wctx, leaderFlag, env, projects, log, preHeld) {
+			return superseded(wctx)
 		}
-		if err := env.ing.BackfillActivity(wctx); err != nil {
-			log.Warn("activity backfill failed", "err", err)
-		}
-		// Reconcile deletions that happened while clio was down before we start
-		// serving: deleted transcripts are marked retained (kept, not purged), and
-		// files that came back are unmarked.
-		if err := env.ing.PurgeMissing(wctx, projects); err != nil {
-			log.Warn("startup purge failed", "err", err)
-		}
-		env.ingestMu.Unlock()
-		if wctx.Err() != nil {
-			// Cancelled mid catch-up: superseded (demote) or shutting down.
-			select {
-			case <-superseded:
-				return true
-			default:
-				return false
-			}
-		}
-		// Catch-up done: safe to serve reads without follower catch-up.
-		leaderFlag.Store(true)
-		go env.startWatcher(wctx)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			env.startWatcher(wctx)
+		}()
 	} else {
 		// No projects path resolved; nothing to catch up.
 		leaderFlag.Store(true)
 	}
 
-	select {
-	case <-ctx.Done():
-		return false
-	case <-superseded:
+	<-wctx.Done()
+	return superseded(wctx)
+}
+
+// superseded reports whether wctx was cancelled by the renewer (as opposed to the
+// parent ctx ending).
+func superseded(wctx context.Context) bool {
+	return errors.Is(context.Cause(wctx), lock.ErrSuperseded)
+}
+
+// startupCatchup runs ingest, activity backfill and purge-missing under ingestMu and
+// publishes leaderFlag=true before releasing it. Returns false if cancelled (the
+// flag is left false); the ctx is checked after every phase so a superseded leader
+// stops at once.
+func startupCatchup(wctx context.Context, leaderFlag *atomic.Bool, env *leaderEnv, projects string, log *slog.Logger, preHeld bool) bool {
+	if !preHeld {
+		env.ingestMu.Lock()
+	}
+	defer env.ingestMu.Unlock()
+
+	cancelled := func() bool {
+		if wctx.Err() == nil {
+			return false
+		}
+		if superseded(wctx) {
+			log.Info("catch-up cancelled: superseded")
+		} else {
+			log.Info("catch-up cancelled: shutting down")
+		}
 		return true
 	}
+	if _, err := env.ing.IngestAll(wctx, projects, false); err != nil && wctx.Err() == nil {
+		log.Warn("startup catch-up failed", "err", err)
+	}
+	if cancelled() {
+		return false
+	}
+	if err := env.ing.BackfillActivity(wctx); err != nil && wctx.Err() == nil {
+		log.Warn("activity backfill failed", "err", err)
+	}
+	if cancelled() {
+		return false
+	}
+	// Reconcile deletions that happened while clio was down before we start
+	// serving: deleted transcripts are marked retained (kept, not purged), and
+	// files that came back are unmarked.
+	if err := env.ing.PurgeMissing(wctx, projects); err != nil && wctx.Err() == nil {
+		log.Warn("startup purge failed", "err", err)
+	}
+	if cancelled() {
+		return false
+	}
+	// Catch-up done: safe to serve reads without follower catch-up.
+	leaderFlag.Store(true)
+	return true
 }

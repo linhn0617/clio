@@ -2,50 +2,25 @@ package cli
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/linhn0617/clio/internal/config"
-	"github.com/linhn0617/clio/internal/lock"
 )
 
 func TestLeaderLoopDemotesOnSupersede(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	if _, err := config.EnsureDataDir(); err != nil {
-		t.Fatal(err)
-	}
-	lockPath, err := config.LockPath()
-	if err != nil {
-		t.Fatal(err)
-	}
+	lease, lockPath := leaseFixture(t)
 
-	lease, isLeader, err := lock.AcquireOrFollow(lockPath)
-	if err != nil || !isLeader {
-		t.Fatalf("expected leader: isLeader=%v err=%v", isLeader, err)
-	}
-	defer lease.Release()
-
-	// Run leaderLoop in the background. projects="" so it does no watcher/ingest,
-	// just the renew ticker.
+	// projects="" so leaderLoop does no catch-up or watcher, just the renewer.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan bool, 1)
 	var flag atomic.Bool
-	env := &leaderEnv{ing: &fakeIngester{}, ingestMu: &sync.Mutex{}, renewEvery: leaderRenewInterval}
-	go func() { done <- leaderLoop(ctx, lease, &flag, env, "", discardLogger()) }()
+	env := testEnv(&fakeIngester{}, leaderRenewInterval)
+	go func() { done <- leaderLoop(ctx, lease, &flag, env, "", discardLogger(), false) }()
 
-	// Simulate another process taking over: overwrite the lease file with a
-	// different nonce + fresh timestamp. The next Renew (<= ~3s) must see the
-	// nonce mismatch and demote.
-	// Lease file format is "pid nonce unixSeconds".
-	overwrite := fmt.Sprintf("%d %d %d", os.Getpid()+1, uint64(999999), time.Now().Unix())
-	if err := os.WriteFile(lockPath, []byte(overwrite), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	// Another process takes over; the next Renew (<= ~3s) must see the nonce
+	// mismatch and demote.
+	supersede(t, lockPath)
 
 	select {
 	case demoted := <-done:

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -14,7 +15,8 @@ import (
 )
 
 // TestStdioPurityE2E builds the real binary and drives it over stdio in an
-// isolated HOME, asserting that stdout carries only JSON-RPC (logs go to stderr).
+// isolated HOME, asserting that stdout carries only JSON-RPC (logs go to stderr)
+// and that mcp's own startup catch-up makes existing history searchable.
 func TestStdioPurityE2E(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping subprocess E2E in -short mode")
@@ -40,33 +42,11 @@ func TestStdioPurityE2E(t *testing.T) {
 		t.Fatalf("build failed: %v", err)
 	}
 
-	input := strings.Join([]string{
-		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`,
-		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
-		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`,
-		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"authentication"}}}`,
-	}, "\n") + "\n"
-
-	env := append(os.Environ(),
+	cmd := exec.Command(bin, "mcp")
+	cmd.Env = append(os.Environ(),
 		"HOME="+home,
 		"XDG_DATA_HOME="+filepath.Join(home, "data"),
 	)
-	// The server no longer ingests synchronously before serving (its startup
-	// catch-up runs in the background), so index first: this test is about stdout
-	// purity, not about how fast the index becomes ready.
-	idx := exec.Command(bin, "index")
-	idx.Env = env
-	if out, err := idx.CombinedOutput(); err != nil {
-		t.Fatalf("clio index failed: %v\n%s", err, out)
-	}
-
-	cmd := exec.Command(bin, "mcp")
-	cmd.Env = env
-	// Drive the server like a real client: keep stdin open until every
-	// response has arrived. mcp-go >= 1.0 runs tool calls on a worker pool
-	// and cancels in-flight requests as soon as stdin hits EOF, so feeding
-	// the whole script from a closed reader makes the search call fail with
-	// "context canceled" before it can answer.
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -80,55 +60,79 @@ func TestStdioPurityE2E(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("clio mcp failed to start: %v", err)
 	}
-	if _, err := io.WriteString(stdin, input); err != nil {
-		t.Fatal(err)
-	}
 
-	// Collect stdout lines until all three responses (ids 1, 2, 3) have
-	// arrived — tool calls run on a worker and may be written before the
-	// inline initialize/tools/list replies, so order is not guaranteed — with
-	// a deadline so a hung server fails the test instead of the suite.
-	var stdout bytes.Buffer
-	var lines []string
-	done := make(chan error, 1)
+	// Drive the server like a real client and keep stdin open until the session is
+	// found (mcp-go >= 1.0 cancels in-flight requests once stdin hits EOF). The server
+	// serves immediately and ingests in the background, so early searches may come
+	// back empty: poll until the startup catch-up has made the data searchable.
+	lines := make(chan string, 64)
 	go func() {
 		sc := bufio.NewScanner(stdoutPipe)
 		sc.Buffer(make([]byte, 0, 1<<20), 1<<20)
-		pending := map[string]bool{`"id":1`: true, `"id":2`: true, `"id":3`: true}
 		for sc.Scan() {
-			l := sc.Text()
+			lines <- sc.Text()
+		}
+		close(lines)
+	}()
+	send := func(s string) {
+		if _, err := io.WriteString(stdin, s+"\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`)
+	send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	send(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+
+	nextID := 3
+	sendSearch := func() {
+		send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"search","arguments":{"query":"authentication"}}}`, nextID))
+		nextID++
+	}
+	sendSearch()
+
+	var stdout bytes.Buffer
+	var sawInit, sawList, sawSearchHit bool
+	deadline := time.After(30 * time.Second)
+	retry := time.NewTicker(300 * time.Millisecond)
+	defer retry.Stop()
+	for !(sawInit && sawList && sawSearchHit) {
+		select {
+		case l, ok := <-lines:
+			if !ok {
+				t.Fatalf("server closed stdout early.\nstdout:\n%s\nstderr: %s", stdout.String(), stderr.String())
+			}
 			stdout.WriteString(l + "\n")
-			lines = append(lines, l)
-			for id := range pending {
-				if strings.Contains(l, id) {
-					delete(pending, id)
+			if strings.TrimSpace(l) == "" {
+				continue
+			}
+			var obj map[string]any
+			if err := json.Unmarshal([]byte(l), &obj); err != nil {
+				t.Fatalf("non-JSON line on stdout (purity violated): %q", l)
+			}
+			id, _ := obj["id"].(float64)
+			switch {
+			case id == 1:
+				sawInit = true
+			case id == 2:
+				sawList = true
+			case id >= 3:
+				// The session must appear in the search result (snippet text may be
+				// trimmed at trigram boundaries, so match on the session id).
+				if strings.Contains(l, "sess-1") {
+					sawSearchHit = true
 				}
 			}
-			if len(pending) == 0 {
-				break
+		case <-retry.C:
+			if !sawSearchHit && nextID < 200 {
+				sendSearch()
 			}
+		case <-deadline:
+			_ = cmd.Process.Kill()
+			t.Fatalf("search never found sess-1 within 30s.\nstdout:\n%s\nstderr: %s", stdout.String(), stderr.String())
 		}
-		done <- sc.Err()
-	}()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("reading stdout: %v\nstderr: %s", err, stderr.String())
-		}
-	case <-time.After(30 * time.Second):
-		_ = cmd.Process.Kill()
-		t.Fatalf("timed out waiting for the search response.\nstdout:\n%s\nstderr: %s", stdout.String(), stderr.String())
 	}
 	_ = stdin.Close()
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("clio mcp exited with error: %v\nstderr: %s", err, stderr.String())
-	}
-
-	if len(lines) < 3 {
-		t.Fatalf("expected >=3 JSON-RPC responses, got %d:\n%s", len(lines), stdout.String())
-	}
-	var sawSearchHit bool
-	for _, l := range lines {
+	for l := range lines { // drain until the server exits; still must be JSON
 		if strings.TrimSpace(l) == "" {
 			continue
 		}
@@ -136,13 +140,8 @@ func TestStdioPurityE2E(t *testing.T) {
 		if err := json.Unmarshal([]byte(l), &obj); err != nil {
 			t.Fatalf("non-JSON line on stdout (purity violated): %q", l)
 		}
-		if obj["id"] == float64(3) {
-			// The session must appear in the search result (snippet text may be
-			// trimmed at trigram boundaries, so match on the session id).
-			sawSearchHit = strings.Contains(l, "sess-1")
-		}
 	}
-	if !sawSearchHit {
-		t.Fatalf("search response missing expected hit.\nstdout:\n%s", stdout.String())
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("clio mcp exited with error: %v\nstderr: %s", err, stderr.String())
 	}
 }

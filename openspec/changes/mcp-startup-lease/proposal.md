@@ -18,7 +18,7 @@ And `Serve` waited for the pre-Serve ingest, so the MCP client got no response f
   use the existing throttled read catch-up. A mutex shared with the leader catch-up makes that
   read catch-up skip (serving possibly-stale data) rather than walk the same Ingester
   concurrently or block behind a long rebuild.
-- No change to the lock package, the worker pool, or the watcher.
+- The watcher gains an optional `BackstopGuard` so its reconciliation walk shares the same mutex. No change to the lock package or the worker pool.
 
 ## Impact
 

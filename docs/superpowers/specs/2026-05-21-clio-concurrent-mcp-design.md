@@ -114,14 +114,21 @@ clio mcp starts
   → open RW handle → run migrations (fenced, §4.6)
   → open RO handle (serve reads)
   → lock.AcquireOrFollow(leasePath)
-       ├─ isLeader → startup catch-up (IngestAll) → start watcher + renew loop
+       ├─ isLeader → (background) start renew loop → ONE startup catch-up → start watcher
        └─ follower → no startup catch-up; start promotion poll (every 5s)
-  → mcp.Serve(srv)   // read tools query the RO handle
+  → mcp.Serve(srv)   // immediate; read tools query the RO handle
 ```
 
+(Updated by change `mcp-startup-lease`: renewal starts before the catch-up and Serve
+does not wait for it. Until the catch-up finishes the process is not flagged leader,
+so early reads use the §4.3 path, which skips rather than walking concurrently with
+the leader's catch-up.)
+
 - **Leader:** owns the watcher (`watcher.New(...).Run(ctx)`) + a renew goroutine
-  calling `lease.Renew()` every 3s. On `ErrSuperseded` from Renew (a takeover
-  happened while it was hung): **stop the watcher and renew loop, demote to
+  calling `lease.Renew()` every 3s, running from before the startup catch-up until
+  the leader role ends. On `ErrSuperseded` from Renew (a takeover
+  happened while it was hung): **cancel any catch-up in progress, stop the watcher
+  and renew loop, demote to
   follower** (start the promotion poll). This guarantees at most one live watcher.
 - **Follower:** runs the promotion poll; on successful `TryPromote()` it runs a
   catch-up then starts the watcher + renew loop and stops polling.

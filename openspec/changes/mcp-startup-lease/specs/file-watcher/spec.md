@@ -11,8 +11,8 @@ lease before that catch-up starts and keep renewing for as long as it is leader,
 longer than the lease TTL does not forfeit leadership. If renewal reports that another process
 holds the lease, any catch-up in progress SHALL be cancelled and the process SHALL demote to
 follower. The process SHALL be treated as leader for read purposes only once the catch-up has
-completed; reads arriving earlier SHALL use the follower read catch-up, which SHALL NOT run
-concurrently with the leader's catch-up on the same ingester.
+completed (a process SHALL start with that state unset, even when it holds the lease); reads arriving earlier SHALL use the follower read catch-up, which SHALL NOT run
+concurrently with the leader's catch-up, nor start a rebuild of its own before the leader's catch-up has begun. The watcher's periodic reconciliation walk SHALL NOT run concurrently with such a walk on the same ingester, and on shutdown or demotion the catch-up, watcher and renewal SHALL have stopped before the lease is released.
 
 #### Scenario: Lock file written on start
 
@@ -33,3 +33,8 @@ concurrently with the leader's catch-up on the same ingester.
 
 - **WHEN** an MCP read arrives while the leader's catch-up is still running
 - **THEN** it SHALL be served without waiting for the catch-up and without starting a second concurrent ingest
+
+#### Scenario: Cancelled catch-up does not continue
+
+- **WHEN** the startup catch-up is cancelled (superseded or shutdown) between phases
+- **THEN** later phases (activity backfill, deletion reconciliation) SHALL NOT run and the process SHALL NOT be marked leader

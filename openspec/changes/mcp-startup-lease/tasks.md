@@ -14,3 +14,12 @@
 
 - [x] 3.1 `gofmt -l .`, `go vet ./...`, `go test -count=1 ./...`, `go test -race` on cli and lock
 - [x] 3.2 `openspec validate --all --strict`
+
+## Review fixes
+
+- [x] 4.1 Initial leader flag always false; leader takes the ingest mutex before Serve; flag published under it; read catch-up rechecks the flag after TryLock
+- [x] 4.2 Shutdown cancels then joins catch-up, watcher and renewer before the lease is released and DBs close
+- [x] 4.3 Watcher backstop walk runs under the shared mutex (`BackstopGuard`, skip when busy)
+- [x] 4.4 Cancelled catch-up stops between phases and logs at info; cancel cause (`WithCancelCause`) replaces the superseded channel
+- [x] 4.5 Command-level test asserts exactly one startup IngestAll; e2e polls search instead of pre-indexing
+- [x] 4.6 Supersede tests rewrite the lease file under `lock.WithFileLock`; concurrency design doc updated
