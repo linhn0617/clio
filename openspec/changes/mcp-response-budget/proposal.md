@@ -14,10 +14,13 @@ must first learn the total message count.
   response is larger, rows are dropped from the end at row boundaries (search hits, session
   rows, activity rows/buckets, `ask` excerpts, `read_session` messages) until it fits, and the
   response carries `truncated: true` and a `next` hint. Size is measured on the real serialized
-  output with a shrink-and-re-render search, not estimated. At least one row is always returned,
-  flagged `truncated` when that one row alone exceeds the budget.
+  output (Unicode code points) with a shrink-and-re-render search, not estimated; the result is
+  a single text content (no duplicate `structuredContent`). At least one row is always
+  returned; when it alone exceeds the budget its free text is cut to a prefix with a marker.
+  `ask` keeps hit excerpts over context; `read_session` sheds subagent messages first and keeps
+  the target (`around_sequence`) or the tail (`last_n`).
 - **mcp-server (read_session)**: new `last_n` (the last N messages) and `around_sequence`
-  (a window centred on a message `seq`, `limit/2` each side) parameters. `offset`, `last_n`
+  (a window centred on a message `seq`, backfilled to a full page near the end) parameters. `offset`, `last_n`
   and `around_sequence` are mutually exclusive; combining them is a tool error. The response now
   also reports `total`, and `offset` is the real start of the page in every mode. A truncated
   page adds `next_offset`.

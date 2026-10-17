@@ -1,22 +1,38 @@
 package mcp
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/linhn0617/clio/internal/db"
 )
 
+// resultLen measures what the client actually receives: every text content in
+// Unicode code points, plus structuredContent if the handler attached one
+// (a second copy of the payload, which the budget must also cover).
 func resultLen(t *testing.T, r *mcp.CallToolResult) int {
 	t.Helper()
-	tc, ok := r.Content[0].(mcp.TextContent)
-	if !ok {
-		t.Fatalf("content not text: %T", r.Content[0])
+	n := 0
+	for _, c := range r.Content {
+		tc, ok := c.(mcp.TextContent)
+		if !ok {
+			t.Fatalf("content not text: %T", c)
+		}
+		n += utf8.RuneCountInString(tc.Text)
 	}
-	return len(tc.Text)
+	if r.StructuredContent != nil {
+		b, err := json.Marshal(r.StructuredContent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n += utf8.RuneCount(b)
+	}
+	return n
 }
 
 func wantTruncated(t *testing.T, r *mcp.CallToolResult, budget int) map[string]any {
@@ -343,5 +359,271 @@ func TestBudgetReadSessionDropsInlinedSubagentMessagesAsLastResort(t *testing.T)
 	sub := m["subagents"].([]any)[0].(map[string]any)
 	if sub["uuid"] != "agent-c" || sub["messages"] != nil || sub["has_more"] != true {
 		t.Fatalf("subagent should be listed without messages and has_more=true: %v", sub)
+	}
+}
+
+// ---- review round 2 ----
+
+// bigDataset seeds enough data that every tool's full response exceeds 48,000
+// characters, so each budget below must truncate.
+func bigDataset(t *testing.T, d *db.DB) {
+	t.Helper()
+	long := strings.Repeat("p", 5000)
+	for i := range 50 {
+		id := fmt.Sprintf("s%02d", i)
+		addSession(t, d, id, fmt.Sprintf("/%s/%02d", long, i))
+		addMsg(t, d, id, 0, "user", "needlehaystack authentication failure "+strings.Repeat("filler ", 30))
+		addTarget(t, d, id, "command", fmt.Sprintf("cmd-%02d-%s", i, long))
+	}
+	addSession(t, d, "R", "/r")
+	for i := range 200 {
+		addMsg(t, d, "R", i, "user", strings.Repeat("m", 800))
+	}
+}
+
+func TestBudgetFinalResultWithinMaxCharsForEveryTool(t *testing.T) {
+	d := testDB(t)
+	bigDataset(t, d)
+	tools := map[string]func(max int) *mcp.CallToolResult{
+		"search": func(max int) *mcp.CallToolResult {
+			return call(t, handleSearch(d, nil), map[string]any{"query": "needlehaystack", "limit": 50, "max_chars": max})
+		},
+		"list_sessions": func(max int) *mcp.CallToolResult {
+			return call(t, handleListSessions(d, nil), map[string]any{"limit": 50, "max_chars": max})
+		},
+		"activity_summary": func(max int) *mcp.CallToolResult {
+			return call(t, handleActivitySummary(d, nil), map[string]any{"group_by": "command", "limit": 50, "max_chars": max})
+		},
+		"ask": func(max int) *mcp.CallToolResult {
+			return call(t, handleAsk(d, nil), map[string]any{"question": "authentication failure", "limit": 10, "max_tokens": 8000, "max_chars": max})
+		},
+		"read_session": func(max int) *mcp.CallToolResult {
+			return call(t, handleReadSession(d, nil), map[string]any{"uuid": "R", "limit": 200, "max_chars": max})
+		},
+	}
+	for name, run := range tools {
+		for _, max := range []int{4000, 40000, 48000} {
+			r := run(max)
+			if r.StructuredContent != nil {
+				t.Errorf("%s/%d: structuredContent duplicates the payload", name, max)
+			}
+			next, _ := resultJSON(t, r)["next"].(string)
+			if n := resultLen(t, r); n > max && !strings.Contains(next, "fixed fields exceed") {
+				t.Errorf("%s/%d: final result is %d chars, over budget", name, max, n)
+			}
+			if resultJSON(t, r)["truncated"] != true {
+				t.Errorf("%s/%d: dataset should exceed the budget and be truncated", name, max)
+			}
+		}
+	}
+}
+
+func TestBudgetBudgetCountsUnicodeCodePointsNotBytes(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	for i := range 20 {
+		addMsg(t, d, "P", i, "user", strings.Repeat("字", 600))
+	}
+	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "max_chars": 4000})
+	m := resultJSON(t, r)
+	if n := resultLen(t, r); n > 4000 {
+		t.Fatalf("%d code points over budget", n)
+	}
+	// 600 CJK runes per message: ~5 fit by runes; a byte count would allow only ~1.
+	if kept := len(m["messages"].([]any)); kept < 4 {
+		t.Fatalf("budget must count code points, not bytes: kept only %d", kept)
+	}
+}
+
+func TestBudgetHugeSingleMessageIsCutByContent(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addMsg(t, d, "P", 0, "user", strings.Repeat("x", 120000))
+	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P"})
+	if n := resultLen(t, r); n > defaultMaxChars {
+		t.Fatalf("120k message must be cut inside the %d budget, got %d", defaultMaxChars, n)
+	}
+	m := resultJSON(t, r)
+	if m["truncated"] != true {
+		t.Fatalf("truncated=%v", m["truncated"])
+	}
+	c := m["messages"].([]any)[0].(map[string]any)["content"].(string)
+	if !strings.Contains(c, "[truncated ") || !strings.HasPrefix(c, "xxxx") {
+		t.Fatalf("content should keep a prefix and end with a truncation marker, got %q...", c[:40])
+	}
+}
+
+func TestBudgetFixedFieldsExceedIsReportedAsSuch(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p/"+strings.Repeat("x", 6000))
+	r := call(t, handleListSessions(d, nil), map[string]any{"max_chars": 4000})
+	m := resultJSON(t, r)
+	if m["truncated"] != true || !strings.Contains(m["next"].(string), "fixed fields exceed max_chars") {
+		t.Fatalf("want truncated + fixed-fields hint, got truncated=%v next=%v", m["truncated"], m["next"])
+	}
+	if len(m["sessions"].([]any)) != 1 {
+		t.Fatal("the row is still returned")
+	}
+}
+
+func TestBudgetSubagentsAreShedBeforeParentMessages(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	for i := range 3 {
+		addMsg(t, d, "P", i, "user", "parent-"+fmt.Sprint(i))
+	}
+	addChild(t, d, "agent-c", "/p", "P", "general-purpose")
+	for i := range 20 {
+		addMsg(t, d, "agent-c", i, "assistant", strings.Repeat("s", 800))
+	}
+	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "include_subagents": true, "max_chars": 4000})
+	if n := resultLen(t, r); n > 4000 {
+		t.Fatalf("response %d chars over budget", n)
+	}
+	m := resultJSON(t, r)
+	if len(m["messages"].([]any)) != 3 {
+		t.Fatalf("all parent messages must survive while subagent messages are shed: %v", m["messages"])
+	}
+	if m["truncated"] != true || !strings.Contains(m["next"].(string), "subagent") {
+		t.Fatalf("omitting subagent messages must set truncated and explain: truncated=%v next=%v", m["truncated"], m["next"])
+	}
+}
+
+func TestBudgetSubagentListIsTruncatable(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addMsg(t, d, "P", 0, "user", "hi")
+	for i := range 200 {
+		if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, ended_at, turn_count, parent_session, agent_type, title) VALUES (?,?,?,?,1,?,?,?)`,
+			fmt.Sprintf("agent-%03d", i), "/p", "f", 1, "P", "general-purpose", strings.Repeat("t", 300)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "max_chars": 4000})
+	if n := resultLen(t, r); n > 4000 {
+		t.Fatalf("response %d chars over budget", n)
+	}
+	m := resultJSON(t, r)
+	if m["truncated"] != true {
+		t.Fatalf("truncated=%v", m["truncated"])
+	}
+	if got := len(m["subagents"].([]any)); got == 0 || got >= 200 {
+		t.Fatalf("subagent list should be a non-empty prefix, got %d", got)
+	}
+}
+
+func TestBudgetAskKeepsHitsUnderEscapeHeavyData(t *testing.T) {
+	d := testDB(t)
+	for i := range 6 {
+		id := fmt.Sprintf("s%d", i)
+		addSession(t, d, id, "/p")
+		addMsg(t, d, id, 0, "user", strings.Repeat("ctx \"q\" \\ \n", 200))
+		addMsg(t, d, id, 1, "assistant", "authentication failure "+strings.Repeat("\"\\\n", 20))
+		addMsg(t, d, id, 2, "user", strings.Repeat("ctx \"q\" \\ \n", 200))
+	}
+	r := call(t, handleAsk(d, nil), map[string]any{"question": "authentication failure", "max_chars": 4000})
+	if n := resultLen(t, r); n > 4000 {
+		t.Fatalf("response %d chars over budget", n)
+	}
+	m := resultJSON(t, r)
+	groups := m["groups"].([]any)
+	if len(groups) == 0 {
+		t.Fatal("expected at least one group")
+	}
+	for _, g := range groups {
+		hit := false
+		for _, e := range g.(map[string]any)["excerpts"].([]any) {
+			if e.(map[string]any)["is_hit"] == true {
+				hit = true
+			}
+		}
+		if !hit {
+			t.Fatalf("every kept group must contain a hit excerpt: %v", g)
+		}
+	}
+}
+
+func TestBudgetReadSessionAroundKeepsTargetWhenTruncated(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	for i := range 100 {
+		addMsg(t, d, "P", i, "user", strings.Repeat("m", 800))
+	}
+	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "around_sequence": 50, "limit": 40, "max_chars": 4000}))
+	got := seqs(t, m)
+	if m["truncated"] != true || len(got) >= 40 {
+		t.Fatalf("expected a truncated window, got %v truncated=%v", got, m["truncated"])
+	}
+	found := false
+	for _, s := range got {
+		if s == 50 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("target seq 50 must survive truncation, got %v", got)
+	}
+	if int(m["offset"].(float64)) != got[0] {
+		t.Fatalf("offset=%v must be the first returned seq %d", m["offset"], got[0])
+	}
+}
+
+func TestBudgetReadSessionLastNKeepsTailWhenTruncated(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	for i := range 100 {
+		addMsg(t, d, "P", i, "user", strings.Repeat("m", 800))
+	}
+	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "last_n": 50, "max_chars": 4000}))
+	got := seqs(t, m)
+	if m["truncated"] != true || got[len(got)-1] != 99 {
+		t.Fatalf("the end of the session must survive truncation: %v truncated=%v", got, m["truncated"])
+	}
+	if int(m["offset"].(float64)) != got[0] {
+		t.Fatalf("offset=%v must be the first returned seq %d", m["offset"], got[0])
+	}
+}
+
+func TestReadSessionAroundNearEndBackfillsFullPage(t *testing.T) {
+	d := testDB(t)
+	seedSeq(t, d, 100)
+	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "around_sequence": 98, "limit": 10}))
+	wantSeqs(t, seqs(t, m), 90, 99)
+	if int(m["offset"].(float64)) != 90 || m["has_more"] != false {
+		t.Fatalf("offset=%v has_more=%v", m["offset"], m["has_more"])
+	}
+}
+
+func TestReadSessionRejectsBadModeValues(t *testing.T) {
+	d := testDB(t)
+	seedSeq(t, d, 10)
+	for _, args := range []map[string]any{
+		{"uuid": "P", "around_sequence": 500},
+		{"uuid": "P", "around_sequence": -1},
+		{"uuid": "P", "around_sequence": "x"},
+		{"uuid": "P", "around_sequence": 1.5},
+		{"uuid": "P", "last_n": 0},
+		{"uuid": "P", "last_n": -3},
+		{"uuid": "P", "last_n": "x"},
+	} {
+		if r := call(t, handleReadSession(d, nil), args); !r.IsError {
+			t.Errorf("%v: expected a tool error", args)
+		}
+	}
+}
+
+func TestReadSessionLastNIsCappedByLimit(t *testing.T) {
+	d := testDB(t)
+	seedSeq(t, d, 100)
+	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "last_n": 100, "limit": 10}))
+	wantSeqs(t, seqs(t, m), 90, 99)
+}
+
+func TestReadSessionPlainOffsetReportsTotal(t *testing.T) {
+	d := testDB(t)
+	seedSeq(t, d, 12)
+	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "offset": 4, "limit": 3}))
+	if int(m["total"].(float64)) != 12 {
+		t.Fatalf("total=%v want 12", m["total"])
 	}
 }

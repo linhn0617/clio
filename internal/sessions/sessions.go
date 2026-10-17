@@ -287,6 +287,14 @@ func CountMessages(ctx context.Context, database *db.DB, sessionUUID string, inc
 	return n, err
 }
 
+// MaxSeq returns the highest message seq of a session over all roles, or -1
+// when it has no messages.
+func MaxSeq(ctx context.Context, database *db.DB, sessionUUID string) (int, error) {
+	var n int
+	err := database.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), -1) FROM messages WHERE session_uuid = ?`, sessionUUID).Scan(&n)
+	return n, err
+}
+
 // GetWindow returns a conversational window around a retrieval hit: up to `before`
 // dialogue messages preceding the hit at hitSeq, the hit itself, and up to `after`
 // following ones, ordered by seq. The window is taken in user/assistant turn space

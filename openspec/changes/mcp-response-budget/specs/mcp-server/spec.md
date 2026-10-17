@@ -8,13 +8,15 @@ SHALL bucket by the local calendar day. The system SHALL validate tool inputs at
 request boundary and return a clear tool error for an unsupported value rather than a
 generic downstream failure. `read_session` SHALL select its page by exactly one of three
 mutually exclusive modes: `offset` (forward from a message offset, the default), `last_n`
-(the last N messages, N capped at the maximum page size), or `around_sequence` (a window
-centred on that message `seq`, `limit/2` messages before and after, clamped at the start of
-the session). Supplying more than one of them SHALL return a tool error naming all three
-parameters; an `offset` of 0 SHALL count as not supplied, while `around_sequence` of 0 is a
-real value. In every mode the response SHALL report `offset` (the zero-based start of the
-returned page), `total` (the session's message count under the same tool-output filter) and
-`has_more`.
+(the last `min(last_n, limit)` messages; `last_n` SHALL be a positive integer when present),
+or `around_sequence` (a window of `limit` messages centred on that message `seq` — `limit/2`
+before it, the rest from it on — slid back so that a window near the end of the session is
+still a full page; `around_sequence` SHALL be an integer between 0 and the session's highest
+seq, otherwise a tool error). Supplying more than one mode SHALL return a tool error naming
+all three parameters; an `offset` of 0 SHALL count as not supplied, while `last_n` and
+`around_sequence` count as supplied whenever present (including 0). In every mode the
+response SHALL report `offset` (the zero-based start of the returned page), `total` (the
+session's message count under the same tool-output filter) and `has_more`.
 
 #### Scenario: Search tool call
 
@@ -66,15 +68,25 @@ The system SHALL clamp result sizes to protect the caller's context window. Beyo
 counts, every MCP tool (`search`, `ask`, `list_sessions`, `activity_summary`,
 `read_session`) SHALL bound the serialized JSON length of its response (escapes included) to
 a character budget: the `max_chars` parameter, default 40,000 (below Claude Code's 50,000
-character threshold for spilling tool output to a file), clamped into 4,000–48,000. When the
-full response exceeds the budget the system SHALL drop rows from the end at row boundaries
-(search hits, session rows, activity rows or buckets, `ask` excerpts with sessions left
-empty omitted, `read_session` messages) until the re-serialized response fits, and SHALL set
-`truncated: true` and a non-empty `next` hint; `read_session` SHALL also set `has_more: true`
-and `next_offset`. The size SHALL be measured on the real serialized output, not estimated.
-The response SHALL keep at least one row: when a single row alone exceeds the budget it SHALL
-still be returned, with `truncated: true`. A response within budget SHALL carry neither
-`truncated` nor `next`.
+character threshold for spilling tool output to a file), clamped into 4,000–48,000, counted in
+characters (Unicode code points) of the final response the client receives, which SHALL be a
+single text content with no duplicate structured copy. When the full response exceeds the
+budget the system SHALL drop rows at row boundaries (search hits, session rows, activity rows
+or buckets, `ask` excerpts with sessions left empty omitted, `read_session` messages) until
+the re-serialized response fits, and SHALL set `truncated: true` and a non-empty `next` hint.
+`ask` SHALL drop context excerpts before `is_hit` excerpts and whole trailing sessions last,
+so every kept session retains a hit. `read_session` SHALL shed inlined subagent messages
+before any parent message and cut the subagent list to half the budget, setting
+`truncated: true` with a note when it does; when it drops parent messages it SHALL drop from
+the end of a forward page, from the start for `last_n` (the end of the session survives) and
+from both ends for `around_sequence` (the target survives), setting `has_more`, `offset` (the
+first returned message) and, when later messages were dropped, `next_offset`. The size SHALL be
+measured on the real serialized output, not estimated. The response SHALL keep at least one
+row: when a single row alone exceeds the budget its free text (message content, excerpt text,
+snippet, title, activity value) SHALL be cut to a prefix ending in `… [truncated N chars]`
+with `truncated: true`; when the fixed fields alone exceed the budget the row SHALL be returned
+anyway and `next` SHALL say the fixed fields exceed `max_chars`. A response within budget SHALL
+carry neither `truncated` nor `next`.
 
 #### Scenario: Excessive limit requested
 
@@ -95,5 +107,12 @@ still be returned, with `truncated: true`. A response within budget SHALL carry 
 
 #### Scenario: A single row exceeds the budget
 
-- **WHEN** the first row alone serializes to more than the budget
-- **THEN** the system SHALL return that one row with `truncated: true`
+- **WHEN** a `read_session` page holds one 120,000-character message and the budget is 40,000
+- **THEN** the system SHALL return that message with its content cut to a prefix plus a
+  marker, the whole response within 40,000 characters, and `truncated: true`
+
+#### Scenario: ask keeps its hits
+
+- **WHEN** an `ask` bundle exceeds the budget
+- **THEN** the system SHALL drop context excerpts and trailing sessions while every kept
+  session still contains at least one `is_hit` excerpt

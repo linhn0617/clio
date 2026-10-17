@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -108,16 +110,10 @@ func handleSearch(database *db.DB, beforeRead func()) func(context.Context, mcp.
 		for _, r := range res {
 			out = append(out, hit{r.SessionUUID, r.ParentSession, r.AgentType, r.Source, r.ProjectPath, r.Role, tsString(r.TS), r.Snippet})
 		}
-		maxChars := maxCharsOf(req)
-		resp, _, _ := fitBudget(len(out), maxChars, func(k int) map[string]any {
-			m := map[string]any{"results": out[:k], "count": k}
-			if k < len(out) {
-				m["truncated"] = true
-				m["next"] = fmt.Sprintf("showing %d of %d results to fit max_chars=%d; narrow with since/project/role or a smaller limit, or raise max_chars (max %d)", k, len(out), maxChars, maxMaxChars)
-			}
-			return m
-		})
-		return mcp.NewToolResultJSON(resp)
+		return fitRows(out, maxCharsOf(req),
+			func(r *hit, c int) { r.Snippet = capText(r.Snippet, c) },
+			func(rows []hit) map[string]any { return map[string]any{"results": rows, "count": len(rows)} },
+			"results", "narrow with since/project/role or a smaller limit"), nil
 	}
 }
 
@@ -156,16 +152,10 @@ func handleListSessions(database *db.DB, beforeRead func()) func(context.Context
 		for _, s := range rows {
 			out = append(out, srow{s.UUID, s.ParentSession, s.AgentType, s.SubagentCount, s.Source, s.ProjectPath, s.Title, tsString(s.StartedAt), tsString(s.EndedAt), s.TurnCount})
 		}
-		maxChars := maxCharsOf(req)
-		resp, _, _ := fitBudget(len(out), maxChars, func(k int) map[string]any {
-			m := map[string]any{"sessions": out[:k], "count": k}
-			if k < len(out) {
-				m["truncated"] = true
-				m["next"] = fmt.Sprintf("showing %d of %d sessions to fit max_chars=%d; narrow with since/project/min_turns or a smaller limit, or raise max_chars (max %d)", k, len(out), maxChars, maxMaxChars)
-			}
-			return m
-		})
-		return mcp.NewToolResultJSON(resp)
+		return fitRows(out, maxCharsOf(req),
+			func(r *srow, c int) { r.Title = capText(r.Title, c) },
+			func(rows []srow) map[string]any { return map[string]any{"sessions": rows, "count": len(rows)} },
+			"sessions", "narrow with since/project/min_turns or a smaller limit"), nil
 	}
 }
 
@@ -187,15 +177,11 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
-			resp, _, _ := fitBudget(len(buckets), maxChars, func(k int) map[string]any {
-				m := map[string]any{"since": tsString(since), "buckets": buckets[:k]}
-				if k < len(buckets) {
-					m["truncated"] = true
-					m["next"] = fmt.Sprintf("showing %d of %d buckets to fit max_chars=%d; use a shorter since or a project filter, or raise max_chars (max %d)", k, len(buckets), maxChars, maxMaxChars)
-				}
-				return m
-			})
-			return mcp.NewToolResultJSON(resp)
+			return fitRows(buckets, maxChars, nil,
+				func(rows []sessions.Bucket) map[string]any {
+					return map[string]any{"since": tsString(since), "buckets": rows}
+				},
+				"buckets", "use a shorter since or a project filter"), nil
 		case "file", "command", "tool", "pattern", "url":
 			counts, err := sessions.ActivityByKind(ctx, database, groupBy, since,
 				req.GetString("project", ""), source, clamp(req.GetInt("limit", 30), 30, maxSearchLimit))
@@ -210,15 +196,12 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 			for _, c := range counts {
 				out = append(out, ac{c.Value, c.Count})
 			}
-			resp, _, _ := fitBudget(len(out), maxChars, func(k int) map[string]any {
-				m := map[string]any{"since": tsString(since), "group_by": groupBy, "activity": out[:k]}
-				if k < len(out) {
-					m["truncated"] = true
-					m["next"] = fmt.Sprintf("showing %d of %d rows to fit max_chars=%d; use a smaller limit or a project filter, or raise max_chars (max %d)", k, len(out), maxChars, maxMaxChars)
-				}
-				return m
-			})
-			return mcp.NewToolResultJSON(resp)
+			return fitRows(out, maxChars,
+				func(r *ac, c int) { r.Value = capText(r.Value, c) },
+				func(rows []ac) map[string]any {
+					return map[string]any{"since": tsString(since), "group_by": groupBy, "activity": rows}
+				},
+				"rows", "use a smaller limit or a project filter"), nil
 		case "usage":
 			// Session-level token aggregates with source attribution and
 			// jump-through ids for read_session. Per-source subtotals only —
@@ -233,21 +216,17 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
-			resp, _, _ := fitBudget(len(rows), maxChars, func(k int) map[string]any {
-				m := map[string]any{
-					"since":    tsString(since),
-					"group_by": "usage",
-					"note":     "token counts are per source and not comparable across sources; stale=true means the last usage scan failed and values are last-known, not current",
-					"totals":   totals,
-					"sessions": rows[:k],
-				}
-				if k < len(rows) {
-					m["truncated"] = true
-					m["next"] = fmt.Sprintf("showing %d of %d sessions to fit max_chars=%d; use a smaller limit or a project filter, or raise max_chars (max %d)", k, len(rows), maxChars, maxMaxChars)
-				}
-				return m
-			})
-			return mcp.NewToolResultJSON(resp)
+			return fitRows(rows, maxChars, nil,
+				func(kept []sessions.UsageSessionRow) map[string]any {
+					return map[string]any{
+						"since":    tsString(since),
+						"group_by": "usage",
+						"note":     "token counts are per source and not comparable across sources; stale=true means the last usage scan failed and values are last-known, not current",
+						"totals":   totals,
+						"sessions": kept,
+					}
+				},
+				"sessions", "use a smaller limit or a project filter"), nil
 		default:
 			return mcp.NewToolResultError(`group_by must be one of "day", "project", "file", "command", "tool", "pattern", "url", "usage"`), nil
 		}
@@ -272,14 +251,26 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 
 		// Three mutually exclusive ways to pick the page. offset=0 counts as
 		// unset because the tool schema advertises 0 as its default and
-		// clients may echo defaults back; around_sequence=0 is a real value,
-		// so that one is detected by presence.
+		// clients may echo defaults back; last_n and around_sequence have no
+		// default (and around_sequence=0 is a real value), so they are
+		// detected by presence.
+		args := req.GetArguments()
+		intArg := func(name string) (int, bool) {
+			switch v := args[name].(type) {
+			case int:
+				return v, true
+			case int64:
+				return int(v), true
+			case float64:
+				return int(v), v == math.Trunc(v)
+			}
+			return 0, false
+		}
 		offset := req.GetInt("offset", 0)
-		lastN := req.GetInt("last_n", 0)
-		aroundArg, hasAround := req.GetArguments()["around_sequence"]
-		hasAround = hasAround && aroundArg != nil
+		hasLast := args["last_n"] != nil
+		hasAround := args["around_sequence"] != nil
 		modes := 0
-		for _, set := range []bool{offset != 0, lastN != 0, hasAround} {
+		for _, set := range []bool{offset != 0, hasLast, hasAround} {
 			if set {
 				modes++
 			}
@@ -287,28 +278,50 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 		if modes > 1 {
 			return mcp.NewToolResultError("offset, last_n and around_sequence are mutually exclusive: pass at most one"), nil
 		}
-		if offset < 0 || lastN < 0 {
-			return mcp.NewToolResultError("offset and last_n must not be negative"), nil
+		if offset < 0 {
+			return mcp.NewToolResultError("offset must not be negative"), nil
 		}
 		total, err := sessions.CountMessages(ctx, database, sess.UUID, inclTool, nil)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
+		type mode int
+		const (
+			fromOffset mode = iota
+			fromEnd
+			aroundSeq
+		)
+		pageMode, rows, target := fromOffset, limit, 0
 		switch {
-		case lastN > 0:
-			// The page is the tail, so its size is last_n (capped like limit)
-			// and the start offset is derived from the total.
-			limit = min(lastN, maxReadLimit)
-			offset = max(0, total-limit)
+		case hasLast:
+			n, ok := intArg("last_n")
+			if !ok || n < 1 {
+				return mcp.NewToolResultError("last_n must be a positive integer"), nil
+			}
+			// The page is the tail: as many rows as last_n asks for, but never
+			// more than the page size.
+			pageMode, rows = fromEnd, min(n, limit)
+			offset = max(0, total-rows)
 		case hasAround:
-			seq := req.GetInt("around_sequence", 0)
+			seq, ok := intArg("around_sequence")
+			maxSeq, err := sessions.MaxSeq(ctx, database, sess.UUID)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			if !ok || seq < 0 || seq > maxSeq {
+				return mcp.NewToolResultError(fmt.Sprintf("around_sequence must be an integer between 0 and %d (this session's last seq)", maxSeq)), nil
+			}
 			before, err := sessions.CountMessages(ctx, database, sess.UUID, inclTool, &seq)
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
-			offset = max(0, before-limit/2)
+			pageMode = aroundSeq
+			// Centre on the target, then slide back so a window near the end
+			// is still a full page (the mirror of clamping at offset 0).
+			offset = max(0, min(before-limit/2, total-limit))
+			target = before
 		}
-		msgs, hasMore, err := sessions.GetMessages(ctx, database, sess.UUID, offset, limit, inclTool, false)
+		msgs, hasMore, err := sessions.GetMessages(ctx, database, sess.UUID, offset, rows, inclTool, false)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -340,7 +353,7 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 			if inclSub {
 				// Bounded by the same limit as the parent; has_more tells the client a
 				// long subagent was truncated (paginate it via read_session on its uuid).
-				cmsgs, cMore, err := sessions.GetMessages(ctx, database, c.UUID, 0, limit, req.GetBool("include_tool_output", false), false)
+				cmsgs, cMore, err := sessions.GetMessages(ctx, database, c.UUID, 0, limit, inclTool, false)
 				if err != nil {
 					return mcp.NewToolResultError(err.Error()), nil
 				}
@@ -353,50 +366,101 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 			}
 			subs = append(subs, row)
 		}
+
 		maxChars := maxCharsOf(req)
 		sessionInfo := map[string]any{
 			"uuid": sess.UUID, "project": sess.ProjectPath, "title": sess.Title,
 			"started_at": tsString(sess.StartedAt), "turn_count": sess.TurnCount,
 			"parent_session": sess.ParentSession, "agent_type": sess.AgentType,
 		}
-		build := func(stripSubs bool) (map[string]any, bool) {
-			subsOut := subs
-			if stripSubs {
-				// Last resort when even one parent message plus the inlined
-				// subagent transcripts overflow: keep the subagent list but
-				// drop their messages (each is still readable by its uuid).
-				subsOut = make([]sub, len(subs))
-				for i, c := range subs {
-					if len(c.Messages) > 0 {
-						c.Messages, c.HasMore = nil, true
-					}
-					subsOut[i] = c
+		n := len(out)
+		// pick returns which k of the n fetched messages survive when the
+		// budget forces a cut: the front for a forward page, the tail for
+		// last_n (the end is what was asked for), a window around the target
+		// for around_sequence.
+		pick := func(k int) (lo, hi int) {
+			switch pageMode {
+			case fromEnd:
+				return n - k, n
+			case aroundSeq:
+				t := min(max(target-offset, 0), n-1)
+				lo = min(max(t-(k-1)/2, 0), n-k)
+				return lo, lo + k
+			}
+			return 0, k
+		}
+		shownSubs, notes := subs, []string{}
+		render := func(k, textCap int) map[string]any {
+			lo, hi := pick(k)
+			kept := out[lo:hi]
+			if textCap >= 0 {
+				kept = slices.Clone(kept)
+				for i := range kept {
+					kept[i].Content = capText(kept[i].Content, textCap)
 				}
 			}
-			resp, _, oversized := fitBudget(len(out), maxChars, func(k int) map[string]any {
-				m := map[string]any{
-					"session":   sessionInfo,
-					"messages":  out[:k],
-					"subagents": subsOut,
-					"offset":    offset,
-					"total":     total,
-					"has_more":  hasMore,
-				}
-				if k < len(out) {
-					m["has_more"] = true
-					m["truncated"] = true
-					m["next_offset"] = offset + k
-					m["next"] = fmt.Sprintf("showing %d of %d requested messages to fit max_chars=%d; continue with offset=%d, use a smaller limit, or raise max_chars (max %d)", k, len(out), maxChars, offset+k, maxMaxChars)
-				}
-				return m
-			})
-			return resp, oversized
+			resp := map[string]any{
+				"session":   sessionInfo,
+				"messages":  kept,
+				"subagents": shownSubs,
+				"offset":    offset + lo,
+				"total":     total,
+				"has_more":  hasMore || hi < n,
+			}
+			if hi < n {
+				resp["next_offset"] = offset + hi
+			}
+			if len(notes) > 0 {
+				resp["truncated"] = true
+				resp["next"] = strings.Join(notes, "; ")
+			}
+			return resp
 		}
-		resp, oversized := build(false)
-		if oversized && inclSub {
-			resp, _ = build(true)
+
+		// Shed the least valuable parts first. 1) Inlined subagent messages go
+		// before any parent message does; each stays readable by its uuid.
+		// 2) The subagent list itself is held to half the budget so a session
+		// with hundreds of children cannot starve its own messages.
+		if inclSub && measure(render(n, -1)) > maxChars {
+			stripped := make([]sub, len(subs))
+			for i, c := range subs {
+				if len(c.Messages) > 0 {
+					c.Messages, c.HasMore = nil, true
+				}
+				stripped[i] = c
+			}
+			shownSubs = stripped
+			notes = append(notes, "subagent messages omitted to fit max_chars; read each by its uuid")
 		}
-		return mcp.NewToolResultJSON(resp)
+		if len(shownSubs) > 0 && measure(render(0, -1)) > maxChars/2 {
+			all := shownSubs
+			best, lo, hi := 0, 0, len(all)-1
+			for lo <= hi {
+				mid := (lo + hi) / 2
+				shownSubs = all[:mid]
+				if measure(render(0, -1)) <= maxChars/2 {
+					best, lo = mid, mid+1
+				} else {
+					hi = mid - 1
+				}
+			}
+			shownSubs = all[:best]
+			notes = append(notes, fmt.Sprintf("listed %d of %d subagents to fit max_chars", best, len(all)))
+		}
+
+		return fitBudget(n, maxChars, render, func(kept, of int) string {
+			lo, hi := pick(kept)
+			parts := append([]string(nil), notes...)
+			parts = append(parts, fmt.Sprintf("showing messages at offsets %d-%d of the %d requested to fit max_chars=%d", offset+lo, offset+hi-1, of, maxChars))
+			if hi < of {
+				parts = append(parts, fmt.Sprintf("continue with offset=%d", offset+hi))
+			}
+			if lo > 0 {
+				parts = append(parts, fmt.Sprintf("earlier ones start at offset=%d", offset))
+			}
+			parts = append(parts, fmt.Sprintf("or use a smaller limit, or raise max_chars (max %d)", maxMaxChars))
+			return strings.Join(parts, "; ")
+		}), nil
 	}
 }
 
@@ -443,38 +507,51 @@ func handleAsk(database *db.DB, beforeRead func()) func(context.Context, mcp.Cal
 			}
 			groups = append(groups, group{g.SessionUUID, g.Title, g.Project, tsString(g.EndedAt), g.Source, ex})
 		}
-		// The budget unit is one excerpt, so a single huge session group can
-		// shrink without dropping the whole group; groups left with no
-		// excerpt disappear. Groups keep their relevance order.
-		totalEx := 0
-		for _, g := range groups {
-			totalEx += len(g.Excerpts)
+		// The budget unit is one excerpt. Excerpts are ranked for survival: every
+		// is_hit excerpt (in group order) outranks every context excerpt, so a
+		// tight budget drops context first and then whole trailing groups, never
+		// the evidence a group was cited for. Groups left with no excerpt
+		// disappear; kept excerpts stay in their original order.
+		type ref struct{ g, e int }
+		var order []ref
+		for pass := 0; pass < 2; pass++ {
+			for gi, g := range groups {
+				for ei, e := range g.Excerpts {
+					if e.IsHit == (pass == 0) {
+						order = append(order, ref{gi, ei})
+					}
+				}
+			}
 		}
-		maxChars := maxCharsOf(req)
-		resp, _, _ := fitBudget(totalEx, maxChars, func(k int) map[string]any {
-			if k >= totalEx {
-				return map[string]any{"question": ans.Question, "groups": groups, "count": len(groups)}
+		render := func(k, textCap int) map[string]any {
+			keep := make([][]bool, len(groups))
+			for gi, g := range groups {
+				keep[gi] = make([]bool, len(g.Excerpts))
+			}
+			for _, r := range order[:k] {
+				keep[r.g][r.e] = true
 			}
 			kept := make([]group, 0, len(groups))
-			left := k
-			for _, g := range groups {
-				if left == 0 {
-					break
+			for gi, g := range groups {
+				var ex []excerpt
+				for ei, e := range g.Excerpts {
+					if keep[gi][ei] {
+						e.Text = capText(e.Text, textCap)
+						ex = append(ex, e)
+					}
 				}
-				n := min(left, len(g.Excerpts))
-				g.Excerpts = g.Excerpts[:n]
-				left -= n
-				kept = append(kept, g)
+				if len(ex) > 0 {
+					g.Excerpts = ex
+					kept = append(kept, g)
+				}
 			}
-			return map[string]any{
-				"question":  ans.Question,
-				"groups":    kept,
-				"count":     len(kept),
-				"truncated": true,
-				"next":      fmt.Sprintf("included %d of %d sessions (%d of %d excerpts) to fit max_chars=%d; narrow with since/project, lower max_tokens or limit, or raise max_chars (max %d)", len(kept), len(groups), k, totalEx, maxChars, maxMaxChars),
-			}
-		})
-		return mcp.NewToolResultJSON(resp)
+			return map[string]any{"question": ans.Question, "groups": kept, "count": len(kept)}
+		}
+		maxChars := maxCharsOf(req)
+		return fitBudget(len(order), maxChars, render, func(kept, total int) string {
+			sessionsKept := render(kept, -1)["count"]
+			return fmt.Sprintf("included %d of %d sessions (%d of %d excerpts, hits first) to fit max_chars=%d; narrow with since/project, lower max_tokens or limit, or raise max_chars (max %d)", sessionsKept, len(groups), kept, total, maxChars, maxMaxChars)
+		}), nil
 	}
 }
 

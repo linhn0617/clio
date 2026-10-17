@@ -49,7 +49,7 @@ func sourceOptions(prefix string) []mcp.PropertyOption {
 }
 
 // maxCharsDescription is shared by all five tools' max_chars parameter.
-var maxCharsDescription = fmt.Sprintf("Max characters in the serialized response (default %d, min %d, max %d); rows beyond it are dropped and the response carries truncated=true plus a next hint", defaultMaxChars, minMaxChars, maxMaxChars)
+var maxCharsDescription = fmt.Sprintf("Max characters (Unicode code points) in the serialized response (default %d, min %d, max %d); rows beyond it are dropped, an oversized single row has its text cut, and the response carries truncated=true plus a next hint", defaultMaxChars, minMaxChars, maxMaxChars)
 
 // NewServer builds an MCP server with clio's four tools registered. beforeRead,
 // if non-nil, runs before each read tool serves (used by followers for a
@@ -136,9 +136,9 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithOpenWorldHintAnnotation(false),
 		mcp.WithString("uuid", mcp.Required(), mcp.Description("Session uuid or unambiguous prefix")),
 		mcp.WithNumber("offset", mcp.Description("Message offset for pagination (mutually exclusive with last_n and around_sequence)"), mcp.DefaultNumber(0), mcp.Min(0)),
-		mcp.WithNumber("limit", mcp.Description("Max messages per page (default 50, max 200); with around_sequence the window is limit/2 before and after"), mcp.DefaultNumber(defaultReadLimit), mcp.Min(1), mcp.Max(maxReadLimit)),
-		mcp.WithNumber("last_n", mcp.Description("Read the last N messages instead of a page from the start (max 200; mutually exclusive with offset and around_sequence)"), mcp.Min(1), mcp.Max(maxReadLimit)),
-		mcp.WithNumber("around_sequence", mcp.Description("Read a window centred on this message seq (mutually exclusive with offset and last_n)"), mcp.Min(0)),
+		mcp.WithNumber("limit", mcp.Description("Max messages per page (default 50, max 200); with around_sequence the window is centred on that seq (limit/2 messages before it, the rest after, slid back to a full page near the end); with last_n the page is min(last_n, limit)"), mcp.DefaultNumber(defaultReadLimit), mcp.Min(1), mcp.Max(maxReadLimit)),
+		mcp.WithNumber("last_n", mcp.Description("Read the last N messages instead of a page from the start (at most limit; mutually exclusive with offset and around_sequence)"), mcp.Min(1), mcp.Max(maxReadLimit)),
+		mcp.WithNumber("around_sequence", mcp.Description("Read a window centred on this message seq, 0 to the session's last seq (mutually exclusive with offset and last_n)"), mcp.Min(0)),
 		mcp.WithBoolean("include_tool_output", mcp.Description("Include tool output / thinking"), mcp.DefaultBool(false)),
 		mcp.WithBoolean("include_subagents", mcp.Description("Inline each subagent's messages in the result")),
 		mcp.WithNumber("max_chars", mcp.Description(maxCharsDescription), mcp.DefaultNumber(defaultMaxChars), mcp.Min(minMaxChars), mcp.Max(maxMaxChars)),
