@@ -18,9 +18,10 @@ real index holds only three Gemini sessions. Keeping it costs maintenance with n
   sessions, their messages (FTS follows via the `messages_ad` trigger), tool calls/targets,
   usage rows, `ingest_state` watermarks (by session `source_file` or `.gemini/tmp/` path) and
   `source_conflicts` entries.
-- Kept deliberately: the generic source SPI (`WholeFileReplay()` and its `IngestFile`
-  branch, the `errUnusableStateRecord` abort path). No built-in source uses them today; they
-  stay as SPI surface with a fake-source test (`wholefilereplay_test.go`). Recorded as debt.
+- Kept deliberately: the generic source SPI `WholeFileReplay()` and its `IngestFile` branch
+  (covered by `wholefilereplay_test.go` with a fake source). No built-in source returns true
+  today. Removed as orphaned: `errUnusableStateRecord`, `unusableStateCounter` and
+  `recordUnusableStatePass` (only the Gemini adapter ever raised the abort path).
 
 A future Antigravity CLI adapter would be a separate change.
 

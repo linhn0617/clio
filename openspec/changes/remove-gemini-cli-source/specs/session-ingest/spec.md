@@ -96,8 +96,7 @@ plus machine noise over a denominator of mostly fixed command overhead), with wr
 time increase < 10% one-sided measured in alternated pairs (the ~2× fixture
 is an informational slope point, not a gate — the scan is O(file) per touch by design, and the
 documented escalation path for longer sessions is a per-file usage cursor as its own change;
-an in-process RELATIVE bound is unmeetable by construction over a ~3 ms baseline, see design);
-the
+an in-process RELATIVE bound is unmeetable by construction over a ~3 ms baseline, see design); and the
 doctor DB/source ratio MUST stay below the existing 3× warning threshold.
 
 #### Scenario: Growth and throughput measured against numeric gates
