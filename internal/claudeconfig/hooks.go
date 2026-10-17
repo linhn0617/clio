@@ -10,6 +10,14 @@ import (
 // already carries its parent's context, so a digest would only repeat it.
 const recallMatcher = "startup|resume|clear|compact"
 
+// fileHistoryMatcher: the file-history hook also fires on Bash, where it stays
+// silent unless the command names an existing file under cwd. Older clio wrote
+// readMatcher alone.
+const (
+	fileHistoryMatcher = "Read|Bash"
+	readMatcher        = "Read"
+)
+
 // recallTimeout (seconds) replaces Claude Code's 600 s default: a cold-cache
 // read of a large index must not hold session startup hostage.
 const recallTimeout = 10
@@ -24,7 +32,7 @@ func AddSessionStartHook(settingsPath, command string) error {
 }
 
 // AddClioHooks registers the recall SessionStart hook and the file-history
-// PreToolUse(Read) hook in ONE mutation, so the settings file's .bak is the
+// PreToolUse(Read|Bash) hook in ONE mutation, so the settings file's .bak is the
 // pre-install content and the install is atomic. An empty fileHistoryCmd means
 // the user opted out: any existing clio file-history hook is removed instead.
 func AddClioHooks(settingsPath, recallCmd, fileHistoryCmd string) error {
@@ -300,7 +308,7 @@ func hookIsClioRecall(h any) bool {
 }
 
 // AddPreToolUseReadHook registers clio's file-context hook: a PreToolUse group
-// with matcher "Read" and a 10-second timeout running the given command
+// with matcher "Read|Bash" and a 10-second timeout running the given command
 // (`<exe> file-history --hook`). Idempotent; other groups and keys untouched.
 func AddPreToolUseReadHook(settingsPath, command string) error {
 	return mutate(settingsPath, func(root map[string]any) error { return addPreToolUseReadHook(root, command) })
@@ -316,14 +324,16 @@ func addPreToolUseReadHook(root map[string]any, command string) error {
 		return err
 	}
 	repairUnquoted(pt, " file-history --hook", command)
-	// Present only counts inside a matcher:"Read" group: an entry a user moved
-	// under another matcher would never fire for Read, so we still add ours.
-	if !groupsHaveWithMatcher(pt, "Read", isClioFileHistory) {
+	var present bool
+	pt, present = upgradeReadFileHistory(pt, command)
+	// Present only counts inside a Read|Bash group: an entry a user moved under
+	// another matcher would never fire for Read, so we still add ours.
+	if !present {
 		pt = append(pt, map[string]any{
-			"matcher": "Read",
+			"matcher": fileHistoryMatcher,
 			"hooks": []any{
 				// Explicit short timeout: the reference default is 600 s and
-				// the hook runs on every Read, so a stall must fail fast.
+				// the hook runs on every Read and Bash, so a stall must fail fast.
 				map[string]any{"type": "command", "command": command, "timeout": 10},
 			},
 		})
@@ -333,6 +343,52 @@ func addPreToolUseReadHook(root map[string]any, command string) error {
 	return nil
 }
 
+// upgradeReadFileHistory moves clio's entries out of matcher:"Read" groups, the
+// shape an older clio wrote. A clio-only group is retargeted in place (and takes
+// the current command, as upgradeLegacyRecall does); in a group shared with
+// foreign hooks only clio's entry is removed so the foreign hooks keep firing
+// exactly as before. If a Read|Bash clio entry already exists, leftovers are
+// just dropped. present reports whether a Read|Bash clio entry exists after.
+func upgradeReadFileHistory(pt []any, command string) (out []any, present bool) {
+	present = groupsHaveWithMatcher(pt, fileHistoryMatcher, isClioFileHistory)
+	out = make([]any, 0, len(pt))
+	for _, g := range pt {
+		gm, ok := g.(map[string]any)
+		hs, hok := gm["hooks"].([]any)
+		if !ok || !hok || gm["matcher"] != readMatcher {
+			out = append(out, g)
+			continue
+		}
+		var foreign []any
+		for _, h := range hs {
+			if !hookCommandMatches(h, isClioFileHistory) {
+				foreign = append(foreign, h)
+			}
+		}
+		switch {
+		case len(foreign) == len(hs): // no clio entry here
+			out = append(out, g)
+		case len(foreign) == 0 && !present:
+			gm["matcher"] = fileHistoryMatcher
+			for _, h := range hs {
+				if hm, ok := h.(map[string]any); ok {
+					hm["command"] = command
+					if hm["timeout"] == nil {
+						hm["timeout"] = 10
+					}
+				}
+			}
+			present = true
+			out = append(out, g)
+		case len(foreign) == 0: // clio-only duplicate of an existing Read|Bash entry
+		default:
+			gm["hooks"] = foreign
+			out = append(out, g)
+		}
+	}
+	return out, present
+}
+
 // RemovePreToolUseReadHook removes clio's file-context hook entries, keeping any
 // co-grouped foreign hooks and dropping the PreToolUse key only when empty.
 func RemovePreToolUseReadHook(settingsPath string) error {
@@ -340,9 +396,19 @@ func RemovePreToolUseReadHook(settingsPath string) error {
 }
 
 // HasPreToolUseReadHook reports whether clio's file-context hook is registered
-// where it can fire: inside a matcher:"Read" group.
+// where it can fire for Read: inside a matcher:"Read|Bash" group, or the
+// matcher:"Read" group an older clio wrote (install-hook upgrades that one).
 func HasPreToolUseReadHook(settingsPath string) (bool, error) {
-	return hasHookEntry(settingsPath, "PreToolUse", "Read", isClioFileHistory)
+	if has, err := hasHookEntry(settingsPath, "PreToolUse", fileHistoryMatcher, isClioFileHistory); has || err != nil {
+		return has, err
+	}
+	return hasHookEntry(settingsPath, "PreToolUse", readMatcher, isClioFileHistory)
+}
+
+// HasLegacyPreToolUseReadHook reports whether clio's entry still sits in a
+// matcher:"Read" group — the shape install-hook upgrades to Read|Bash.
+func HasLegacyPreToolUseReadHook(settingsPath string) (bool, error) {
+	return hasHookEntry(settingsPath, "PreToolUse", readMatcher, isClioFileHistory)
 }
 
 // HasAnyClioHookEntries reports whether any clio hook entry exists at all,

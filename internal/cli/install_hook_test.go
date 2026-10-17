@@ -394,6 +394,31 @@ func TestInstallHookReportsRecallUpgrade(t *testing.T) {
 	}
 }
 
+// Re-running install-hook over a matcher:"Read" file-history entry upgrades it to Read|Bash.
+func TestInstallHookReportsFileHistoryMatcherUpgrade(t *testing.T) {
+	settingsPath := setupInstallHookHome(t)
+	stubClioExecutable(t)
+	orig := `{"hooks":{"SessionStart":[{"matcher":"startup|resume|clear|compact","hooks":[{"type":"command","command":"/fake/bin/clio recall","timeout":10}]}],` +
+		`"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"/fake/bin/clio file-history --hook","timeout":10}]}]}}`
+	if err := os.WriteFile(settingsPath, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	cmd := newInstallHookCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "from Read to Read|Bash") || strings.Contains(out.String(), "nothing to add") {
+		t.Fatalf("install-hook output should report the matcher upgrade:\n%s", out.String())
+	}
+	after, _ := os.ReadFile(settingsPath)
+	if !strings.Contains(string(after), `"matcher": "Read|Bash"`) && !strings.Contains(string(after), `"matcher":"Read|Bash"`) {
+		t.Fatalf("settings not upgraded:\n%s", after)
+	}
+}
+
 // install-hook never touches ~/.claude.json's MCP registration.
 func TestInstallHookLeavesClaudeJSONUntouched(t *testing.T) {
 	settingsPath := setupInstallHookHome(t)

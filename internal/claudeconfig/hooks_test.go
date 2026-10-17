@@ -180,8 +180,8 @@ func TestAddPreToolUseReadHookPreservesExistingGroup(t *testing.T) {
 			}
 		}
 	}
-	if clio == nil || clio["matcher"] != "Read" {
-		t.Fatalf("clio group missing or matcher != Read: %#v", clio)
+	if clio == nil || clio["matcher"] != "Read|Bash" {
+		t.Fatalf("clio group missing or matcher != Read|Bash: %#v", clio)
 	}
 	if len(sessionStartGroups(t, root)) != 1 {
 		t.Error("SessionStart must be untouched by the PreToolUse add")
@@ -261,8 +261,8 @@ func TestAddPreToolUseReadHookIgnoresWrongMatcher(t *testing.T) {
 		t.Fatal(err)
 	}
 	pt := preToolUseGroups(t, readSettings(t, path))
-	if len(pt) != 2 || pt[1].(map[string]any)["matcher"] != "Read" {
-		t.Fatalf("expected a new Read group alongside the Bash one, got %#v", pt)
+	if len(pt) != 2 || pt[1].(map[string]any)["matcher"] != "Read|Bash" {
+		t.Fatalf("expected a new Read|Bash group alongside the Bash one, got %#v", pt)
 	}
 	if err := RemoveClioHooks(path); err != nil {
 		t.Fatal(err)
@@ -614,5 +614,141 @@ func TestWrapperCommandsAreNotClioHooks(t *testing.T) {
 	}
 	if c := pt[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)["command"]; c != "/usr/bin/sudo /opt/clio file-history --hook" {
 		t.Errorf("PreToolUse wrapper rewritten to %v", c)
+	}
+}
+
+// groupsByMatcher maps each PreToolUse group's matcher to its hook commands.
+func groupsByMatcher(t *testing.T, root map[string]any) map[string][]string {
+	t.Helper()
+	out := map[string][]string{}
+	for _, g := range preToolUseGroups(t, root) {
+		gm := g.(map[string]any)
+		m, _ := gm["matcher"].(string)
+		for _, h := range gm["hooks"].([]any) {
+			out[m] = append(out[m], h.(map[string]any)["command"].(string))
+		}
+	}
+	return out
+}
+
+const clioFH = "/x/clio file-history --hook"
+
+func TestAddPreToolUseHookFreshInstallUsesReadBash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := AddClioHooks(path, "/x/clio recall", clioFH); err != nil {
+		t.Fatal(err)
+	}
+	g := groupsByMatcher(t, readSettings(t, path))
+	if len(g) != 1 || len(g["Read|Bash"]) != 1 || g["Read|Bash"][0] != clioFH {
+		t.Fatalf("want one Read|Bash group holding clio, got %v", g)
+	}
+}
+
+// An older clio wrote matcher "Read": a clio-only group is retargeted in place.
+func TestAddPreToolUseHookUpgradesReadOnlyGroupInPlace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"`+clioFH+`","timeout":10}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if legacy, _ := HasLegacyPreToolUseReadHook(path); !legacy {
+		t.Fatal("a clio entry under matcher Read must be reported as upgradable")
+	}
+	if err := AddPreToolUseReadHook(path, clioFH); err != nil {
+		t.Fatal(err)
+	}
+	pt := preToolUseGroups(t, readSettings(t, path))
+	if len(pt) != 1 || pt[0].(map[string]any)["matcher"] != "Read|Bash" {
+		t.Fatalf("want the single group retargeted to Read|Bash, got %v", pt)
+	}
+	if legacy, _ := HasLegacyPreToolUseReadHook(path); legacy {
+		t.Error("nothing left to upgrade after the add")
+	}
+}
+
+// A foreign hook sharing the Read group keeps firing exactly as before; clio's
+// entry moves to its own Read|Bash group.
+func TestAddPreToolUseHookMixedReadGroupMovesClioOut(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"/opt/gate.sh"},{"type":"command","command":"`+clioFH+`","timeout":10}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddPreToolUseReadHook(path, clioFH); err != nil {
+		t.Fatal(err)
+	}
+	g := groupsByMatcher(t, readSettings(t, path))
+	if len(g["Read"]) != 1 || g["Read"][0] != "/opt/gate.sh" {
+		t.Errorf("foreign hook must stay alone under Read, got %v", g)
+	}
+	if len(g["Read|Bash"]) != 1 || g["Read|Bash"][0] != clioFH {
+		t.Errorf("clio must sit alone under Read|Bash, got %v", g)
+	}
+}
+
+func TestAddPreToolUseHookUpgradeIsIdempotentAndHasAcceptsBoth(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	// Old install: Has must already say "installed".
+	if err := os.WriteFile(path, []byte(`{"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"`+clioFH+`"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if has, _ := HasPreToolUseReadHook(path); !has {
+		t.Error("legacy Read group counts as installed")
+	}
+	for i := 0; i < 3; i++ {
+		if err := AddClioHooks(path, "/x/clio recall", clioFH); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if g := groupsByMatcher(t, readSettings(t, path)); len(g) != 1 || len(g["Read|Bash"]) != 1 {
+		t.Fatalf("repeat installs must converge on one Read|Bash entry, got %v", g)
+	}
+	if has, _ := HasPreToolUseReadHook(path); !has {
+		t.Error("Read|Bash group counts as installed")
+	}
+}
+
+// Clio in both a Read group and a Read|Bash group (hand-edited): converge to one.
+func TestAddPreToolUseHookDedupesWhenBothMatchersPresent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"PreToolUse":[
+		{"matcher":"Read","hooks":[{"type":"command","command":"`+clioFH+`"}]},
+		{"matcher":"Read|Bash","hooks":[{"type":"command","command":"`+clioFH+`"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddPreToolUseReadHook(path, clioFH); err != nil {
+		t.Fatal(err)
+	}
+	if g := groupsByMatcher(t, readSettings(t, path)); len(g) != 1 || len(g["Read|Bash"]) != 1 {
+		t.Fatalf("want exactly one clio entry under Read|Bash, got %v", g)
+	}
+}
+
+// A clio entry under a matcher the user chose (neither Read nor Read|Bash) is theirs.
+func TestAddPreToolUseHookLeavesUserMatcherAlone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"PreToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"`+clioFH+`"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddPreToolUseReadHook(path, clioFH); err != nil {
+		t.Fatal(err)
+	}
+	g := groupsByMatcher(t, readSettings(t, path))
+	if len(g["Edit"]) != 1 || len(g["Read|Bash"]) != 1 {
+		t.Fatalf("user's Edit group stays, a Read|Bash group is added; got %v", g)
+	}
+}
+
+func TestRemoveClioHooksClearsReadBashGroup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := AddClioHooks(path, "/x/clio recall", clioFH); err != nil {
+		t.Fatal(err)
+	}
+	if _, fh, _ := HasAnyClioHookEntries(path); !fh {
+		t.Fatal("entry should be detected")
+	}
+	if err := RemoveClioHooks(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, still := readSettings(t, path)["hooks"]; still {
+		t.Error("Read|Bash clio entry should be removed and the hooks key dropped")
 	}
 }
