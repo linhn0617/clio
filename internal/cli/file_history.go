@@ -73,30 +73,60 @@ const hookMaxChars = 8000
 type hookPayload struct {
 	ToolName  string `json:"tool_name"`
 	SessionID string `json:"session_id"`
+	Cwd       string `json:"cwd"`
 	ToolInput struct {
-		FilePath string `json:"file_path"`
+		FilePath string `json:"file_path"` // Read
+		Command  string `json:"command"`   // Bash
 	} `json:"tool_input"`
 }
 
-// fileHistoryHook answers a PreToolUse payload: the file's past-session timeline
-// as additional context, or "" (nothing to say, or any failure). It never emits
-// a permission decision, so the Read proceeds through the normal flow.
+// bashMaxFiles bounds how many candidate files one Bash command may query, so
+// the hook's DB cost stays at a small constant per call.
+const bashMaxFiles = 3
+
+// historyPointer closes every digest; with several files it is emitted once.
+const historyPointer = "(Details: clio show <id>, or the clio MCP read_session tool.)\n"
+
+// hookSegment is one file's timeline, ready to be formatted.
+type hookSegment struct {
+	path string
+	rows []sessions.FileTouch
+}
+
+// fileHistoryHook answers a PreToolUse payload: the touched files' past-session
+// timeline as additional context, or "" (nothing to say, or any failure). It
+// never emits a permission decision, so the tool call proceeds through the
+// normal flow. Read looks up its file_path; Bash looks up the (at most
+// bashMaxFiles) existing files under cwd that the command names.
 func fileHistoryHook(payload []byte, dbPath string, limit int) string {
 	var p hookPayload
 	if len(payload) == 0 || json.Unmarshal(payload, &p) != nil {
 		return ""
 	}
-	if p.ToolName != "Read" || strings.TrimSpace(p.ToolInput.FilePath) == "" {
-		return ""
+	var files []string
+	switch p.ToolName {
+	case "Read":
+		if strings.TrimSpace(p.ToolInput.FilePath) != "" {
+			files = []string{p.ToolInput.FilePath}
+		}
+	case "Bash":
+		files = bashFileCandidates(p.ToolInput.Command, p.Cwd, bashMaxFiles)
 	}
-	key := fileHistoryKey(p.ToolInput.FilePath)
-	rows, newest, err := fileHistoryRows(dbPath, key, p.SessionID, 0, limit)
-	if err != nil || len(rows) == 0 {
-		return ""
+	// Zero candidates return before any DB access: most Bash calls end here.
+	var segs []hookSegment
+	for _, f := range files {
+		rows, newest, err := fileHistoryRows(dbPath, fileHistoryKey(f), p.SessionID, 0, limit)
+		if err != nil || len(rows) == 0 {
+			continue
+		}
+		// Staleness gate: a file edited after its newest indexed touch would get a
+		// misleading timeline. A failed stat (file not on disk yet) skips the gate.
+		if fi, err := os.Stat(f); err == nil && fi.ModTime().Unix() > newest {
+			continue
+		}
+		segs = append(segs, hookSegment{f, rows})
 	}
-	// Staleness gate: a file edited after its newest indexed touch would get a
-	// misleading timeline. A failed stat (file not on disk yet) skips the gate.
-	if fi, err := os.Stat(p.ToolInput.FilePath); err == nil && fi.ModTime().Unix() > newest {
+	if len(segs) == 0 {
 		return ""
 	}
 	// The cap must hold on the ENCODED envelope: JSON escaping can expand a
@@ -104,11 +134,18 @@ func fileHistoryHook(payload []byte, dbPath string, limit int) string {
 	// own length, and Claude Code measures its 10,000-character limit on what
 	// it receives. Shrink the digest until the encoding fits.
 	for budget := hookMaxChars; budget > 0; budget = budget * 3 / 4 {
-		digest := formatFileHistoryCapped(p.ToolInput.FilePath, rows, budget)
-		if digest == "" {
+		var parts []string
+		for _, s := range segs {
+			// The budget is split evenly; a file whose segment cannot fit its
+			// share is dropped rather than starving the others.
+			if d := formatFileHistoryCapped(s.path, s.rows, budget/len(segs)); d != "" {
+				parts = append(parts, strings.TrimSuffix(d, historyPointer))
+			}
+		}
+		if len(parts) == 0 {
 			return "" // nothing fits: stay silent rather than send an empty context
 		}
-		out := encodeHookEnvelope(digest)
+		out := encodeHookEnvelope(strings.Join(parts, "") + historyPointer)
 		if out == "" {
 			return ""
 		}
@@ -148,7 +185,7 @@ func formatFileHistoryCapped(path string, rows []sessions.FileTouch, maxChars in
 		more := fmt.Sprintf("  (+%d more)\n", len(rows)-n)
 		if len([]rune(kept))+len([]rune(more)) <= maxChars {
 			// Insert the marker before the trailing pointer line.
-			i := strings.LastIndex(kept, "(Details:")
+			i := strings.LastIndex(kept, historyPointer)
 			return kept[:i] + more + kept[i:]
 		}
 	}
@@ -203,6 +240,89 @@ func formatFileHistory(path string, rows []sessions.FileTouch) string {
 		}
 		fmt.Fprintf(&b, "  - %s  %s (%s)  %s\n", when, oneLine(r.Title, 60), shortID(r.SessionUUID), termsafe.Strip(strings.Join(r.Tools, ",")))
 	}
-	b.WriteString("(Details: clio show <id>, or the clio MCP read_session tool.)\n")
+	b.WriteString(historyPointer)
 	return b.String()
+}
+
+// bashFileCandidates returns up to max distinct existing regular files under cwd
+// that command names, in first-appearance order. It is a cheap lexical filter,
+// not a shell parser: a false candidate costs one DB lookup, a miss costs
+// nothing but the context hint. Relative tokens resolve against cwd; an empty or
+// relative cwd yields nothing.
+// debt: 沒做 $VAR／~／glob 展開、反斜線跳脫；若使用者常以 $PWD/x 或 glob 讀檔就要補
+func bashFileCandidates(command, cwd string, max int) []string {
+	if !filepath.IsAbs(cwd) || strings.TrimSpace(command) == "" {
+		return nil
+	}
+	cwd = filepath.Clean(cwd)
+	var out []string
+	seen := map[string]bool{}
+	for _, tok := range splitShellWords(command) {
+		tok = strings.Trim(tok, ",:")
+		if tok == "" || tok[0] == '-' || tok[0] == '$' {
+			continue
+		}
+		if !filepath.IsAbs(tok) {
+			tok = filepath.Join(cwd, tok)
+		}
+		tok = filepath.Clean(tok)
+		if seen[tok] || !pathUnder(cwd, tok) {
+			continue
+		}
+		seen[tok] = true
+		if fi, err := os.Stat(tok); err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		out = append(out, tok)
+		if len(out) == max {
+			break
+		}
+	}
+	return out
+}
+
+// pathUnder reports whether path is strictly inside root, by path elements
+// (so /p2 is not under /p).
+func pathUnder(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// splitShellWords splits on whitespace and shell operators, treating '…' and "…" as grouping (the
+// quotes themselves are dropped) so a path containing spaces stays one word.
+// An unterminated quote swallows the rest of the command, which at worst
+// produces a word that matches no file.
+func splitShellWords(s string) []string {
+	var words []string
+	var cur strings.Builder
+	inWord := false
+	var quote rune
+	flush := func() {
+		if inWord {
+			words = append(words, cur.String())
+			cur.Reset()
+			inWord = false
+		}
+	}
+	for _, r := range s {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+		case r == '\'' || r == '"':
+			quote, inWord = r, true
+		case r == ' ' || r == '\t' || r == '\n' || r == '\r' || strings.ContainsRune(";|&()<>", r):
+			// Operators split words even without spaces (`cat a;cat b`, `x>out`);
+			// an unquoted path that really contains one is not matched.
+			flush()
+		default:
+			cur.WriteRune(r)
+			inWord = true
+		}
+	}
+	flush()
+	return words
 }

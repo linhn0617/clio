@@ -235,3 +235,202 @@ func TestFormatFileHistoryStripsTerminalEscapes(t *testing.T) {
 		t.Fatalf("file-history digest carries a control byte: %q", out)
 	}
 }
+
+// bashFixture builds a cwd holding a few regular files, a directory and an
+// outside file, so candidate extraction can be table-tested against real stat.
+type bashFixture struct{ cwd, outside string }
+
+func newBashFixture(t *testing.T) bashFixture {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir()) // macOS /var → /private/var
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := filepath.Join(root, "p")
+	sibling := filepath.Join(root, "p2") // shares the "/p" string prefix
+	for _, d := range []string{filepath.Join(cwd, "sub dir"), filepath.Join(cwd, "adir"), sibling} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{"a.go", "b.go", "c.go", "d.go", filepath.Join("sub dir", "e.go")} {
+		if err := os.WriteFile(filepath.Join(cwd, f), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside := filepath.Join(sibling, "o.go")
+	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return bashFixture{cwd: cwd, outside: outside}
+}
+
+func TestBashFileCandidates(t *testing.T) {
+	f := newBashFixture(t)
+	abs := func(rel string) string { return filepath.Join(f.cwd, rel) }
+	cases := []struct {
+		name, cmd, cwd string
+		want           []string
+	}{
+		{"plain cat", "cat a.go", f.cwd, []string{abs("a.go")}},
+		{"dot slash", "cat ./a.go", f.cwd, []string{abs("a.go")}},
+		{"double-quoted path with space", `cat "sub dir/e.go"`, f.cwd, []string{abs("sub dir/e.go")}},
+		{"single-quoted path with space", `sed -n 1,5p 'sub dir/e.go'`, f.cwd, []string{abs("sub dir/e.go")}},
+		{"absolute inside cwd", "cat " + abs("a.go"), f.cwd, []string{abs("a.go")}},
+		{"absolute outside cwd skipped", "cat " + f.outside, f.cwd, nil},
+		{"dotdot escape skipped", "cat ../p2/o.go", f.cwd, nil},
+		{"flags skipped", "grep -n --color=auto foo a.go", f.cwd, []string{abs("a.go")}},
+		{"dollar skipped", "cat $HOME/a.go $X", f.cwd, nil},
+		{"missing file skipped", "cat nope.go", f.cwd, nil},
+		{"directory skipped", "ls adir", f.cwd, nil},
+		{"separators trimmed", "(cat a.go;cat b.go)|wc -l", f.cwd, []string{abs("a.go"), abs("b.go")}},
+		{"redirect and comma trimmed", "cat a.go>out.txt, b.go:", f.cwd, []string{abs("a.go"), abs("b.go")}},
+		{"dedupe keeps first order", "cat b.go a.go b.go ./a.go", f.cwd, []string{abs("b.go"), abs("a.go")}},
+		{"fourth file truncated", "cat a.go b.go c.go d.go", f.cwd, []string{abs("a.go"), abs("b.go"), abs("c.go")}},
+		{"heredoc body path counts", "cat <<EOF\nsee c.go\nEOF", f.cwd, []string{abs("c.go")}},
+		{"empty cwd skips relative", "cat a.go", "", nil},
+		{"empty cwd skips absolute too", "cat " + abs("a.go"), "", nil},
+		{"no file tokens", "git status", f.cwd, nil},
+		{"empty command", "", f.cwd, nil},
+	}
+	for _, c := range cases {
+		cmd := c.cmd
+		got := bashFileCandidates(cmd, c.cwd, bashMaxFiles)
+		if strings.Join(got, "|") != strings.Join(c.want, "|") {
+			t.Errorf("%s: %q → %q, want %q", c.name, cmd, got, c.want)
+		}
+	}
+}
+
+func bashPayload(command, cwd, session string) []byte {
+	b, _ := json.Marshal(map[string]any{
+		"tool_name": "Bash", "tool_input": map[string]any{"command": command},
+		"cwd": cwd, "session_id": session,
+	})
+	return b
+}
+
+func hookContext(t *testing.T, out string) string {
+	t.Helper()
+	var env struct {
+		HookSpecificOutput struct {
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("not the hook envelope: %q (%v)", out, err)
+	}
+	return env.HookSpecificOutput.AdditionalContext
+}
+
+func TestFileHistoryHookBashInjectsForExistingFile(t *testing.T) {
+	f := newBashFixture(t)
+	file := filepath.Join(f.cwd, "a.go")
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(file, old, old); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := seedFileHistoryDB(t, file, time.Now().Add(-time.Hour).Unix())
+	out := fileHistoryHook(bashPayload("cat a.go | head", f.cwd, "current-9999"), dbPath, 10)
+	ctx := hookContext(t, out)
+	for _, want := range []string{file, "Fix ranking", "past-111"} {
+		if !strings.Contains(ctx, want) {
+			t.Errorf("additionalContext missing %q:\n%s", want, ctx)
+		}
+	}
+}
+
+// No candidate → the DB is never opened: a path that does not exist proves it
+// (an opened-but-missing DB would also be silent, so also assert no side effect).
+func TestFileHistoryHookBashZeroCandidatesDoesNotTouchDB(t *testing.T) {
+	f := newBashFixture(t)
+	missing := filepath.Join(t.TempDir(), "nope", "db.sqlite")
+	for _, cmd := range []string{"git status", "cat nope.go", "cat " + f.outside, "ls adir"} {
+		if out := fileHistoryHook(bashPayload(cmd, f.cwd, "s"), missing, 10); out != "" {
+			t.Errorf("%q: expected silence, got %q", cmd, out)
+		}
+	}
+	// A DB that would answer if consulted: zero candidates must still be silent.
+	dbPath := seedFileHistoryDB(t, filepath.Join(f.cwd, "a.go"), time.Now().Unix())
+	if out := fileHistoryHook(bashPayload("git status", f.cwd, "s"), dbPath, 10); out != "" {
+		t.Errorf("zero candidates must be silent, got %q", out)
+	}
+}
+
+func TestFileHistoryHookBashMultiFileSegments(t *testing.T) {
+	f := newBashFixture(t)
+	a, b := filepath.Join(f.cwd, "a.go"), filepath.Join(f.cwd, "b.go")
+	old := time.Now().Add(-2 * time.Hour)
+	for _, p := range []string{a, b} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := time.Now().Add(-time.Hour).Unix()
+	dbPath := seedFileHistoryDB(t, a, ts)
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{
+		`INSERT INTO messages(id, session_uuid, seq, ts, role, content, raw_json) VALUES (2,'past-1111',1,` + itoa(ts) + `,'tool_use','Read y','{}')`,
+		`INSERT INTO tool_calls(message_id, tool_name, params_summary) VALUES (2,'Read','y')`,
+		`INSERT INTO tool_targets(message_id, session_uuid, ts, kind, value) VALUES (2,'past-1111',` + itoa(ts) + `,'file','` + b + `')`,
+	} {
+		if _, err := d.Exec(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d.Close()
+	ctx := hookContext(t, fileHistoryHook(bashPayload("diff a.go b.go", f.cwd, "cur"), dbPath, 10))
+	for _, want := range []string{"touched " + a, "touched " + b} {
+		if !strings.Contains(ctx, want) {
+			t.Errorf("missing segment %q:\n%s", want, ctx)
+		}
+	}
+	if n := strings.Count(ctx, "(Details:"); n != 1 {
+		t.Errorf("pointer line must appear once, got %d:\n%s", n, ctx)
+	}
+}
+
+func TestFileHistoryHookBashStalenessGateStillApplies(t *testing.T) {
+	f := newBashFixture(t)
+	file := filepath.Join(f.cwd, "a.go") // mtime = now, newer than the touch
+	dbPath := seedFileHistoryDB(t, file, time.Now().Add(-time.Hour).Unix())
+	if out := fileHistoryHook(bashPayload("cat a.go", f.cwd, "cur"), dbPath, 10); out != "" {
+		t.Errorf("stale history must not be injected, got %q", out)
+	}
+	// And the caller's own session is excluded.
+	old := time.Now().Add(-2 * time.Hour)
+	_ = os.Chtimes(file, old, old)
+	if out := fileHistoryHook(bashPayload("cat a.go", f.cwd, "past-1111"), dbPath, 10); out != "" {
+		t.Errorf("own session must be excluded, got %q", out)
+	}
+}
+
+func TestFileHistoryHookBashCapHolds(t *testing.T) {
+	f := newBashFixture(t)
+	a := filepath.Join(f.cwd, "a.go")
+	old := time.Now().Add(-2 * time.Hour)
+	_ = os.Chtimes(a, old, old)
+	dbPath := seedFileHistoryDB(t, a, time.Now().Add(-time.Hour).Unix())
+	d, _ := db.Open(dbPath)
+	for i := 2; i < 200; i++ {
+		id := itoa(int64(i))
+		for _, s := range []string{
+			`INSERT INTO sessions(uuid, project_path, source_file, ended_at, turn_count, title) VALUES ('s` + id + `','/p','p.jsonl',1,2,'` + strings.Repeat("t", 60) + `')`,
+			`INSERT INTO messages(id, session_uuid, seq, ts, role, content, raw_json) VALUES (` + id + `,'s` + id + `',0,1,'tool_use','Edit x','{}')`,
+			`INSERT INTO tool_calls(message_id, tool_name, params_summary) VALUES (` + id + `,'Edit','x')`,
+			`INSERT INTO tool_targets(message_id, session_uuid, ts, kind, value) VALUES (` + id + `,'s` + id + `',1,'file','` + a + `')`,
+		} {
+			if _, err := d.Exec(s); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	d.Close()
+	out := fileHistoryHook(bashPayload("cat a.go", f.cwd, "cur"), dbPath, 500)
+	if out == "" || len([]rune(out)) > hookMaxChars {
+		t.Fatalf("want non-empty output within %d chars, got %d", hookMaxChars, len([]rune(out)))
+	}
+}
