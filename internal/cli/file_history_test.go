@@ -228,3 +228,10 @@ func TestFormatFileHistoryCapped(t *testing.T) {
 		t.Error("cap must not alter output that fits")
 	}
 }
+
+func TestFormatFileHistoryStripsTerminalEscapes(t *testing.T) {
+	out := formatFileHistory("/p/a\x1b[2J.go", []sessions.FileTouch{{SessionUUID: "abcdef123", Title: "t\x1b]0;pwn\x07itle", TS: 1781333200, Tools: []string{"Re\x1b[2Jad"}}})
+	if strings.ContainsRune(out, 0x1b) || strings.ContainsRune(out, 0x07) {
+		t.Fatalf("file-history digest carries a control byte: %q", out)
+	}
+}

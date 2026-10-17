@@ -3,6 +3,8 @@ package ingest
 import (
 	"bufio"
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -741,8 +743,8 @@ func sessionCount(t *testing.T, d *db.DB) int {
 	return n
 }
 
-// PurgeMissing removes a deleted source's rows and leaves survivors intact.
-func TestPurgeMissingRemovesDeletedSource(t *testing.T) {
+// DeleteMissing removes a deleted source's rows and leaves survivors intact.
+func TestDeleteMissingRemovesDeletedSource(t *testing.T) {
 	projects := t.TempDir()
 	writeSession(t, projects, "-p", "keep", sessionEvent("keep", "keep content here"))
 	gonePath := writeSession(t, projects, "-p", "gone", sessionEvent("gone", "UNIQUEGONE content here"))
@@ -755,7 +757,7 @@ func TestPurgeMissingRemovesDeletedSource(t *testing.T) {
 	if err := os.Remove(gonePath); err != nil {
 		t.Fatal(err)
 	}
-	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+	if _, err := ing.DeleteMissing(context.Background(), projects); err != nil {
 		t.Fatal(err)
 	}
 
@@ -782,9 +784,9 @@ func TestPurgeMissingRemovesDeletedSource(t *testing.T) {
 	}
 }
 
-// PurgeMissing must remove messages even when the sessions row is already gone
+// DeleteMissing must remove messages even when the sessions row is already gone
 // (ghost state): deletion must key on the canonical uuid, not a sessions subquery.
-func TestPurgeMissingRemovesGhostMessages(t *testing.T) {
+func TestDeleteMissingRemovesGhostMessages(t *testing.T) {
 	projects := t.TempDir()
 	gonePath := writeSession(t, projects, "-p", "ghost", sessionEvent("ghost", "GHOSTCONTENT here"))
 	d := openTestDB(t)
@@ -802,7 +804,7 @@ func TestPurgeMissingRemovesGhostMessages(t *testing.T) {
 		t.Fatal("setup: expected ghost messages to exist")
 	}
 	os.Remove(gonePath)
-	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+	if _, err := ing.DeleteMissing(context.Background(), projects); err != nil {
 		t.Fatal(err)
 	}
 	d.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='ghost'`).Scan(&m)
@@ -869,7 +871,7 @@ func TestPurgeMissingSkipsWhenRootMissing(t *testing.T) {
 
 // A small history where every source is genuinely deleted must still purge (the ratio
 // cap must not block small installs).
-func TestPurgeMissingSmallHistoryStillPurges(t *testing.T) {
+func TestDeleteMissingSmallHistoryStillPurges(t *testing.T) {
 	projects := t.TempDir()
 	p1 := writeSession(t, projects, "-p", "a", sessionEvent("a", "aaa"))
 	p2 := writeSession(t, projects, "-p", "b", sessionEvent("b", "bbb"))
@@ -880,7 +882,7 @@ func TestPurgeMissingSmallHistoryStillPurges(t *testing.T) {
 	}
 	os.Remove(p1)
 	os.Remove(p2)
-	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+	if _, err := ing.DeleteMissing(context.Background(), projects); err != nil {
 		t.Fatal(err)
 	}
 	if got := sessionCount(t, d); got != 0 {
@@ -889,8 +891,8 @@ func TestPurgeMissingSmallHistoryStillPurges(t *testing.T) {
 }
 
 // A mass disappearance (large count AND most of the corpus) is treated as a filesystem
-// problem and must NOT purge.
-func TestPurgeMissingAbortsOnMassDisappearance(t *testing.T) {
+// problem: the explicit purge must refuse (and say so) and delete nothing.
+func TestDeleteMissingAbortsOnMassDisappearance(t *testing.T) {
 	projects := t.TempDir()
 	var paths []string
 	for i := 0; i < 12; i++ {
@@ -905,11 +907,239 @@ func TestPurgeMissingAbortsOnMassDisappearance(t *testing.T) {
 	for _, p := range paths {
 		os.Remove(p)
 	}
+	n, err := ing.DeleteMissing(context.Background(), projects)
+	if !errors.Is(err, ErrPurgeRefused) {
+		t.Fatalf("mass disappearance: want ErrPurgeRefused, got %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("refused purge reported %d deletions", n)
+	}
+	if got := sessionCount(t, d); got != 12 {
+		t.Fatalf("mass disappearance must abort purge; sessions=%d want 12", got)
+	}
+}
+
+func missingAt(t *testing.T, d *db.DB, path string) sql.NullInt64 {
+	t.Helper()
+	var v sql.NullInt64
+	if err := d.QueryRow(`SELECT source_missing_at FROM ingest_state WHERE source_file=?`, path).Scan(&v); err != nil {
+		t.Fatalf("ingest_state row for %s: %v", path, err)
+	}
+	return v
+}
+
+func rowCount(t *testing.T, d *db.DB, q string, args ...any) int {
+	t.Helper()
+	var n int
+	if err := d.QueryRow(q, args...).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// Claude Code deletes transcripts after cleanupPeriodDays; the default
+// reconciliation must keep the indexed copy and only mark its state row.
+func TestPurgeMissingMarksInsteadOfDeleting(t *testing.T) {
+	projects := t.TempDir()
+	keepPath := writeSession(t, projects, "-p", "keep", sessionEvent("keep", "keep content here"))
+	gonePath := writeSession(t, projects, "-p", "gone", sessionEvent("gone", "UNIQUEGONE content here"))
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(gonePath); err != nil {
+		t.Fatal(err)
+	}
+	before := time.Now().Unix()
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	if n := rowCount(t, d, `SELECT count(*) FROM sessions WHERE uuid='gone'`); n != 1 {
+		t.Fatalf("retained session deleted: sessions=%d", n)
+	}
+	if n := rowCount(t, d, `SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'UNIQUEGONE'`); n != 1 {
+		t.Fatalf("retained content no longer searchable: %d", n)
+	}
+	m := missingAt(t, d, gonePath)
+	if !m.Valid || m.Int64 < before {
+		t.Fatalf("source_missing_at=%v want >= %d", m, before)
+	}
+	if k := missingAt(t, d, keepPath); k.Valid {
+		t.Fatalf("present file marked missing: %v", k)
+	}
+
+	// A second pass must not move the original timestamp.
+	if _, err := d.Exec(`UPDATE ingest_state SET source_missing_at=42 WHERE source_file=?`, gonePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	if m := missingAt(t, d, gonePath); m.Int64 != 42 {
+		t.Fatalf("existing mark overwritten: %v", m)
+	}
+}
+
+// Marking is reversible: a file that comes back (same bytes, so ingest skips it)
+// is unmarked by reconciliation, and a successful ingest of changed bytes also
+// clears the mark.
+func TestPurgeMissingClearsMarkWhenFileReappears(t *testing.T) {
+	projects := t.TempDir()
+	content := sessionEvent("back", "back content")
+	path := writeSession(t, projects, "-p", "back", content)
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(path)
+	data, _ := os.ReadFile(path)
+	os.Remove(path)
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	if !missingAt(t, d, path).Valid {
+		t.Fatal("setup: expected a mark")
+	}
+	// Restore identical bytes + mtime: classifyChange skips it, so only the
+	// reconciliation pass can clear the mark.
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	os.Chtimes(path, fi.ModTime(), fi.ModTime())
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	if m := missingAt(t, d, path); m.Valid {
+		t.Fatalf("mark not cleared after the file reappeared: %v", m)
+	}
+
+	// Mark again, then let an ordinary ingest (new bytes) clear it.
+	if _, err := d.Exec(`UPDATE ingest_state SET source_missing_at=7 WHERE source_file=?`, path); err != nil {
+		t.Fatal(err)
+	}
+	writeSession(t, projects, "-p", "back", content, sessionEvent("back", "appended turn"))
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	if m := missingAt(t, d, path); m.Valid {
+		t.Fatalf("successful ingest did not clear the mark: %v", m)
+	}
+}
+
+// The explicit purge deletes only what is missing now (marked first in the same
+// pass); a marked file that came back is kept.
+func TestDeleteMissingPurgesOnlyStillMissing(t *testing.T) {
+	projects := t.TempDir()
+	gonePath := writeSession(t, projects, "-p", "gone", sessionEvent("gone", "gone content"))
+	backPath := writeSession(t, projects, "-p", "back", sessionEvent("back", "back content"))
+	writeSession(t, projects, "-p", "keep", sessionEvent("keep", "keep content"))
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	backData, _ := os.ReadFile(backPath)
+	os.Remove(gonePath)
+	os.Remove(backPath)
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(backPath, backData, 0o600)
+
+	n, err := ing.DeleteMissing(context.Background(), projects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("purged=%d want 1", n)
+	}
+	if c := rowCount(t, d, `SELECT count(*) FROM sessions WHERE uuid='gone'`); c != 0 {
+		t.Fatalf("still-missing session not purged: %d", c)
+	}
+	if c := rowCount(t, d, `SELECT count(*) FROM ingest_state WHERE source_file=?`, gonePath); c != 0 {
+		t.Fatalf("still-missing ingest_state not purged: %d", c)
+	}
+	if c := rowCount(t, d, `SELECT count(*) FROM sessions WHERE uuid IN ('back','keep')`); c != 2 {
+		t.Fatalf("reappeared/present sessions wrongly purged: %d", c)
+	}
+	if m := missingAt(t, d, backPath); m.Valid {
+		t.Fatalf("reappeared file still marked: %v", m)
+	}
+}
+
+// Marking is reversible, so it is not subject to the mass-disappearance cap: every
+// vanished file is marked, nothing is deleted, and doctor can count them.
+func TestPurgeMissingMarksEvenOnMassDisappearance(t *testing.T) {
+	projects := t.TempDir()
+	var paths []string
+	for i := 0; i < 12; i++ {
+		uuid := fmt.Sprintf("m%02d", i)
+		paths = append(paths, writeSession(t, projects, "-p", uuid, sessionEvent(uuid, "content "+uuid)))
+	}
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range paths {
+		os.Remove(p)
+	}
 	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
 		t.Fatal(err)
 	}
 	if got := sessionCount(t, d); got != 12 {
-		t.Fatalf("mass disappearance must abort purge; sessions=%d want 12", got)
+		t.Fatalf("marking deleted rows: sessions=%d want 12", got)
+	}
+	if c := rowCount(t, d, `SELECT count(*) FROM ingest_state WHERE source_missing_at IS NOT NULL`); c != 12 {
+		t.Fatalf("marked=%d want 12", c)
+	}
+}
+
+// index --full must not drop sessions whose transcript is gone: their messages,
+// tool_targets, session_usage and ingest_state all survive the rebuild.
+func TestFullReindexKeepsRetainedSession(t *testing.T) {
+	projects := t.TempDir()
+	writeSession(t, projects, "-p", "live", sessionEvent("live", "live content"))
+	gonePath := writeSession(t, projects, "-Users-lin-Herd-x", "sess-1", evUser1, evAsst1, evResult1, evUser2)
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	// session_usage needs model usage, which these fixtures lack; seed one row so the
+	// rebuild's per-table handling is still exercised.
+	if _, err := d.Exec(`INSERT INTO session_usage(session_uuid, source, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, reasoning_tokens, tool_tokens, total_tokens) VALUES ('sess-1','claude-code','m',1,1,0,0,0,0,2)`); err != nil {
+		t.Fatal(err)
+	}
+	count := func() [5]int {
+		return [5]int{
+			rowCount(t, d, `SELECT count(*) FROM sessions WHERE uuid='sess-1'`),
+			rowCount(t, d, `SELECT count(*) FROM messages WHERE session_uuid='sess-1'`),
+			rowCount(t, d, `SELECT count(*) FROM tool_targets WHERE session_uuid='sess-1'`),
+			rowCount(t, d, `SELECT count(*) FROM session_usage WHERE session_uuid='sess-1'`),
+			rowCount(t, d, `SELECT count(*) FROM ingest_state WHERE source_file=?`, gonePath),
+		}
+	}
+	before := count()
+	for i, v := range before {
+		if v == 0 {
+			t.Fatalf("setup: table %d empty for sess-1: %v", i, before)
+		}
+	}
+	os.Remove(gonePath)
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ing.IngestAll(context.Background(), projects, true); err != nil {
+		t.Fatal(err)
+	}
+	if after := count(); after != before {
+		t.Fatalf("full reindex changed retained session rows: before=%v after=%v", before, after)
+	}
+	if !missingAt(t, d, gonePath).Valid {
+		t.Fatal("full reindex cleared the retained mark")
 	}
 }
 
@@ -1459,5 +1689,277 @@ func TestIngestPrivateBlockNotSearchable(t *testing.T) {
 	}
 	if strings.Contains(raw, "Acme") {
 		t.Fatalf("raw_json still carries private content: %s", raw)
+	}
+}
+
+// codex review #1: a full reindex that visits a copy of the same transcript in a
+// lexically earlier directory leaves two ingest_state rows for one uuid while
+// sessions.source_file still names the old path. Deleting the old file must not
+// purge the session: the copy is still on disk.
+func TestDeleteMissingKeepsSessionWithLiveDuplicatePath(t *testing.T) {
+	projects := t.TempDir()
+	old := writeSession(t, projects, "-old", "u", sessionEvent("u", "duplicate survivor"))
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := writeSession(t, projects, "-a-copy", "u")
+	if err := os.WriteFile(cp, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ing.IngestAll(context.Background(), projects, true); err != nil {
+		t.Fatal(err)
+	}
+	var states int
+	if err := d.QueryRow(`SELECT count(*) FROM ingest_state`).Scan(&states); err != nil {
+		t.Fatal(err)
+	}
+	var src string
+	if err := d.QueryRow(`SELECT source_file FROM sessions WHERE uuid='u'`).Scan(&src); err != nil {
+		t.Fatal(err)
+	}
+	if states != 2 || src != old {
+		t.Fatalf("precondition: ingest_state rows=%d (want 2), sessions.source_file=%q (want %q)", states, src, old)
+	}
+	if err := os.Remove(old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ing.DeleteMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionCount(t, d); got != 1 {
+		t.Fatalf("session with a live duplicate path was purged; sessions=%d want 1", got)
+	}
+	var msgs int
+	if err := d.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='u'`).Scan(&msgs); err != nil {
+		t.Fatal(err)
+	}
+	if msgs == 0 {
+		t.Fatal("messages of a session with a live duplicate path were purged")
+	}
+	// Treated as a move: the session now points at the copy and the deleted path's
+	// state row is gone, so nothing reports it as retained.
+	if err := d.QueryRow(`SELECT source_file FROM sessions WHERE uuid='u'`).Scan(&src); err != nil || src != cp {
+		t.Fatalf("sessions.source_file = %q (%v), want the live copy %q", src, err, cp)
+	}
+	var oldRows, retained int
+	d.QueryRow(`SELECT count(*) FROM ingest_state WHERE source_file=?`, old).Scan(&oldRows)
+	d.QueryRow(`SELECT count(*) FROM sessions s JOIN ingest_state i ON i.source_file = s.source_file
+		WHERE i.source_missing_at IS NOT NULL`).Scan(&retained)
+	if oldRows != 0 || retained != 0 {
+		t.Fatalf("old ingest_state rows=%d, retained=%d; want 0, 0", oldRows, retained)
+	}
+}
+
+// A subagent transcript lives under <project>/<parent uuid>/subagents/, so its path
+// contains the parent's uuid; it is not a copy of the parent and must not keep a
+// deleted parent session from being purged.
+func TestDeleteMissingSubagentIsNotParentCopy(t *testing.T) {
+	projects := t.TempDir()
+	parent := writeSession(t, projects, "-p", "par1", sessionEvent("par1", "parent text"))
+	sc := `{"type":"user","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"par1","isSidechain":true,"agentId":"a1","message":{"role":"user","content":"sub"}}`
+	writeSubagent(t, projects, "-p", "par1", "a1", sc)
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(parent); err != nil {
+		t.Fatal(err)
+	}
+	n, err := ing.DeleteMissing(context.Background(), projects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left int
+	d.QueryRow(`SELECT count(*) FROM sessions WHERE uuid='par1'`).Scan(&left)
+	if n != 1 || left != 0 {
+		t.Fatalf("parent with only a subagent file left: purged %d, parent rows %d; want 1, 0", n, left)
+	}
+}
+
+// codex: a stat failure other than ErrNotExist on the duplicate copy (EACCES, EIO)
+// does not prove the copy is gone, so the purge must skip the file, not delete it.
+func TestDeleteMissingKeepsSessionWhenDuplicateStatFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	projects := t.TempDir()
+	old := writeSession(t, projects, "-old", "u", sessionEvent("u", "duplicate survivor"))
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := writeSession(t, projects, "-a-copy", "u")
+	if err := os.WriteFile(cp, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ing.IngestAll(context.Background(), projects, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(old); err != nil {
+		t.Fatal(err)
+	}
+	copyDir := filepath.Dir(cp)
+	if err := os.Chmod(copyDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(copyDir, 0o755) })
+
+	if _, err := ing.DeleteMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionCount(t, d); got != 1 {
+		t.Fatalf("session purged although the duplicate's stat failed; sessions=%d want 1", got)
+	}
+	var msgs int
+	d.QueryRow(`SELECT count(*) FROM messages WHERE session_uuid='u'`).Scan(&msgs)
+	if msgs == 0 {
+		t.Fatal("messages purged although the duplicate's stat failed")
+	}
+	var src string
+	if err := d.QueryRow(`SELECT source_file FROM sessions WHERE uuid='u'`).Scan(&src); err != nil || src != old {
+		t.Fatalf("sessions.source_file = %q (%v), want unchanged %q", src, err, old)
+	}
+}
+
+// codex: a failed duplicate lookup must not read as "no copy" (fail-open).
+func TestLiveDuplicateSourceReportsQueryError(t *testing.T) {
+	d := openTestDB(t)
+	ing := New(d, nil)
+	d.Close()
+	if _, err := ing.liveDuplicateSource("u", "/x/u.jsonl"); err == nil {
+		t.Fatal("lookup on a closed DB returned no error")
+	}
+}
+
+// seedSessions writes n sessions under projects and indexes them.
+func seedSessions(t *testing.T, projects string, n int) (*db.DB, *Ingester, []string) {
+	t.Helper()
+	var paths []string
+	for i := 0; i < n; i++ {
+		uuid := fmt.Sprintf("c%02d", i)
+		paths = append(paths, writeSession(t, projects, "-p", uuid, sessionEvent(uuid, "content "+uuid)))
+	}
+	d := openTestDB(t)
+	ing := New(d, nil)
+	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	return d, ing, paths
+}
+
+// ageMarks pushes every existing missing mark back by secs, simulating time passing.
+func ageMarks(t *testing.T, d *db.DB, secs int64) {
+	t.Helper()
+	if _, err := d.Exec(`UPDATE ingest_state SET source_missing_at = source_missing_at - ? WHERE source_missing_at IS NOT NULL`, secs); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Claude Code's cleanup deletes old transcripts in small daily batches. Marks
+// accumulate across batches, but each batch is its own 24h cluster, so the cap
+// must never block the eventual purge (the old whole-set count refused 12/20).
+func TestDeleteMissingAllowsAccumulatedBatches(t *testing.T) {
+	projects := t.TempDir()
+	d, ing, paths := seedSessions(t, projects, 20)
+	for round := 0; round < 4; round++ {
+		for _, p := range paths[round*3 : round*3+3] {
+			os.Remove(p)
+		}
+		if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+			t.Fatal(err)
+		}
+		ageMarks(t, d, 25*3600)
+	}
+	n, err := ing.DeleteMissing(context.Background(), projects)
+	if err != nil {
+		t.Fatalf("accumulated batches refused: %v", err)
+	}
+	if n != 12 || sessionCount(t, d) != 8 {
+		t.Fatalf("purged %d, sessions left %d; want 12 and 8", n, sessionCount(t, d))
+	}
+}
+
+// One large simultaneous disappearance is refused (and stays refused), unless forced.
+func TestDeleteMissingRefusesClusterUnlessForced(t *testing.T) {
+	projects := t.TempDir()
+	d, ing, paths := seedSessions(t, projects, 20)
+	for _, p := range paths[:11] {
+		os.Remove(p)
+	}
+	n, err := ing.DeleteMissing(context.Background(), projects)
+	if !errors.Is(err, ErrPurgeRefused) || n != 0 {
+		t.Fatalf("11/20 at once: want ErrPurgeRefused and 0, got %d, %v", n, err)
+	}
+	if !strings.Contains(err.Error(), "11 files went missing together within 24h (11 of 20 tracked)") || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("refusal message: %v", err)
+	}
+	if sessionCount(t, d) != 20 {
+		t.Fatal("refused purge deleted rows")
+	}
+	ageMarks(t, d, 30*86400) // the cluster stays one cluster however old it gets
+	if _, err := ing.DeleteMissing(context.Background(), projects); !errors.Is(err, ErrPurgeRefused) {
+		t.Fatalf("aged cluster: want ErrPurgeRefused, got %v", err)
+	}
+	n, err = ing.ForceDeleteMissing(context.Background(), projects)
+	if err != nil || n != 11 || sessionCount(t, d) != 9 {
+		t.Fatalf("forced: purged %d, err %v, sessions %d; want 11, nil, 9", n, err, sessionCount(t, d))
+	}
+}
+
+// Eleven missing in total, but split 6 then 5 more than 24h apart: the largest
+// cluster (6) is under the absolute floor, so the purge goes ahead.
+func TestDeleteMissingClusterSplitByTime(t *testing.T) {
+	projects := t.TempDir()
+	d, ing, paths := seedSessions(t, projects, 20)
+	for _, p := range paths[:6] {
+		os.Remove(p)
+	}
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	ageMarks(t, d, 25*3600)
+	for _, p := range paths[6:11] {
+		os.Remove(p)
+	}
+	n, err := ing.DeleteMissing(context.Background(), projects)
+	if err != nil || n != 11 {
+		t.Fatalf("split clusters: purged %d, err %v; want 11, nil", n, err)
+	}
+}
+
+// The 24h window is inclusive: marks exactly 86,400 s apart are one cluster.
+func TestDeleteMissingClusterWindowInclusive(t *testing.T) {
+	projects := t.TempDir()
+	d, ing, paths := seedSessions(t, projects, 20)
+	for _, p := range paths[:11] {
+		os.Remove(p)
+	}
+	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().Add(-48 * time.Hour).Unix()
+	for i, p := range paths[:11] {
+		at := base
+		if i == 10 {
+			at = base + 86400
+		}
+		if _, err := d.Exec(`UPDATE ingest_state SET source_missing_at=? WHERE source_file=?`, at, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ing.DeleteMissing(context.Background(), projects); !errors.Is(err, ErrPurgeRefused) {
+		t.Fatalf("11 marks within an inclusive 24h window: want ErrPurgeRefused, got %v", err)
 	}
 }

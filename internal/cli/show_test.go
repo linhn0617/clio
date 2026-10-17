@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/linhn0617/clio/internal/sessions"
@@ -92,5 +93,23 @@ func TestToJSONMessagesNullsPrunedRaw(t *testing.T) {
 	}
 	if anyPruned(msgsWithRaw("a", "b")) {
 		t.Fatal("anyPruned false positive")
+	}
+}
+
+// Indexed content is attacker-influenced; the human-readable view must not
+// replay terminal escapes (OSC 52 clipboard write, window title, screen clear).
+func TestShowMarkdownStripsTerminalEscapes(t *testing.T) {
+	hostile := "ok\x1b]52;c;SGVsbG8=\x07 \x1b[2Jdone"
+	sess := sessions.Session{UUID: "u1", Title: "t\x1b]0;pwn\x07itle", ProjectPath: "/p\x1b[2J/x"}
+	msgs := []sessions.Message{{Role: "assistant", Content: hostile}}
+	children := []sessions.Session{{UUID: "c1", AgentType: "a\x1b[2Jb", Title: "sub\x1b]52;c;QQ==\x07"}}
+	var buf bytes.Buffer
+	writeShowMarkdown(&buf, sess, msgs, children)
+	out := buf.String()
+	if strings.ContainsRune(out, 0x1b) || strings.ContainsRune(out, 0x07) {
+		t.Fatalf("output carries a control byte: %q", out)
+	}
+	if !strings.Contains(out, "ok done") || !strings.Contains(out, "title") {
+		t.Fatalf("visible text lost: %q", out)
 	}
 }

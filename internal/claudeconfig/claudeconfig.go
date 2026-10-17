@@ -140,9 +140,31 @@ func unmarshalPreservingNumbers(data []byte, v any) error {
 // mutate serializes the read-modify-write across processes (Unix flock) so concurrent
 // install/uninstall runs cannot lost-update each other, then applies mutateLocked.
 func mutate(configPath string, fn func(map[string]any) error) error {
-	return lock.WithFileLock(configPath, func() error {
-		return mutateLocked(configPath, fn)
+	// Lock the real file, so a symlink and its target (or two links to it)
+	// contend on one lock instead of each holding their own.
+	real, err := resolveConfigPath(configPath)
+	if err != nil {
+		return err
+	}
+	return lock.WithFileLock(real, func() error {
+		return mutateLocked(real, fn)
 	})
+}
+
+// resolveConfigPath follows a symlinked config (dotfiles setups link
+// ~/.claude.json or settings.json into a repo) so the atomic rename replaces
+// the target, not the link. A missing path is returned as is (first install).
+// A dangling link is an error: creating the file at an unverified target could
+// silently scatter config, and the user can fix the link in one command.
+func resolveConfigPath(configPath string) (string, error) {
+	if _, err := os.Lstat(configPath); errors.Is(err, fs.ErrNotExist) {
+		return configPath, nil
+	}
+	real, err := filepath.EvalSymlinks(configPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", configPath, err)
+	}
+	return real, nil
 }
 
 // mutateLocked loads, applies fn, and writes back atomically with a backup.

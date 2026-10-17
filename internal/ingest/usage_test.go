@@ -605,7 +605,7 @@ func TestClaudeUsageTombstoneLastWins(t *testing.T) {
 	}
 }
 
-func TestPurgeMissingDeletesUsage(t *testing.T) {
+func TestDeleteMissingDeletesUsage(t *testing.T) {
 	projects := t.TempDir()
 	path := writeSession(t, projects, "-Users-x-proj", "sess-u", cuUser, cuA1)
 	database := openTestDB(t)
@@ -619,7 +619,7 @@ func TestPurgeMissingDeletesUsage(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+	if _, err := ing.DeleteMissing(context.Background(), projects); err != nil {
 		t.Fatal(err)
 	}
 	if got := readUsageRows(t, database, "sess-u"); len(got) != 0 {

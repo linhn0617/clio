@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/linhn0617/clio/internal/db"
 )
@@ -37,7 +38,9 @@ type Message struct {
 
 // ListFilter narrows ListSessions.
 type ListFilter struct {
-	Since         int64
+	Since int64
+	// ProjectPrefix keeps sessions whose project is this path or lies beneath it
+	// (a "/" boundary: /x/foo does not match /x/foo-bar).
 	ProjectPrefix string
 	MinTurns      int
 	Limit         int
@@ -54,6 +57,9 @@ type ListFilter struct {
 	// Source restricts the listing to one originating tool: "" / "claude-code"
 	// (default) lists Claude Code only, "codex" only Codex, "all" every source.
 	Source string
+	// ExcludeSession drops this session and its subagent children: the recall
+	// hook fires for the session being opened, which must not recall itself.
+	ExcludeSession string
 }
 
 // ListSessions returns sessions matching filter, most recent first.
@@ -69,22 +75,20 @@ func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session
 	args := append([]any{}, filterArgs...)
 
 	// Subagent nesting: by default list only top-level sessions. A subagent child is
-	// hidden only when its parent is actually present in THIS listing (same filters),
-	// so a child whose parent is filtered out or unindexed is promoted, not lost.
+	// hidden when its parent is indexed and passes the same filters, wherever that
+	// parent would rank: scoping the check to the current page made a child resurface
+	// whenever its parent merely fell below LIMIT. A child whose parent is filtered
+	// out (e.g. older than --since) or not indexed is promoted, not lost.
 	// ParentSession instead lists exactly one parent's children.
 	if f.ParentSession != "" {
 		q += " AND parent_session = ?"
 		args = append(args, f.ParentSession)
 	} else if !f.IncludeSubagents {
-		// Match the listing's own page: a child is hidden only when its parent is on
-		// this page (same filters + recency order + limit), so a recent child of an
-		// off-page parent is promoted rather than lost.
-		q += " AND (parent_session IS NULL OR parent_session = '' OR parent_session NOT IN (SELECT uuid FROM sessions WHERE 1=1" + filterSQL + " ORDER BY ended_at DESC, uuid DESC LIMIT ?))"
+		q += " AND (parent_session IS NULL OR parent_session = '' OR parent_session NOT IN (SELECT uuid FROM sessions WHERE 1=1" + filterSQL + "))"
 		args = append(args, filterArgs...)
-		args = append(args, f.Limit)
 	}
-	// uuid is a deterministic tiebreaker so the page (and the parent-presence
-	// subquery above) resolve ties at the LIMIT boundary identically.
+	// uuid is a deterministic tiebreaker so ties at the LIMIT boundary resolve
+	// identically across calls.
 	q += " ORDER BY ended_at DESC, uuid DESC LIMIT ?"
 	args = append(args, f.Limit)
 
@@ -107,7 +111,8 @@ func ListSessions(ctx context.Context, database *db.DB, f ListFilter) ([]Session
 
 // listFilters builds the shared WHERE predicates (everything except the subagent
 // nesting clause and LIMIT), so the same filters scope both the listing and the
-// "is this child's parent in the listing?" subquery used for nesting.
+// "is this child's parent indexed and visible under these filters?" subquery
+// used for nesting.
 func listFilters(f ListFilter) (string, []any) {
 	q := ""
 	var args []any
@@ -116,8 +121,13 @@ func listFilters(f ListFilter) (string, []any) {
 		args = append(args, f.Since)
 	}
 	if f.ProjectPrefix != "" {
-		q += ` AND project_path LIKE ? ESCAPE '\'`
-		args = append(args, db.EscapeLike(f.ProjectPrefix)+"%")
+		clause, pargs := pathUnderClause("project_path", f.ProjectPrefix)
+		q += clause
+		args = append(args, pargs...)
+	}
+	if f.ExcludeSession != "" {
+		q += ` AND uuid <> ? AND COALESCE(parent_session,'') <> ?`
+		args = append(args, f.ExcludeSession, f.ExcludeSession)
 	}
 	if f.MinTurns > 0 {
 		q += " AND turn_count >= ?"
@@ -144,6 +154,20 @@ func listFilters(f ListFilter) (string, []any) {
 		args = append(args, cargs...)
 	}
 	return q, args
+}
+
+// pathUnderClause matches col equal to path or anything beneath it. A bare
+// LIKE 'path%' also caught siblings sharing the prefix (/x/foo-bar for /x/foo).
+// A trailing "/" is ignored so "/x/foo/" and "/x/foo" agree. It compares with
+// substr rather than LIKE: LIKE folds ASCII case, so on a case-sensitive
+// filesystem /x/foo would also match /x/FOO/sub. substr and length both count
+// characters, so a non-ASCII prefix lines up.
+func pathUnderClause(col, path string) (string, []any) {
+	p := strings.TrimRight(path, "/")
+	if p == "" {
+		return ` AND substr(` + col + `, 1, 1) = '/'`, nil // the filesystem root: every absolute path
+	}
+	return ` AND (` + col + ` = ? OR substr(` + col + `, 1, length(?)) = ?)`, []any{p, p + "/", p + "/"}
 }
 
 // ErrNotFound / ErrAmbiguous report prefix resolution failures.
@@ -305,25 +329,53 @@ type ActivityCount struct {
 }
 
 // ActivityByKind returns the most frequent activity values of a kind
-// (file|command|tool|pattern|url), optionally bounded by time and project.
+// (file|command|tool|pattern|url), optionally bounded by time and project (the
+// project path itself or anything beneath it).
 func ActivityByKind(ctx context.Context, database *db.DB, kind string, since int64, projectPrefix, source string, limit int) ([]ActivityCount, error) {
+	return activityByKind(ctx, database, activityQuery{kind: kind, since: since, project: projectPrefix, source: source, limit: limit})
+}
+
+// activityQuery carries ActivityByKind's filters plus the recall-only ones.
+type activityQuery struct {
+	kind           string
+	since          int64
+	project        string
+	source         string
+	excludeSession string // drop this session and its subagents
+	valueUnder     string // keep only values that are this path or beneath it
+	limit          int
+}
+
+func activityByKind(ctx context.Context, database *db.DB, a activityQuery) ([]ActivityCount, error) {
+	limit := a.limit
 	if limit <= 0 {
 		limit = 50
 	}
-	srcClause, srcArgs := db.SourceFilter("s.source", source)
+	srcClause, srcArgs := db.SourceFilter("s.source", a.source)
 	q := `SELECT tt.value, COUNT(*) FROM tool_targets tt`
-	if projectPrefix != "" || srcClause != "" {
+	if a.project != "" || srcClause != "" || a.excludeSession != "" {
 		q += ` JOIN sessions s ON s.uuid = tt.session_uuid`
 	}
 	q += ` WHERE tt.kind = ?`
-	args := []any{kind}
-	if projectPrefix != "" {
-		q += ` AND s.project_path LIKE ? ESCAPE '\'`
-		args = append(args, db.EscapeLike(projectPrefix)+"%")
+	args := []any{a.kind}
+	if a.project != "" {
+		clause, pargs := pathUnderClause("s.project_path", a.project)
+		q += clause
+		args = append(args, pargs...)
 	}
-	if since > 0 {
+	if a.excludeSession != "" {
+		q += ` AND s.uuid <> ? AND COALESCE(s.parent_session,'') <> ?`
+		args = append(args, a.excludeSession, a.excludeSession)
+	}
+	if a.valueUnder != "" {
+		// Filtered in SQL so LIMIT counts only the kept values.
+		clause, vargs := pathUnderClause("tt.value", a.valueUnder)
+		q += clause
+		args = append(args, vargs...)
+	}
+	if a.since > 0 {
 		q += ` AND tt.ts >= ?`
-		args = append(args, since)
+		args = append(args, a.since)
 	}
 	if srcClause != "" {
 		q += srcClause
@@ -368,18 +420,24 @@ type Recall struct {
 }
 
 // GetRecall gathers a project's recent sessions plus its most-touched files and
-// most-run commands since the given time.
-func GetRecall(ctx context.Context, database *db.DB, projectPrefix string, since int64, limitSessions, limitActivity int) (Recall, error) {
-	sess, err := ListSessions(ctx, database, ListFilter{ProjectPrefix: projectPrefix, Since: since, Limit: limitSessions})
+// most-run commands since the given time. excludeSession ("" = none) drops the
+// session being opened, and its subagents, from every section; touched files
+// are limited to paths under the project.
+func GetRecall(ctx context.Context, database *db.DB, projectPrefix, excludeSession string, since int64, limitSessions, limitActivity int) (Recall, error) {
+	sess, err := ListSessions(ctx, database, ListFilter{ProjectPrefix: projectPrefix, Since: since, Limit: limitSessions, ExcludeSession: excludeSession})
 	if err != nil {
 		return Recall{}, err
 	}
 	// Recall is Claude-Code-only by policy: pass the default ("") source.
-	files, err := ActivityByKind(ctx, database, "file", since, projectPrefix, "", limitActivity)
+	// Files outside the project (scratchpads, other repos a session peeked at)
+	// say nothing about where this project left off.
+	files, err := activityByKind(ctx, database, activityQuery{kind: "file", since: since, project: projectPrefix,
+		excludeSession: excludeSession, valueUnder: projectPrefix, limit: limitActivity})
 	if err != nil {
 		return Recall{}, err
 	}
-	commands, err := ActivityByKind(ctx, database, "command", since, projectPrefix, "", limitActivity)
+	commands, err := activityByKind(ctx, database, activityQuery{kind: "command", since: since, project: projectPrefix,
+		excludeSession: excludeSession, limit: limitActivity})
 	if err != nil {
 		return Recall{}, err
 	}
@@ -388,11 +446,10 @@ func GetRecall(ctx context.Context, database *db.DB, projectPrefix string, since
 	// only when the since window is empty does it fall back to the project's
 	// newest session regardless of `since` — after a long break is exactly when
 	// "where did we leave off" matters most. The fallback keeps the digest's page
-	// size: subagent nesting hides a child only when its parent is on the page,
-	// so a Limit of 1 would promote every child whose parent is merely older.
+	// size so both paths read the same number of rows.
 	newest := sess
 	if len(newest) == 0 {
-		newest, err = ListSessions(ctx, database, ListFilter{ProjectPrefix: projectPrefix, Limit: limitSessions})
+		newest, err = ListSessions(ctx, database, ListFilter{ProjectPrefix: projectPrefix, Limit: limitSessions, ExcludeSession: excludeSession})
 		if err != nil {
 			return Recall{}, err
 		}
@@ -426,8 +483,8 @@ type Bucket struct {
 }
 
 // ActivitySummary aggregates activity since a time, grouped by "day" or "project",
-// optionally bounded to sessions whose project_path starts with projectPrefix
-// (matching ActivityByKind's prefix-filter semantics).
+// optionally bounded to sessions whose project_path is projectPrefix or lies
+// beneath it (matching ActivityByKind's project-filter semantics).
 func ActivitySummary(ctx context.Context, database *db.DB, since int64, groupBy, projectPrefix, source string) ([]Bucket, error) {
 	var keyExpr string
 	switch groupBy {
@@ -449,8 +506,9 @@ func ActivitySummary(ctx context.Context, database *db.DB, since int64, groupBy,
 		WHERE s.ended_at >= ?`
 	args := []any{since}
 	if projectPrefix != "" {
-		q += ` AND s.project_path LIKE ? ESCAPE '\'`
-		args = append(args, db.EscapeLike(projectPrefix)+"%")
+		clause, pargs := pathUnderClause("s.project_path", projectPrefix)
+		q += clause
+		args = append(args, pargs...)
 	}
 	q += srcClause + `
 		GROUP BY k ORDER BY k DESC`

@@ -10,6 +10,7 @@ import (
 
 	"github.com/linhn0617/clio/internal/ask"
 	"github.com/linhn0617/clio/internal/db"
+	"github.com/linhn0617/clio/internal/termsafe"
 )
 
 // askView is the question tab: a question input, the ask.Ask evidence bundle
@@ -153,7 +154,7 @@ func (v askView) renderExcerpts() string {
 			marker = previewMatchMarker
 		}
 		b.WriteString(marker + e.Role + "\n")
-		b.WriteString(e.Text + "\n\n")
+		b.WriteString(termsafe.Strip(e.Text) + "\n\n")
 	}
 	return b.String()
 }

@@ -98,7 +98,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(false),
 		mcp.WithString("since", mcp.Description("Only sessions since: 7d, 12h, 30m, or YYYY-MM-DD")),
-		mcp.WithString("project", mcp.Description("Filter by project path prefix")),
+		mcp.WithString("project", mcp.Description("Filter by project path (matches it and anything beneath)")),
 		mcp.WithNumber("min_turns", mcp.Description("Only sessions with at least this many user turns"), mcp.DefaultNumber(0)),
 		mcp.WithNumber("limit", mcp.Description("Max sessions (default 20, max 50)"), mcp.DefaultNumber(20), mcp.Min(1), mcp.Max(maxSearchLimit)),
 		mcp.WithString("touched", mcp.Description("Only sessions whose tool calls touched this path prefix")),
@@ -116,7 +116,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithOpenWorldHintAnnotation(false),
 		mcp.WithString("since", mcp.Description("Period start: 7d, 12h, 30m, or YYYY-MM-DD (default 7d)")),
 		mcp.WithString("group_by", mcp.Description("Grouping: day or project (counts), file/command/tool/pattern/url (activity), or usage (session token totals)"), mcp.Enum("day", "project", "file", "command", "tool", "pattern", "url", "usage"), mcp.DefaultString("day")),
-		mcp.WithString("project", mcp.Description("Filter by project path prefix")),
+		mcp.WithString("project", mcp.Description("Filter by project path (matches it and anything beneath; group_by=usage still matches it as a raw prefix)")),
 		mcp.WithNumber("limit", mcp.Description("Max rows for file/command/tool/pattern/url grouping (default 30, max 50)"), mcp.DefaultNumber(30), mcp.Min(1), mcp.Max(maxSearchLimit)),
 		mcp.WithString("source", sourceOptions("Which tool's history")...),
 	), handleActivitySummary(database, beforeRead))

@@ -151,6 +151,24 @@ func TestUsageCmdQuotaDisclaimerAndAge(t *testing.T) {
 	}
 }
 
+// codex review #2: limit_id and plan_type come from session files, so an
+// escape sequence planted there (OSC 52 writes the clipboard) must not reach the
+// terminal.
+func TestUsageCmdQuotaStripsTerminalEscapes(t *testing.T) {
+	d := usageCmdSandbox(t)
+	if _, err := d.Exec(`INSERT INTO quota_snapshots(source, limit_id, observed_at, used_percent, window_minutes, resets_at, plan_type) VALUES ('codex',?,?,42.5,10080,0,?)`,
+		"codex:\x1b[31mprimary", time.Now().Unix(), "plus\x1b]52;c;aGk=\x07"); err != nil {
+		t.Fatal(err)
+	}
+	out := runCmd(t, "--quota")
+	if strings.Contains(out, "\x1b") || strings.Contains(out, "\x07") {
+		t.Fatalf("quota output carries a raw escape: %q", out)
+	}
+	if !strings.Contains(out, "codex:primary (plus)") {
+		t.Fatalf("quota output lost the visible text: %q", out)
+	}
+}
+
 func TestListJSONIncludesUsage(t *testing.T) {
 	d := usageCmdSandbox(t)
 	seedUsageSession(t, d, "s1", "/p", "claude-code", "m1", 1500, true)

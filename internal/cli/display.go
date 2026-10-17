@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linhn0617/clio/internal/termsafe"
 	"github.com/linhn0617/clio/internal/timeutil"
 )
 
@@ -13,6 +14,7 @@ func parseSince(s string) (int64, error) {
 }
 
 func shortID(uuid string) string {
+	uuid = termsafe.Strip(uuid)
 	if len(uuid) > 8 {
 		return uuid[:8]
 	}
@@ -26,8 +28,9 @@ func formatTS(ts int64) string {
 	return time.Unix(ts, 0).Format("2006-01-02 15:04")
 }
 
+// oneLine also strips terminal escapes: every caller prints indexed text.
 func oneLine(s string, max int) string {
-	s = strings.ReplaceAll(strings.TrimSpace(s), "\n", " ")
+	s = strings.ReplaceAll(strings.TrimSpace(termsafe.Strip(s)), "\n", " ")
 	r := []rune(s)
 	if len(r) > max {
 		return string(r[:max]) + "…"
@@ -36,6 +39,7 @@ func oneLine(s string, max int) string {
 }
 
 func trimProject(p string) string {
+	p = termsafe.Strip(p)
 	if p == "" {
 		return "(unknown)"
 	}

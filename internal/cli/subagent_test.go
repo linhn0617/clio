@@ -64,3 +64,26 @@ func TestFormatSearchResultLabelsSubagent(t *testing.T) {
 		t.Fatalf("a subagent hit should be labeled with ↳ and its type: %q", sub)
 	}
 }
+
+func TestSearchAndListLinesStripTerminalEscapes(t *testing.T) {
+	s := sessions.Session{UUID: "abcdef123", Title: "t\x1b[2Jitle", ProjectPath: "/p/pro\x1b]52;c;QQ==\x07j", TurnCount: 1}
+	r := search.Result{SessionUUID: "abcdef123", ProjectPath: "/p/pr\x1b[2Joj", Role: "user", ParentSession: "x", AgentType: "a\x1b[2Jt",
+		Snippet: "sn\x1b]0;pwn\x07ip"}
+	for name, out := range map[string]string{
+		"list":   formatSessionLine(s),
+		"search": formatSearchResult(r),
+		"usage":  formatUsageSessionRow(sessions.UsageSessionRow{SessionUUID: "abcdef123", ProjectPath: "/p/pr\x1b[2Joj", Title: "t\x1b[2J", AgentType: "a\x1b[2J"}),
+		"group":  formatUsageGroupRow("project", sessions.UsageGroupRow{Key: "/p/pr\x1b[2Joj"}),
+	} {
+		if strings.ContainsRune(out, 0x1b) || strings.ContainsRune(out, 0x07) {
+			t.Errorf("%s line carries a control byte: %q", name, out)
+		}
+	}
+}
+
+func TestFormatActivityRowStripsTerminalEscapes(t *testing.T) {
+	out := formatActivityRow(sessions.ActivityCount{Value: "ls\x1b]52;c;QQ==\x07 -l\x1b[2J", Count: 2})
+	if strings.ContainsRune(out, 0x1b) || strings.ContainsRune(out, 0x07) || !strings.Contains(out, "ls -l") {
+		t.Fatalf("activity row not clean: %q", out)
+	}
+}

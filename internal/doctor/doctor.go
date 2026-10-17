@@ -33,6 +33,9 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 	}
 
 	var availRoots []string
+	// doctor opens read-only, so migrations may not have run yet: a pre-0013 DB has no
+	// source_missing_at column, which simply means nothing is retained.
+	hasMissingCol := ingestStateHasColumn(database, "source_missing_at")
 
 	// Every non-default (e.g. Codex) registered source's root is optional: report
 	// it only when present, and treat its absence as "not installed", never a
@@ -125,7 +128,7 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 	// under a currently-unavailable source root are "preserved" (kept by design),
 	// reported separately from genuinely missing files so a stale index isn't read
 	// as healthy and an unmounted root isn't read as deletions.
-	missing, preserved, truncated, rewritten, lag, rerr := reconcile(database, availRoots)
+	missing, preserved, retainedFiles, truncated, rewritten, lag, rerr := reconcile(database, availRoots)
 	if rerr != nil {
 		add("source reconciliation", false, rerr.Error())
 	} else {
@@ -134,10 +137,25 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 		if preserved > 0 {
 			detail += fmt.Sprintf(", %d preserved (source root unavailable)", preserved)
 		}
+		if retainedFiles > 0 {
+			detail += fmt.Sprintf(", %d retained (transcript deleted, index kept)", retainedFiles)
+		}
 		// Every category above is a real discrepancy between the index and its source
 		// files: none of them may be silently treated as healthy, or doctor would
 		// report OK/exit 0 while the detail text itself lists live problems.
 		add("source reconciliation", missing == 0 && truncated == 0 && rewritten == 0 && lag == 0, detail)
+	}
+
+	// Retained sessions: kept after their transcript was deleted (Claude Code's
+	// cleanupPeriodDays). Informational — retention is the intended behaviour.
+	var retainedSessions int
+	if !hasMissingCol {
+		add("retained sessions", true, "0"+retainedSuffix)
+	} else if err := database.QueryRow(`SELECT count(*) FROM sessions s JOIN ingest_state i ON i.source_file = s.source_file
+		WHERE i.source_missing_at IS NOT NULL`).Scan(&retainedSessions); err != nil {
+		add("retained sessions", false, err.Error())
+	} else {
+		add("retained sessions", true, fmt.Sprintf("%d%s", retainedSessions, retainedSuffix))
 	}
 
 	// Cross-source uuid conflicts: files refused at ingest because their uuid is
@@ -226,6 +244,9 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 			prunedMsgs, float64(freelist*pageSize)/1e6))
 	}
 
+	ftsOK, ftsDetail := ftsBloat(database)
+	add("fts bloat", ftsOK, ftsDetail)
+
 	// File permissions: the DB and its WAL/SHM sidecars hold indexed content and must
 	// be private (0600). Absent sidecars (no writes yet) are skipped.
 	var badPerms []string
@@ -275,6 +296,42 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 	}
 
 	return out
+}
+
+// ftsBloatRatio is the fts-to-messages size ratio above which the index is reported as
+// bloated. A healthy trigram index tracks the text it indexes (one observed DB came out at
+// well under 1x after an optimize), while the unmerged-tombstone pile-up from repeated full
+// reindexes was 3.8x; 2.0 sits clear of both, so only real accumulation trips it.
+const ftsBloatRatio = 2.0
+
+// ftsBloatMinBytes keeps small databases from tripping the ratio on page-granularity noise.
+const ftsBloatMinBytes = 16 << 20
+
+// ftsBloat compares the on-disk size of the FTS5 data table with the messages table via the
+// dbstat virtual table. A failed measurement is never red: the tool being absent says nothing
+// about the index.
+func ftsBloat(d *db.DB) (bool, string) {
+	var fts, msg int64
+	if err := d.QueryRow(`SELECT COALESCE(SUM(pgsize),0) FROM dbstat WHERE name = 'messages_fts_data'`).Scan(&fts); err != nil {
+		return true, "unavailable (" + err.Error() + ")"
+	}
+	if err := d.QueryRow(`SELECT COALESCE(SUM(pgsize),0) FROM dbstat WHERE name = 'messages'`).Scan(&msg); err != nil {
+		return true, "unavailable (" + err.Error() + ")"
+	}
+	return ftsBloatVerdict(fts, msg)
+}
+
+func ftsBloatVerdict(fts, msg int64) (bool, string) {
+	const mb = float64(1 << 20)
+	ratio := 0.0
+	if msg > 0 {
+		ratio = float64(fts) / float64(msg)
+	}
+	detail := fmt.Sprintf("fts %.1f MB vs messages %.1f MB (ratio %.1f)", float64(fts)/mb, float64(msg)/mb, ratio)
+	if fts >= ftsBloatMinBytes && ratio > ftsBloatRatio {
+		return false, detail + "; run clio index --full to optimize"
+	}
+	return true, detail
 }
 
 // ftsContentIntegrityOK runs SQLite FTS5's external-content integrity check
@@ -328,27 +385,51 @@ func ftsContentIntegrityOK(dbPath string) (ok bool, detail string, err error) {
 	return false, "", fmt.Errorf("fts5 integrity-check: %w", cerr)
 }
 
-func reconcile(database *db.DB, availRoots []string) (missing, preserved, truncated, rewritten, lag int, err error) {
-	rows, qerr := database.Query(`SELECT source_file, last_size, last_mtime, last_byte_offset FROM ingest_state`)
+const retainedSuffix = " session(s) kept after their transcript was deleted (clio index --purge-missing to drop)"
+
+// ingestStateHasColumn reports whether ingest_state has the named column.
+func ingestStateHasColumn(database *db.DB, name string) bool {
+	var n int
+	if err := database.QueryRow(`SELECT count(*) FROM pragma_table_info('ingest_state') WHERE name = ?`, name).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
+
+// missingMarkExpr selects source_missing_at, or a constant NULL on a pre-0013 DB.
+func missingMarkExpr(database *db.DB) string {
+	if ingestStateHasColumn(database, "source_missing_at") {
+		return "source_missing_at"
+	}
+	return "NULL"
+}
+
+func reconcile(database *db.DB, availRoots []string) (missing, preserved, retained, truncated, rewritten, lag int, err error) {
+	rows, qerr := database.Query(`SELECT source_file, last_size, last_mtime, last_byte_offset, ` + missingMarkExpr(database) + ` FROM ingest_state`)
 	if qerr != nil {
-		return 0, 0, 0, 0, 0, qerr
+		return 0, 0, 0, 0, 0, 0, qerr
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var path string
 		var lastSize, lastMtime, offset int64
-		if serr := rows.Scan(&path, &lastSize, &lastMtime, &offset); serr != nil {
-			return 0, 0, 0, 0, 0, serr
+		var missingAt sql.NullInt64
+		if serr := rows.Scan(&path, &lastSize, &lastMtime, &offset, &missingAt); serr != nil {
+			return 0, 0, 0, 0, 0, 0, serr
 		}
 		fi, statErr := os.Stat(path)
 		if statErr != nil {
-			// A file whose source root is currently unavailable is preserved by
-			// design (PurgeMissing keeps it), not a deletion — count it separately.
-			// Otherwise it is genuinely missing/unverifiable; flag it rather than
+			// A file marked missing was deleted at the source and its index kept on
+			// purpose (PurgeMissing marks, never deletes). A file whose source root is
+			// currently unavailable is preserved by design, not a deletion. Otherwise it
+			// is genuinely missing/unverifiable (not yet reconciled); flag it rather than
 			// silently skipping, so the check does not false-green.
-			if !underAnyDir(path, availRoots) {
+			switch {
+			case missingAt.Valid:
+				retained++
+			case !underAnyDir(path, availRoots):
 				preserved++
-			} else {
+			default:
 				missing++
 			}
 			continue
@@ -365,7 +446,7 @@ func reconcile(database *db.DB, availRoots []string) (missing, preserved, trunca
 			lag++
 		}
 	}
-	return missing, preserved, truncated, rewritten, lag, rows.Err()
+	return missing, preserved, retained, truncated, rewritten, lag, rows.Err()
 }
 
 // coverageBySource compares on-disk session files to tracked ingest_state rows,
@@ -374,7 +455,9 @@ func reconcile(database *db.DB, availRoots []string) (missing, preserved, trunca
 // never ingested). ingest_state has no source column, so membership is decided by path
 // prefix against each root, mirroring reconcile's underAnyDir.
 func coverageBySource(database *db.DB, roots []string) (ok bool, detail string, err error) {
-	rows, qerr := database.Query(`SELECT source_file FROM ingest_state`)
+	// Retained rows (source_missing_at set) have no file on disk; counting them would
+	// keep tracked above on-disk forever and mask a real gap of the same size.
+	rows, qerr := database.Query(`SELECT source_file FROM ingest_state WHERE ` + missingMarkExpr(database) + ` IS NULL`)
 	if qerr != nil {
 		return false, "", qerr
 	}

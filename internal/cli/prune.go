@@ -146,6 +146,13 @@ func runPruneRaw(ctx context.Context, o pruneOpts) error {
 	if o.dryRun || !o.doVacuum || pr.Messages == 0 {
 		return nil
 	}
+	// Merge FTS tombstones first so VACUUM can actually return their pages.
+	fmt.Fprintln(os.Stdout, "optimizing fts index…")
+	if oerr := optimizeFTS(ctx, database); oerr != nil {
+		fmt.Fprintf(os.Stderr, "warning: fts optimize failed (continuing to VACUUM): %v\n", oerr)
+	} else {
+		fmt.Fprintln(os.Stdout, "fts optimized")
+	}
 	fmt.Fprintln(os.Stdout, "running VACUUM…")
 	if _, err := database.Exec(`VACUUM`); err != nil {
 		return fmt.Errorf("prune committed, but VACUUM failed: %w", err)

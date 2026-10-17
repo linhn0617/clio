@@ -13,6 +13,7 @@ import (
 	"github.com/linhn0617/clio/internal/registry"
 	"github.com/linhn0617/clio/internal/search"
 	"github.com/linhn0617/clio/internal/sessions"
+	"github.com/linhn0617/clio/internal/termsafe"
 )
 
 // searchDebounce delays the query after the last keystroke so live search doesn't
@@ -221,7 +222,7 @@ func (v searchView) renderList(w, h int) string {
 		}
 		line := oneLine(r.snippet)
 		if r.parentSession != "" {
-			typ := r.agentType
+			typ := termsafe.Strip(r.agentType)
 			if typ == "" {
 				typ = "subagent"
 			}

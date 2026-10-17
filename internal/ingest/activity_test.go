@@ -269,7 +269,7 @@ func TestPurgeRemovesToolTargets(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if err := ing.PurgeMissing(context.Background(), projects); err != nil {
+	if _, err := ing.DeleteMissing(context.Background(), projects); err != nil {
 		t.Fatal(err)
 	}
 	if got := activityRows(t, database, "sess-p"); len(got) != 0 {

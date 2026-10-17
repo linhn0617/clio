@@ -748,7 +748,7 @@ func TestGeminiPurgeDeletedFileResolvesUUIDFromDB(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if err := ing.PurgeMissing(context.Background(), t.TempDir()); err != nil {
+	if _, err := ing.DeleteMissing(context.Background(), t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
 

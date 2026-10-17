@@ -468,3 +468,26 @@ func TestStripPrivateOnRedactJSONFallback(t *testing.T) {
 		t.Errorf("fallback path leaked private content: %q", got)
 	}
 }
+
+// JSON object keys go through the same string redaction as values: a token or
+// a <private> element used as a key must not reach the index.
+func TestRedactJSONKeys(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"token as key", `{"ghp_abcdefghijklmnopqrstuvwxyz0123456789":1}`, `{"[REDACTED:github-token]":1}`},
+		{"private element as key", `{"<private>x</private>":"v"}`, `{"":"v"}`},
+		{"normal key unchanged", `{"name":"v","n":2}`, `{"n":2,"name":"v"}`},
+		{"nested key", `{"a":{"<private>x</private>k":"v"}}`, `{"a":{"k":"v"}}`},
+		{"colliding redacted keys collapse to marker",
+			`{"ghp_abcdefghijklmnopqrstuvwxyz0123456789":1,"ghp_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ":2}`,
+			`{"[REDACTED:github-token]":"[REDACTED:key]"}`},
+		{"secret key name still judged on original key", `{"token":"abc123456"}`, `{"token":"[REDACTED:key]"}`},
+	}
+	for _, c := range cases {
+		got := string(redactJSON([]byte(c.in)))
+		if got != c.want {
+			t.Errorf("%s: redactJSON(%s) = %s, want %s", c.name, c.in, got, c.want)
+		}
+	}
+}

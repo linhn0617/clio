@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -264,14 +265,32 @@ func redactWalkDepth(v any, depth int) any {
 	}
 	switch x := v.(type) {
 	case map[string]any:
-		for k, val := range x {
-			if isSecretKey(k) {
-				x[k] = "[REDACTED:key]" // whole subtree, any type
-			} else {
-				x[k] = redactWalkDepth(val, depth+1)
-			}
+		// Keys are strings too: a token or a <private> element used as a
+		// key must not reach the index. Build a fresh map (never edit x while
+		// ranging it) and sort so a rename collision resolves deterministically.
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
 		}
-		return x
+		sort.Strings(keys)
+		out := make(map[string]any, len(x))
+		for _, k := range keys {
+			var val any
+			if isSecretKey(k) { // judged on the original key name
+				val = "[REDACTED:key]" // whole subtree, any type
+			} else {
+				val = redactWalkDepth(x[k], depth+1)
+			}
+			nk := redactString(k)
+			if _, dup := out[nk]; dup {
+				// Two keys redacted to the same name: keeping either value would
+				// pick one arbitrarily and could surface the other's content
+				// under a name it never had, so collapse to the marker.
+				val = "[REDACTED:key]"
+			}
+			out[nk] = val
+		}
+		return out
 	case []any:
 		for i := range x {
 			x[i] = redactWalkDepth(x[i], depth+1)
