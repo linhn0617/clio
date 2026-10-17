@@ -2,7 +2,7 @@
 
 - [x] 1.1 Tests first: token parsing table, Bash end-to-end (history, zero candidates without
       touching the index, multi-file segments, staleness gate, output cap)
-- [x] 1.2 `bashFileCandidates` / `splitShellWords`, Bash branch and multi-segment digest in
+- [x] 1.2 `bashFileCandidates` (words from `internal/shellwords`), Bash branch and multi-segment digest in
       `fileHistoryHook` (single pointer line, shrink loop over all segments)
 
 ## 2. Installer

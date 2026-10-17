@@ -28,4 +28,4 @@ file, so the Bash branch must stay free unless the command actually names a file
   `Read` matcher keeps working unchanged.
 - Cost: a Bash call naming no existing file under `cwd` pays only process start; one that does
   pays at most three index lookups (two queries each).
-- Not handled (`debt:` in code): `$VAR`/`~`/glob expansion and backslash escapes in the command.
+- Not handled (`debt:` in code): `$VAR`/`~`/glob/command-substitution expansion in the command.

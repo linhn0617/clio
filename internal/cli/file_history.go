@@ -115,9 +115,9 @@ func fileHistoryHook(payload []byte, dbPath string, limit int) string {
 	return fileHistoryHookWith(payload, dbPath, limit, db.OpenReadOnly)
 }
 
-// fileHistoryHookWith is fileHistoryHook with the index opener injected: a
-// read-only open leaves no trace on disk, so tests count opens to prove the
-// zero-candidate path never touches the index.
+// fileHistoryHookWith is fileHistoryHook with the index opener injected: opening
+// a WAL database read-only can still create its -shm/-wal files, but tests count
+// opens directly to prove the zero-candidate path never touches the index.
 func fileHistoryHookWith(payload []byte, dbPath string, limit int, open func(string) (*db.DB, error)) string {
 	var p hookPayload
 	if len(payload) == 0 || json.Unmarshal(payload, &p) != nil {
@@ -166,13 +166,15 @@ func fileHistoryHookWith(payload []byte, dbPath string, limit int, open func(str
 	// own length, and Claude Code measures its 10,000-character limit on what
 	// it receives. Shrink the digest until the encoding fits.
 	for budget := hookMaxChars; budget > 0; budget = budget * 3 / 4 {
-		// Segments are rendered in order against what is left: a file that cannot
-		// fit is dropped and its share stays available to the next one.
+		// Each file may use at most an equal share of what is left; what it does
+		// not use carries to the next, and a file that cannot fit its share is
+		// dropped. So one file with a huge history cannot starve the others.
 		remaining := budget - len([]rune(historyPointer))
 		var b strings.Builder
-		for _, s := range segs {
-			d := strings.TrimSuffix(formatFileHistoryCapped(s.path, s.rows, remaining+len([]rune(historyPointer))), historyPointer)
-			if d == "" || len([]rune(d)) > remaining {
+		for i, s := range segs {
+			share := remaining / (len(segs) - i)
+			d := strings.TrimSuffix(formatFileHistoryCapped(s.path, s.rows, share+len([]rune(historyPointer))), historyPointer)
+			if d == "" || len([]rune(d)) > share {
 				continue
 			}
 			b.WriteString(d)
@@ -283,12 +285,12 @@ func formatFileHistory(path string, rows []sessions.FileTouch) string {
 // bashFileCandidates returns up to max distinct existing regular files under cwd
 // that command names, in first-appearance order. It is a cheap lexical filter,
 // not a shell: a false candidate costs one DB lookup, a miss costs nothing but
-// the context hint. Relative words resolve against the payload cwd, which is the
-// session's directory; Claude Code's Bash tool keeps its working directory
-// across calls, so after an earlier `cd` the real cwd is unknowable here — a
-// command containing cd/pushd therefore contributes absolute paths only. Heredoc
-// bodies, comments and redirect targets are not reads of the named file and are
-// skipped; a path must stay under cwd after symlinks are resolved.
+// the context hint. Relative words resolve against the payload cwd, which Claude
+// Code keeps current across earlier Bash calls but which is the directory from
+// before this command ran: after a `cd`/`pushd` inside the same command the real
+// directory is unknowable, so such a command contributes absolute paths only.
+// Heredoc bodies, comments, redirect and tee targets are not reads of the named
+// file and are skipped; the file must stay under cwd after symlinks are resolved.
 // debt: 沒做 $VAR／~／glob／命令替換展開；若使用者常以 $PWD/x 或 glob 讀檔就要補
 func bashFileCandidates(command, cwd string, max int) []candidateFile {
 	if !filepath.IsAbs(cwd) || strings.TrimSpace(command) == "" {
@@ -311,13 +313,14 @@ func bashFileCandidates(command, cwd string, max int) []candidateFile {
 	}
 	var out []candidateFile
 	seen := map[string]bool{}
-	skipNext := false
+	skipNext, inTee := false, false
 	words := 0
 	for _, t := range toks {
 		if t.Op {
 			// A redirect operator consumes the next word as its target (`<<` and
 			// `<<<` introduce a heredoc/here-string, not a file to read).
 			skipNext = strings.ContainsAny(t.Text, "<>")
+			inTee = false
 			continue
 		}
 		if words++; words > bashMaxTokens {
@@ -325,6 +328,13 @@ func bashFileCandidates(command, cwd string, max int) []candidateFile {
 		}
 		if skipNext {
 			skipNext = false
+			continue
+		}
+		if t.Text == "tee" {
+			inTee = true // every word up to the next operator is a write target
+			continue
+		}
+		if inTee {
 			continue
 		}
 		tok := strings.Trim(t.Text, ",:")
@@ -338,26 +348,34 @@ func bashFileCandidates(command, cwd string, max int) []candidateFile {
 			tok = filepath.Join(cwd, tok)
 		}
 		tok = filepath.Clean(tok)
-		if seen[tok] || !pathUnder(cwd, tok) {
+		if seen[tok] {
 			continue
 		}
 		seen[tok] = true
+		// Stat first: most words name nothing, and a miss costs one syscall.
+		// The boundary is judged once, on the symlink-resolved paths (so a
+		// symlinked cwd spelling and a symlink leading out of cwd are both right).
+		if fi, err := os.Stat(tok); err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
 		real, err := filepath.EvalSymlinks(tok)
 		if err != nil || !pathUnder(realCwd, real) {
 			continue
 		}
-		if fi, err := os.Stat(real); err == nil && fi.Mode().IsRegular() {
-			out = append(out, candidateFile{tok, fi})
-			if len(out) == max {
-				break
-			}
+		fi, err := os.Stat(real)
+		if err != nil {
+			continue
+		}
+		out = append(out, candidateFile{tok, fi})
+		if len(out) == max {
+			break
 		}
 	}
 	return out
 }
 
 // heredocStart finds `<<WORD`, `<<-WORD`, `<<'WORD'` or `<<"WORD"` (not `<<<`).
-var heredocStart = regexp.MustCompile(`(?:^|[^<])<<(-?)\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))`)
+var heredocStart = regexp.MustCompile(`(?:^|[^<])<<(-?)\s*(?:'([^']+)'|"([^"]+)"|\\?([^\s;|&()<>'"\\]+))`)
 
 // stripHeredocBodies removes heredoc bodies (the lines after a `<<WORD` line up
 // to the terminator line) so text that is only data never yields a candidate and

@@ -16,22 +16,26 @@ without duplicating a present one). A recall entry in a group without a matcher
 timeout above rather than duplicated; when that group also holds foreign hooks, the
 clio entry SHALL move to its own matched group and the foreign hooks SHALL stay
 where they were. A recall entry the user placed under a different matcher SHALL be
-left unchanged. A file-history entry an older clio wrote under matcher `Read` SHALL be
-upgraded the same way: a group holding only clio's entry is retargeted in place to
-`Read|Bash` (taking the current command), while from a group shared with foreign hooks
-clio's entry SHALL move to its own `Read|Bash` group and the foreign hooks SHALL stay under
-`Read`; a repeat install SHALL leave exactly one clio entry, and a file-history entry the
-user placed under any other matcher SHALL be left unchanged. A group "covers Read" per Claude Code's matcher rules: an absent, empty or `*`
-matcher matches every tool; a matcher made only of letters, digits, `_`, `-`, spaces, `,`
-and `|` is a list of exact tool names (items separated by `|` or `,`, surrounding whitespace
-ignored) and covers Read when an item is `Read`; any other matcher is a regular expression
-tested unanchored against `Read` (an uncompilable pattern, or a non-string matcher, does not
-cover). A clio entry in any
-group that covers Read (`Read|Bash`, `Bash, Read`, `Rea.`, `*`, no matcher, or the older exact
-`Read`) SHALL count as installed, and no second group SHALL be added for it. Within one
-install, duplicate clio file-history entries in Read-covering groups SHALL be reduced to the
-first one met (groups left empty are removed, foreign hooks stay). `install-hook` SHALL
-report the Read to Read|Bash upgrade only when it actually retargeted a matcher. It is opt-in and SHALL
+left unchanged. A file-history entry counts as installed when it sits in a group whose
+matcher covers both `Read` and `Bash`, where a matcher "covers" a tool per Claude Code's
+matcher rules: an absent, empty or `*` matcher matches every tool; a matcher made only of
+letters, digits, `_`, `-`, spaces, `,` and `|` is a list of exact tool names (items separated
+by `|` or `,`, surrounding whitespace ignored); any other matcher is a regular expression
+tested unanchored against the tool name (an uncompilable pattern, or a non-string matcher,
+covers nothing). An entry an older clio wrote under matcher `Read` (an exact list holding only
+`Read`) SHALL be upgraded: a group holding only clio's entry is retargeted in place to
+`Read|Bash` (position and other fields kept, current command applied), while from a group
+shared with foreign hooks clio's entry SHALL move to its own `Read|Bash` group and the
+foreign hooks SHALL stay under `Read`. A clio entry under any other matcher (for example
+`Read|Edit`, `Bash`, `^Read$`, `Edit`) is the user's placement: it SHALL be left unchanged,
+no second group SHALL be added, and `install-hook` SHALL print a warning naming the matcher
+and saying it does not cover both Read and Bash. With no clio file-history entry at all, a
+`Read|Bash` group SHALL be added. Within one install, duplicate clio file-history entries in
+groups covering both tools SHALL be reduced to the first one met (groups left empty are
+removed, foreign hooks stay). `install-hook` SHALL describe what it actually changed:
+registered, upgraded (only when a matcher was retargeted or an entry moved out of a shared
+`Read` group), collapsed N duplicates, or "nothing to add" only when the file was not
+modified. It is opt-in and SHALL
 NOT be performed by `install-mcp`. clio's hook entries SHALL be recognised by
 their exact command shape (`<…/clio> recall`, `<…/clio> file-history --hook`)
 regardless of the binary's absolute path and of the group's matcher, so removal
@@ -52,19 +56,21 @@ in place SHALL get the current binary path.
 #### Scenario: Read group upgraded in place
 
 - **WHEN** the settings hold clio's file-history entry alone in a PreToolUse group with
-  matcher `Read` and the user runs `clio install-hook`
-- **THEN** that group's matcher SHALL become `Read|Bash`, no second group SHALL be added,
-  and the command SHALL report the upgrade
+  matcher `Read` (or ` Read `) and the user runs `clio install-hook`
+- **THEN** that group's matcher SHALL become `Read|Bash` at the same position with its other
+  fields kept, no second group SHALL be added, and the command SHALL report the upgrade
 
-#### Scenario: Other Read-covering matcher counts as installed
+#### Scenario: Matcher covering both tools counts as installed
 
-- **WHEN** clio's entry sits in a group with matcher `Bash|Read`, `Read, Bash`, `Rea.`, `*`, or no matcher
-- **THEN** `clio install-hook` SHALL add no second group and SHALL NOT report an upgrade
+- **WHEN** clio's entry sits in a group with matcher `Bash|Read`, `Read, Bash`, `*`, or no matcher
+- **THEN** `clio install-hook` SHALL add no second group, print no warning and report no upgrade
 
-#### Scenario: Non-covering matcher gets its own group
+#### Scenario: Matcher covering only one tool is left alone with a warning
 
-- **WHEN** clio's entry sits in a group with matcher `Rea` or `^Edit$`
-- **THEN** `clio install-hook` SHALL add a `Read|Bash` group and leave the other untouched
+- **WHEN** clio's entry sits in a group with matcher `Read|Edit`, `Bash`, `^Read$`, `Rea.`,
+  `Rea` or `Edit`
+- **THEN** `clio install-hook` SHALL change nothing, add no group, and warn that the matcher
+  does not cover both Read and Bash
 
 #### Scenario: Duplicate entries collapse
 
@@ -76,7 +82,7 @@ in place SHALL get the current binary path.
 - **WHEN** a `Read|Bash` group holds clio and a `Read` group shared with a foreign hook also
   holds a clio entry
 - **THEN** the leftover entry SHALL be removed, the foreign hook SHALL stay under `Read`, and
-  no upgrade SHALL be reported
+  the command SHALL report one collapsed duplicate and no upgrade
 
 #### Scenario: Read group shared with a foreign hook
 

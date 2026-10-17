@@ -437,8 +437,8 @@ func TestInstallHookNoUpgradeMessageWhenNothingRetargeted(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(out.String(), "Upgraded the file-history") {
-		t.Fatalf("no matcher was changed, so nothing should be reported as upgraded:\n%s", out.String())
+	if strings.Contains(out.String(), "Upgraded the file-history") || !strings.Contains(out.String(), "collapsed 1 duplicate") {
+		t.Fatalf("a leftover is collapsed, not upgraded:\n%s", out.String())
 	}
 }
 
@@ -590,5 +590,70 @@ func TestInstallHookReportsUnquotedRepair(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Upgraded") || strings.Contains(out.String(), "nothing to add") {
 		t.Fatalf("install-hook output should report the repair:\n%s", out.String())
+	}
+}
+
+// runInstallOver writes settings (PreToolUse groups JSON) and returns install-hook's output.
+func runInstallOver(t *testing.T, pt string) (out string, settings string) {
+	t.Helper()
+	settingsPath := setupInstallHookHome(t)
+	stubClioExecutable(t)
+	body := `{"hooks":{"SessionStart":[{"matcher":"startup|resume|clear|compact","hooks":[{"type":"command","command":"/fake/bin/clio recall","timeout":10}]}]`
+	if pt != "" {
+		body += `,"PreToolUse":` + pt
+	}
+	if err := os.WriteFile(settingsPath, []byte(body+`}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var sb strings.Builder
+	cmd := newInstallHookCmd()
+	cmd.SetOut(&sb)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(settingsPath)
+	return sb.String(), string(after)
+}
+
+const fhEntry = `{"type":"command","command":"/fake/bin/clio file-history --hook","timeout":10}`
+
+func TestInstallHookWarnsWhenMatcherDoesNotCoverReadAndBash(t *testing.T) {
+	for _, m := range []string{"Read|Edit", "Bash", "^Read$", "Rea.", "Rea", "Edit"} {
+		out, after := runInstallOver(t, `[{"matcher":"`+m+`","hooks":[`+fhEntry+`]}]`)
+		want := `file-history hook is registered under matcher "` + m + `", which does not cover both Read and Bash; edit ~/.claude/settings.json to "Read|Bash" to enable Bash file context`
+		if !strings.Contains(out, want) {
+			t.Errorf("matcher %q: missing warning\n%s", m, out)
+		}
+		if strings.Contains(out, "Registered") || strings.Contains(after, `"Read|Bash"`) {
+			t.Errorf("matcher %q: nothing may be added\n%s\n%s", m, out, after)
+		}
+	}
+}
+
+func TestInstallHookQuietWhenMatcherCoversBoth(t *testing.T) {
+	for _, m := range []string{"*", "Read, Bash", "Read|Bash"} {
+		out, _ := runInstallOver(t, `[{"matcher":"`+m+`","hooks":[`+fhEntry+`]}]`)
+		if !strings.Contains(out, "nothing to add") || strings.Contains(out, "does not cover") || strings.Contains(out, "Upgraded") {
+			t.Errorf("matcher %q: want a plain 'nothing to add':\n%s", m, out)
+		}
+	}
+}
+
+func TestInstallHookReportsRealMutations(t *testing.T) {
+	// Shared Read group: the file is rewritten, so it must not claim nothing changed.
+	out, _ := runInstallOver(t, `[{"matcher":"Read","hooks":[{"type":"command","command":"/opt/gate.sh"},`+fhEntry+`]}]`)
+	if !strings.Contains(out, "Upgraded the file-history") || strings.Contains(out, "nothing to add") {
+		t.Errorf("mixed Read group move:\n%s", out)
+	}
+	// Duplicates collapse.
+	out, _ = runInstallOver(t, `[{"matcher":"*","hooks":[`+fhEntry+`]},{"matcher":"Read|Bash","hooks":[`+fhEntry+`]}]`)
+	if !strings.Contains(out, "collapsed 1 duplicate file-history entries") || strings.Contains(out, "nothing to add") {
+		t.Errorf("duplicate collapse:\n%s", out)
+	}
+	// No clio file-history entry at all.
+	out, _ = runInstallOver(t, `[{"matcher":"Bash","hooks":[{"type":"command","command":"/opt/other.sh"}]}]`)
+	if !strings.Contains(out, "Registered the file-history PreToolUse(Read|Bash) hook") {
+		t.Errorf("fresh file-history add:\n%s", out)
 	}
 }

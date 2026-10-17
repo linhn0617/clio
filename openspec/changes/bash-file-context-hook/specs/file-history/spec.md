@@ -11,14 +11,14 @@ operators (`;|&()<>`) with single/double quotes and backslashes grouping/escapin
 quoted path with spaces is one word), unquoted `#` comments are ignored, and an
 unterminated quote yields no candidates. At most the first 64 words are examined. Words
 that are empty or start with `-` or `$`, the word following a redirection operator
-(`>`, `>>`, `<`) are ignored (leading/trailing `,` and `:` are trimmed from the rest); a
+(`>`, `>>`, `<`), and the words of a `tee` command up to the next operator are ignored (leading/trailing `,` and `:` are trimmed from the rest); a
 relative word is resolved against `cwd` (an empty or relative `cwd` yields no candidates; if
 the command contains a `cd` or `pushd` word, relative words are ignored and only absolute
-ones are kept, because the Bash tool's working directory persists across calls and the
-payload `cwd` may be stale) and the result cleaned. A word is a candidate only if the
-resolved path lies strictly under `cwd` by path elements (`/p2` is not under `/p`), still
-lies under `cwd` after symbolic links in both are resolved (a failed resolution disqualifies
-it), and is an existing regular file. Candidates SHALL be de-duplicated and limited to the first three in
+ones are kept, because the payload `cwd` is the directory from before the command ran and an
+earlier `cd` in the same command makes the real directory unknowable) and the result cleaned. A word is a candidate only if the
+path exists as a regular file and, after symbolic links in both it and `cwd` are resolved,
+lies strictly under `cwd` by path elements (`/p2` is not under `/p`; a failed resolution
+disqualifies it). Whether `cwd` or the command spells a path through a symlink is irrelevant. Candidates SHALL be de-duplicated and limited to the first three in
 order of appearance. Each candidate SHALL be looked up and gated exactly as a `Read` path. The
 hook SHALL emit the digest in the hook's additional-context
 form so Claude receives it alongside the Read result. The hook SHALL never block or alter the tool call:

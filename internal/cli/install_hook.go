@@ -38,11 +38,7 @@ func newInstallHookCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			hadFile, err := claudeconfig.HasPreToolUseReadHook(settingsPath)
-			if err != nil {
-				return err
-			}
-			legacyFile, err := claudeconfig.HasLegacyPreToolUseReadHook(settingsPath)
+			_, hadFile, err := claudeconfig.HasAnyClioHookEntries(settingsPath)
 			if err != nil {
 				return err
 			}
@@ -59,30 +55,36 @@ func newInstallHookCmd() *cobra.Command {
 			}
 			// One mutation for both hooks: the settings .bak stays the pre-install
 			// file and a failure leaves neither hook half-registered.
-			if err := claudeconfig.AddClioHooks(settingsPath, exe+" recall", fileHistoryCmd); err != nil {
+			fh, err := claudeconfig.InstallClioHooks(settingsPath, exe+" recall", fileHistoryCmd)
+			if err != nil {
 				return fmt.Errorf("register hooks: %w", err)
 			}
 			var added []string
 			if !hadRecall {
 				added = append(added, "the recall SessionStart hook")
 			}
-			if !noFileContext && !hadFile {
+			if fh.Added {
 				added = append(added, "the file-history PreToolUse(Read|Bash) hook")
 			}
 			out := cmd.OutOrStdout()
 			removedFile := noFileContext && hadFile
-			upgradedFile := legacyFile && !noFileContext
 			switch {
 			case len(added) > 0:
 				fmt.Fprintf(out, "Registered %s in %s.\n", strings.Join(added, " and "), settingsPath)
-			case !removedFile && !legacyRecall && !unquoted && !upgradedFile:
+			case !removedFile && !legacyRecall && !unquoted && !fh.Upgraded && fh.Collapsed == 0 && fh.Misplaced == "":
 				fmt.Fprintf(out, "clio hooks already registered in %s; nothing to add.\n", settingsPath)
 			}
 			if legacyRecall {
 				fmt.Fprintln(out, "Upgraded the recall SessionStart hook (skips forked sessions; 10 s timeout).")
 			}
-			if upgradedFile {
+			if fh.Upgraded {
 				fmt.Fprintln(out, "Upgraded the file-history PreToolUse hook from Read to Read|Bash.")
+			}
+			if fh.Collapsed > 0 {
+				fmt.Fprintf(out, "clio: collapsed %d duplicate file-history entries.\n", fh.Collapsed)
+			}
+			if fh.Misplaced != "" {
+				fmt.Fprintf(out, "Warning: file-history hook is registered under matcher %q, which does not cover both Read and Bash; edit ~/.claude/settings.json to \"Read|Bash\" to enable Bash file context.\n", fh.Misplaced)
 			}
 			if unquoted {
 				fmt.Fprintln(out, "Upgraded a clio hook whose binary path contained a space to the quoted current path.")

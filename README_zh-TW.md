@@ -80,7 +80,7 @@ clio doctor                     # 健康檢查
 想讓 Claude 自動在 session 之間帶上下文？用 `clio install-hook` 啟用（`clio uninstall-hook` 移除）。它會在 `~/.claude/settings.json` 註冊兩個 Claude Code hook：
 
 - **SessionStart → `clio recall`**：每個新 session 開場給專案的近期 session、檔案與指令，最前面是*上一個 session 的收尾訊息*（Claude 自己的最後一段話，原文照登、不是摘要，可能引述那個 session 當時在讀的東西；`--tail-runes 0` 可關掉這一節）。
-- **PreToolUse(Read|Bash) → `clio file-history --hook`**：Claude 讀某個檔之前，先看到哪些過去的 session 動過它、什麼時候、用什麼工具。Bash 分支只在指令裡含有工作目錄底下既存的一般檔案時才觸發（最多 3 個檔，帶引號且含空白的路徑也認得；相對路徑以 session 的工作目錄解析，指令含 `cd` 時只認絕對路徑）；其餘 Bash 呼叫立刻退出、不開索引，除了行程啟動外零成本。檔案沒有索引紀錄、或檔案在最後一次索引紀錄之後又被改過就不注入；永遠不會擋住呼叫；索引暖的時候約 10 ms。重跑 `clio install-hook` 會把舊的只掛 `Read` 的安裝升級。
+- **PreToolUse(Read|Bash) → `clio file-history --hook`**：Claude 讀某個檔之前，先看到哪些過去的 session 動過它、什麼時候、用什麼工具。Bash 分支只在指令裡含有工作目錄底下既存的一般檔案時才觸發（最多 3 個檔，帶引號且含空白的路徑也認得；相對路徑以指令開始時的工作目錄解析，所以指令本身含 `cd` 時只認絕對路徑）；其餘 Bash 呼叫立刻退出、不開索引，除了行程啟動外零成本。檔案沒有索引紀錄、或檔案在最後一次索引紀錄之後又被改過就不注入；永遠不會擋住呼叫；索引暖的時候約 10 ms。重跑 `clio install-hook` 會把舊的只掛 `Read` 的安裝升級。
 
 `clio install-hook --no-file-context` 只裝 recall hook。舊版 clio 裝過 `install-hook` 的話，再跑一次就會補上 file-history hook。
 

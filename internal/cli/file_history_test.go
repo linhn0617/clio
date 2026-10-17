@@ -313,6 +313,11 @@ func TestBashFileCandidates(t *testing.T) {
 		{"quoted heredoc delimiter", "cat <<'EOF'\nc.go\nEOF", f.cwd, nil},
 		{"dash heredoc with tab-indented terminator", "cat <<-EOF\n\tc.go\n\tEOF", f.cwd, nil},
 		{"heredoc body with apostrophe then more commands", "cat a.go <<EOF\ndon't b.go\nEOF\ncat d.go", f.cwd, []string{abs("a.go"), abs("d.go")}},
+		{"heredoc delimiter with a dash", "cat <<END-OF\nc.go\nEND-OF\ncat b.go", f.cwd, []string{abs("b.go")}},
+		{"backslash heredoc delimiter", "cat <<\\EOF\nc.go\nEOF\ncat b.go", f.cwd, []string{abs("b.go")}},
+		{"double-quoted heredoc delimiter", "cat <<\"EOF\"\nc.go\nEOF\ncat b.go", f.cwd, []string{abs("b.go")}},
+		{"tee targets are writes", "cat a.go | tee b.go c.go", f.cwd, []string{abs("a.go")}},
+		{"tee -a then more commands", "cat a.go | tee -a b.go; cat d.go", f.cwd, []string{abs("a.go"), abs("d.go")}},
 		{"heredoc line stays scanned before the body", "cat <<EOF a.go\nb.go\nEOF", f.cwd, []string{abs("a.go")}},
 		{"comment skipped", "cat a.go # b.go c.go\ncat d.go", f.cwd, []string{abs("a.go"), abs("d.go")}},
 		{"hash inside a word is not a comment", "cat a.go#b.go", f.cwd, nil},
@@ -532,4 +537,58 @@ func candPaths(cs []candidateFile) []string {
 		out = append(out, c.path)
 	}
 	return out
+}
+
+// The cwd may be spelled through a symlink while the command uses the real path
+// (or the other way round); both name the same file under the same directory.
+func TestBashFileCandidatesCwdSymlinkSpelling(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(root, "real")
+	link := filepath.Join(root, "link")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "a.go"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if got := candPaths(bashFileCandidates("cat "+filepath.Join(real, "a.go"), link, bashMaxFiles)); len(got) != 1 {
+		t.Errorf("cwd via symlink, command via real path: %q", got)
+	}
+	if got := candPaths(bashFileCandidates("cat "+filepath.Join(link, "a.go"), real, bashMaxFiles)); len(got) != 1 {
+		t.Errorf("cwd real, command via symlink: %q", got)
+	}
+	if got := candPaths(bashFileCandidates("cat a.go", link, bashMaxFiles)); len(got) != 1 {
+		t.Errorf("relative word under a symlinked cwd: %q", got)
+	}
+}
+
+// With a large --limit the first file must not eat the whole budget.
+func TestFileHistoryHookBashBudgetSharedFairly(t *testing.T) {
+	f := newBashFixture(t)
+	files := []string{"a.go", "b.go", "c.go"}
+	old := time.Now().Add(-2 * time.Hour)
+	ts := time.Now().Add(-time.Hour).Unix()
+	var dbPath string
+	for i, name := range files {
+		p := filepath.Join(f.cwd, name)
+		_ = os.Chtimes(p, old, old)
+		if i == 0 {
+			dbPath = seedFileHistoryDB(t, p, ts)
+			addTouches(t, dbPath, p, 199, 100, ts)
+		} else {
+			addTouches(t, dbPath, p, 200, 1000*i, ts)
+		}
+	}
+	ctx := hookContext(t, fileHistoryHook(bashPayload("cat a.go b.go c.go", f.cwd, "cur"), dbPath, 500))
+	for _, name := range files {
+		if !strings.Contains(ctx, "touched "+filepath.Join(f.cwd, name)) {
+			t.Errorf("%s missing from the digest", name)
+		}
+	}
 }
