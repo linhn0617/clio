@@ -32,3 +32,32 @@ func TestDoctorCmdHasQuickFlag(t *testing.T) {
 		t.Fatalf("doctor must define a --quick bool flag defaulting to false, got %v", f)
 	}
 }
+
+// The rebuild hint only makes sense for index problems; an integration failure
+// already carries its own remedy in the detail.
+func TestReportDoctorFooterOnlyForIndexFailures(t *testing.T) {
+	const hint = "clio index --full"
+	var buf bytes.Buffer
+	err := reportDoctor(&buf, []doctor.Result{
+		{Name: "hook binary", OK: false, Detail: "hook points to missing binary /x; rerun clio install-hook", Integration: true},
+		{Name: "mcp lease", OK: false, Detail: "stale lease", Integration: true},
+	})
+	if err == nil {
+		t.Fatal("integration failures must still fail the run")
+	}
+	if strings.Contains(buf.String(), hint) {
+		t.Fatalf("integration-only failure must not suggest a rebuild:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "WARN") {
+		t.Fatalf("missing WARN:\n%s", buf.String())
+	}
+
+	buf.Reset()
+	_ = reportDoctor(&buf, []doctor.Result{
+		{Name: "hook binary", OK: false, Detail: "x", Integration: true},
+		{Name: "db integrity", OK: false, Detail: "bad"},
+	})
+	if !strings.Contains(buf.String(), hint) {
+		t.Fatalf("an index failure must keep the rebuild hint:\n%s", buf.String())
+	}
+}

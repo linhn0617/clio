@@ -1,12 +1,15 @@
 package claudeconfig
 
+import "fmt"
+
 // Read-only accessors for diagnostics (clio doctor). They reuse the same
 // recognisers install/uninstall use, so doctor and install agree on what counts
 // as "a clio hook".
 
-// ClioHookCommands returns the commands of every clio recall hook (SessionStart)
-// and file-history hook (PreToolUse) in settingsPath, regardless of matcher. A
-// missing file yields empty results; a malformed one an error.
+// ClioHookCommands returns, for every clio recall hook (SessionStart) and
+// file-history hook (PreToolUse) in settingsPath regardless of matcher, the binary
+// path the recogniser resolved (so a legacy unquoted path containing spaces comes
+// back whole). A missing file yields empty results; a malformed one an error.
 func ClioHookCommands(settingsPath string) (recall, fileHistory []string, err error) {
 	root, err := load(settingsPath)
 	if err != nil {
@@ -15,10 +18,10 @@ func ClioHookCommands(settingsPath string) (recall, fileHistory []string, err er
 	hooks, _ := root["hooks"].(map[string]any)
 	ss, _ := hooks["SessionStart"].([]any)
 	pt, _ := hooks["PreToolUse"].([]any)
-	return commandsMatching(ss, isClioRecall), commandsMatching(pt, isClioFileHistory), nil
+	return binariesMatching(ss, recallBinary), binariesMatching(pt, fileHistoryBinary), nil
 }
 
-func commandsMatching(groups []any, match func(string) bool) []string {
+func binariesMatching(groups []any, resolve func(string) (string, bool)) []string {
 	var out []string
 	for _, g := range groups {
 		_, hs, ok := groupHooks(g)
@@ -26,29 +29,60 @@ func commandsMatching(groups []any, match func(string) bool) []string {
 			continue
 		}
 		for _, h := range hs {
-			if hookCommandMatches(h, match) {
-				out = append(out, h.(map[string]any)["command"].(string))
+			hm, ok := h.(map[string]any)
+			if !ok {
+				continue
+			}
+			if cmd, ok := hm["command"].(string); ok {
+				if bin, ok := resolve(cmd); ok {
+					out = append(out, bin)
+				}
 			}
 		}
 	}
 	return out
 }
 
-// ServerCommand returns the registered command of the named mcpServers entry.
-// ok is false when the config is absent or has no such server.
-func ServerCommand(configPath, name string) (command string, ok bool, err error) {
+// ServerKind classifies a named mcpServers entry for diagnostics.
+type ServerKind int
+
+const (
+	ServerAbsent    ServerKind = iota // no such entry (or no mcpServers / no config file)
+	ServerLocal                       // has a command to run
+	ServerRemote                      // an object without a command (sse/http: url-based)
+	ServerMalformed                   // present but not a usable object (null, string, bad command)
+)
+
+// LookupServer reports how the named server is registered and, for a local one,
+// its command. A missing config file means ServerAbsent; an unparsable file or a
+// non-object mcpServers is an error.
+func LookupServer(configPath, name string) (command string, kind ServerKind, err error) {
 	root, err := load(configPath)
 	if err != nil {
-		return "", false, err
+		return "", ServerAbsent, err
 	}
-	servers, err := serversMap(root)
-	if err != nil {
-		return "", false, err
+	v, ok := root["mcpServers"]
+	if !ok || v == nil {
+		return "", ServerAbsent, nil
 	}
-	entry, found := servers[name].(map[string]any)
+	servers, ok := v.(map[string]any)
+	if !ok {
+		return "", ServerAbsent, fmt.Errorf("mcpServers in config is not a JSON object (found %T)", v)
+	}
+	raw, found := servers[name]
 	if !found {
-		return "", false, nil
+		return "", ServerAbsent, nil
 	}
-	command, _ = entry["command"].(string)
-	return command, true, nil
+	entry, ok := raw.(map[string]any)
+	if !ok {
+		return "", ServerMalformed, nil
+	}
+	c, has := entry["command"]
+	if !has {
+		return "", ServerRemote, nil
+	}
+	if s, ok := c.(string); ok && s != "" {
+		return s, ServerLocal, nil
+	}
+	return "", ServerMalformed, nil
 }

@@ -73,7 +73,7 @@ clio activity --by command --source codex  # ...Codex 的指令／檔案／工�
 clio recall                               # 目前專案的近況摘要（開頭是上一個 session 停在哪）
 clio file-history internal/search/rank.go  # 哪些過去的 session 讀過／改過這個檔，最新在前
 clio doctor                     # 健康檢查，另含 hook／MCP／lease／索引新鮮度檢查
-clio doctor --quick             # 大索引上較快：以 quick_check 取代 integrity_check，並略過 FTS 內容與膨脹掃描
+clio doctor --quick             # 略過所有 integrity pragma 與 FTS 檢查；要深度檢查請用不帶旗標的 doctor
 ```
 
 之後要移除整合：`clio uninstall-mcp`。

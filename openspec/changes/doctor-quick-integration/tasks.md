@@ -20,3 +20,11 @@
 - [x] 4.1 `gofmt -l .`, `go vet ./...`, `go test -count=1 ./...`
 - [x] 4.2 `openspec validate doctor-quick-integration --strict` and `--all --strict`
 - [x] 4.3 Real-binary run with a temporary HOME and a synthetic index, `doctor` vs `doctor --quick`
+
+## 5. Review fixes
+
+- [x] 5.1 Freshness measures source lag, not last ingest; lease three states; footer only for index failures
+- [x] 5.2 Hook commands: recogniser-resolved binary, absolute path required, `clio.exe`; MCP three states
+- [x] 5.3 Windows: exec bit skipped, per-OS `pidAlive`, `GOOS=windows go vet ./...`
+- [x] 5.4 Quick: `[skip] db integrity`, no quick_check, content-check skip on every path; per-check path resolution
+- [x] 5.5 Tests: heavy-scan recorder, read-only HOME snapshot, `IsHeld` via `Inspect`

@@ -75,7 +75,7 @@ clio usage --since 30d                     # token usage by session / project / 
 clio recall                                # recent-activity digest for the current project (opens with where the last session left off)
 clio file-history internal/search/rank.go  # which past sessions read/edited this file, newest first
 clio doctor                     # health check, plus hook / MCP / lease / index-freshness checks
-clio doctor --quick             # faster on a big index: quick_check instead of integrity_check, skips the full integrity, FTS content and bloat scans
+clio doctor --quick             # skips all integrity pragmas and FTS checks; use plain doctor for a deep check
 clio prune-raw --older-than 30d --vacuum   # reclaim space: blank restorable old raw_json (reversible via index --full)
 ```
 

@@ -13,22 +13,19 @@ type Status struct {
 	Malformed    bool          // it exists but does not parse as "pid nonce ts"
 	PID          int           // leader pid (valid when Present && !Malformed)
 	HeartbeatAge time.Duration // now minus the last heartbeat
-	Fresh        bool          // pid alive and heartbeat within DefaultTTL — the same test IsHeld uses
+	Alive        bool          // the leader pid is a running process
+	Fresh        bool          // Alive and heartbeat within DefaultTTL — the test IsHeld uses
 }
 
 // Inspect reads the lease at path without taking the mutex or writing anything.
 // IsHeld only answers yes/no; doctor also needs to tell "no mcp running" from
-// "a leader died and left a stale lease", and to report the heartbeat age.
+// "a leader died and left a stale lease" and from "a live leader whose heartbeat
+// is late", and to report the heartbeat age.
 func Inspect(path string) (Status, error) { return inspect(path, time.Now) }
 
 func inspect(path string, now func() time.Time) (Status, error) {
-	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
-		return Status{}, nil
-	} else if err != nil {
-		return Status{}, err
-	}
 	rec, err := readRecord(path)
-	if errors.Is(err, fs.ErrNotExist) { // removed between Stat and read
+	if errors.Is(err, fs.ErrNotExist) {
 		return Status{}, nil
 	}
 	if err != nil {
@@ -43,6 +40,7 @@ func inspect(path string, now func() time.Time) (Status, error) {
 		Present:      true,
 		PID:          rec.pid,
 		HeartbeatAge: age,
+		Alive:        alive,
 		Fresh:        alive && age <= DefaultTTL,
 	}, nil
 }
