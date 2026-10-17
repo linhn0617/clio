@@ -5,13 +5,20 @@
 `clio file-history --hook` SHALL read a Claude Code PreToolUse hook payload from stdin
 (JSON with `tool_name`, `tool_input.file_path` or `tool_input.command`, `session_id`,
 `cwd`). For `Read` it SHALL take the path from `tool_input.file_path`. For `Bash` it SHALL
-take candidate paths from `tool_input.command`: the command is split into words on whitespace
-and shell operators (`;|&()<>`) with single/double quotes grouping (so a quoted path with
-spaces is one word) and leading/trailing `,` and `:` trimmed; words that are empty or start
-with `-` or `$` are ignored; a relative word is resolved against `cwd` (an empty or relative
-`cwd` yields no candidates) and the result cleaned; a word is a candidate only if the
-resolved path lies strictly under `cwd` by path elements (`/p2` is not under `/p`) and is an
-existing regular file. Candidates SHALL be de-duplicated and limited to the first three in
+take candidate paths from `tool_input.command`: heredoc bodies (`<<WORD`, `<<-WORD`,
+quoted delimiters) are removed first; the rest is split into words on whitespace and shell
+operators (`;|&()<>`) with single/double quotes and backslashes grouping/escaping (so a
+quoted path with spaces is one word), unquoted `#` comments are ignored, and an
+unterminated quote yields no candidates. At most the first 64 words are examined. Words
+that are empty or start with `-` or `$`, the word following a redirection operator
+(`>`, `>>`, `<`) are ignored (leading/trailing `,` and `:` are trimmed from the rest); a
+relative word is resolved against `cwd` (an empty or relative `cwd` yields no candidates; if
+the command contains a `cd` or `pushd` word, relative words are ignored and only absolute
+ones are kept, because the Bash tool's working directory persists across calls and the
+payload `cwd` may be stale) and the result cleaned. A word is a candidate only if the
+resolved path lies strictly under `cwd` by path elements (`/p2` is not under `/p`), still
+lies under `cwd` after symbolic links in both are resolved (a failed resolution disqualifies
+it), and is an existing regular file. Candidates SHALL be de-duplicated and limited to the first three in
 order of appearance. Each candidate SHALL be looked up and gated exactly as a `Read` path. The
 hook SHALL emit the digest in the hook's additional-context
 form so Claude receives it alongside the Read result. The hook SHALL never block or alter the tool call:
@@ -74,6 +81,30 @@ one-line pointer to `read_session` / `clio show` for details.
 - **WHEN** the command is `cat "sub dir/e.go"` and that file exists under `cwd`
 - **THEN** `sub dir/e.go` SHALL be treated as one candidate
 
+#### Scenario: Heredoc body, comment and redirect target
+
+- **WHEN** the command is `cat <<EOF` followed by a body line naming an existing file, a
+  `cat a.go # b.go` comment, or `cat a.go > b.go`
+- **THEN** only `a.go` (the word actually read) SHALL be a candidate; the heredoc body, the
+  comment text and the redirect target SHALL NOT
+
+#### Scenario: Symlink leaving cwd
+
+- **WHEN** `link` under `cwd` is a symbolic link to a directory outside `cwd` and the command
+  is `cat link/x.go`
+- **THEN** there SHALL be no candidate
+
+#### Scenario: Directory change earlier in the command
+
+- **WHEN** the command is `cd internal && cat a.go`
+- **THEN** the relative word SHALL be ignored (zero candidates); `cd x && cat /abs/a.go`
+  with `/abs/a.go` under `cwd` SHALL still yield that one candidate
+
+#### Scenario: Very long command
+
+- **WHEN** an existing file is named only after the 64th word of the command
+- **THEN** it SHALL NOT be a candidate
+
 #### Scenario: More than three files
 
 - **WHEN** the command names four existing files under `cwd`
@@ -90,9 +121,10 @@ The hook SHALL cap its output at the `--limit` row count and at 8,000 characters
 (dropping rows from the tail and inserting a `(+N more)` line before the trailing
 pointer line; when not even one row fits, the hook SHALL stay silent) so it stays under
 Claude Code's 10,000-character hook-output limit (the 8,000-character cap covers all
-segments of a multi-file digest together, and a file whose segment cannot fit its share is
-dropped), SHALL run at most two indexed queries per candidate file and at most three candidate
-files per invocation, and SHALL complete within the latency budget recorded in the design
+segments of a multi-file digest together; segments are rendered in order against the remaining
+budget, and a file whose segment cannot fit what remains is dropped, leaving the rest for the
+next), SHALL open the index read-only once per invocation and run at most two indexed queries per
+candidate file and at most three candidate files per invocation, and SHALL complete within the latency budget recorded in the design
 (warm index: well under 100 ms on the reference machine; the first cold run may take
 seconds and is accepted because it only happens once per boot). It SHALL NOT ingest,
 SHALL NOT take the writer lock, and SHALL NOT open the index for writing.

@@ -21,8 +21,13 @@ upgraded the same way: a group holding only clio's entry is retargeted in place 
 `Read|Bash` (taking the current command), while from a group shared with foreign hooks
 clio's entry SHALL move to its own `Read|Bash` group and the foreign hooks SHALL stay under
 `Read`; a repeat install SHALL leave exactly one clio entry, and a file-history entry the
-user placed under any other matcher SHALL be left unchanged. Presence detection SHALL accept
-a clio entry under either `Read` or `Read|Bash`, and `install-hook` SHALL report the upgrade. It is opt-in and SHALL
+user placed under any other matcher SHALL be left unchanged. A group "covers Read" when it has no matcher (or an empty one) or its matcher, anchored as
+`^(?:matcher)$`, matches `Read` (a matcher that does not compile does not cover). A clio entry in any
+group that covers Read (`Read|Bash`, `Bash|Read`, `Read|Edit`, no matcher, or the older exact
+`Read`) SHALL count as installed, and no second group SHALL be added for it. Within one
+install, duplicate clio file-history entries in Read-covering groups SHALL be reduced to the
+first one met (groups left empty are removed, foreign hooks stay). `install-hook` SHALL
+report the Read to Read|Bash upgrade only when it actually retargeted a matcher. It is opt-in and SHALL
 NOT be performed by `install-mcp`. clio's hook entries SHALL be recognised by
 their exact command shape (`<…/clio> recall`, `<…/clio> file-history --hook`)
 regardless of the binary's absolute path and of the group's matcher, so removal
@@ -46,6 +51,23 @@ in place SHALL get the current binary path.
   matcher `Read` and the user runs `clio install-hook`
 - **THEN** that group's matcher SHALL become `Read|Bash`, no second group SHALL be added,
   and the command SHALL report the upgrade
+
+#### Scenario: Other Read-covering matcher counts as installed
+
+- **WHEN** clio's entry sits in a group with matcher `Bash|Read`, `Read|Edit`, or no matcher
+- **THEN** `clio install-hook` SHALL add no second group and SHALL NOT report an upgrade
+
+#### Scenario: Duplicate entries collapse
+
+- **WHEN** two `Read|Bash` groups each hold a clio file-history entry
+- **THEN** after `clio install-hook` exactly one clio entry SHALL remain
+
+#### Scenario: Leftover Read entry beside an existing Read|Bash entry
+
+- **WHEN** a `Read|Bash` group holds clio and a `Read` group shared with a foreign hook also
+  holds a clio entry
+- **THEN** the leftover entry SHALL be removed, the foreign hook SHALL stay under `Read`, and
+  no upgrade SHALL be reported
 
 #### Scenario: Read group shared with a foreign hook
 
