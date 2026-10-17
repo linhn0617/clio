@@ -361,61 +361,6 @@ func TestQuotaSnapshotOlderObservationNeverOverwritesNewer(t *testing.T) {
 	}
 }
 
-// --- Gemini ---
-
-func writeGeminiChat(t *testing.T, root, hash, name string, lines ...string) string {
-	t.Helper()
-	dir := filepath.Join(root, hash, "chats")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, name)
-	var data []byte
-	for _, l := range lines {
-		data = append(data, []byte(l+"\n")...)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-func TestGeminiUsageSummedFromReplay(t *testing.T) {
-	root := t.TempDir()
-	meta := `{"sessionId":"gem-u1","projectHash":"h1","startTime":"2026-07-01T10:00:00Z","lastUpdated":"2026-07-01T10:01:00Z","kind":"chat"}`
-	set := `{"$set":{"messages":[` +
-		`{"id":"m1","timestamp":"2026-07-01T10:00:01Z","type":"user","content":[{"text":"hi"}]},` +
-		`{"id":"m2","timestamp":"2026-07-01T10:00:02Z","type":"gemini","model":"gemini-x","content":[{"text":"hello"}],"tokens":{"input":100,"output":20,"cached":5,"thoughts":30,"tool":0,"total":155}},` +
-		`{"id":"m3","timestamp":"2026-07-01T10:00:03Z","type":"gemini","model":"gemini-x","content":[],"tokens":{"input":50,"output":10,"cached":0,"thoughts":5,"tool":2,"total":67}}` +
-		`]}}`
-	path := writeGeminiChat(t, root, "h1", "session-2026-07-01T10-00-aaaa1111.jsonl", meta, set)
-	database := openTestDB(t)
-	ing := New(database, nil)
-	ing.AddSource(geminiSource{root: root})
-	if _, _, err := ing.IngestFile(context.Background(), path, false); err != nil {
-		t.Fatal(err)
-	}
-	got := readUsageRows(t, database, "gem-u1")
-	r, ok := got["gemini-x"]
-	if !ok || len(got) != 1 {
-		t.Fatalf("want one gemini-x row, got %+v", got)
-	}
-	// m3 has no extractable text (skipped by the text pass) but its tokens MUST
-	// still count: sums are 150/30/5/35/2, native total 222.
-	if r.Input != 150 || r.Output != 30 || r.CacheRead != 5 || r.Reasoning != 35 || r.Tool != 2 || r.Total != 222 {
-		t.Fatalf("gemini row=%+v want 150/30/5/35/2 total 222", r)
-	}
-
-	// Replay idempotency: re-ingest the same file fully; identical aggregate.
-	if _, _, err := ing.IngestFile(context.Background(), path, true); err != nil {
-		t.Fatal(err)
-	}
-	again := readUsageRows(t, database, "gem-u1")
-	if again["gemini-x"] != r {
-		t.Fatalf("replay not idempotent: %+v vs %+v", again["gemini-x"], r)
-	}
-}
-
 func TestOversizedLineSkippedUsageScanContinues(t *testing.T) {
 	projects := t.TempDir()
 	// A historical over-cap line must be skipped+counted, and later appends
@@ -659,31 +604,6 @@ func TestClaudeUsageIgnoresUncommittedTailLine(t *testing.T) {
 	}
 }
 
-func TestGeminiReplayWithoutUsageDeletesStaleRow(t *testing.T) {
-	root := t.TempDir()
-	meta := `{"sessionId":"gem-u2","projectHash":"h2","startTime":"2026-07-01T10:00:00Z","lastUpdated":"2026-07-01T10:01:00Z","kind":"chat"}`
-	withTok := `{"$set":{"messages":[{"id":"m1","timestamp":"2026-07-01T10:00:02Z","type":"gemini","model":"gemini-x","content":[{"text":"hi"}],"tokens":{"input":10,"output":2,"total":12}}]}}`
-	path := writeGeminiChat(t, root, "h2", "session-2026-07-01T10-00-bbbb2222.jsonl", meta, withTok)
-	database := openTestDB(t)
-	ing := New(database, nil)
-	ing.AddSource(geminiSource{root: root})
-	if _, _, err := ing.IngestFile(context.Background(), path, false); err != nil {
-		t.Fatal(err)
-	}
-	if len(readUsageRows(t, database, "gem-u2")) != 1 {
-		t.Fatal("seed failed")
-	}
-	// Rewrite: replay yields ONLY a user message (no usage) -> stale row deleted.
-	writeGeminiChat(t, root, "h2", "session-2026-07-01T10-00-bbbb2222.jsonl", meta,
-		`{"$set":{"messages":[{"id":"m1","timestamp":"2026-07-01T10:00:02Z","type":"user","content":[{"text":"only user"}]}]}}`)
-	if _, _, err := ing.IngestFile(context.Background(), path, true); err != nil {
-		t.Fatal(err)
-	}
-	if got := readUsageRows(t, database, "gem-u2"); len(got) != 0 {
-		t.Fatalf("stale gemini usage row not deleted: %+v", got)
-	}
-}
-
 func TestFullReindexBackfillsPreFeatureDB(t *testing.T) {
 	projects := t.TempDir()
 	path := writeSession(t, projects, "-Users-x-proj", "sess-u", cuUser, cuA1)
@@ -744,33 +664,6 @@ func TestCodexTokenCountWithoutNativeTotalRejected(t *testing.T) {
 	skipped, _, _ := readUsageDiag(t, database, path)
 	if skipped != 1 {
 		t.Fatalf("skipped=%d want 1 (no-native-total token_count counted)", skipped)
-	}
-}
-
-func TestGeminiUsageMissingTokensCounted(t *testing.T) {
-	root := t.TempDir()
-	meta := `{"sessionId":"gem-u3","projectHash":"h3","startTime":"2026-07-01T10:00:00Z","lastUpdated":"2026-07-01T10:01:00Z","kind":"chat"}`
-	set := `{"$set":{"messages":[` +
-		`{"id":"m1","timestamp":"2026-07-01T10:00:01Z","type":"gemini","model":"g","content":[{"text":"no tokens at all"}]},` +
-		`{"id":"m2","timestamp":"2026-07-01T10:00:02Z","type":"gemini","model":"g","content":[{"text":"no native total"}],"tokens":{"input":5,"output":5}},` +
-		`{"id":"m3","timestamp":"2026-07-01T10:00:03Z","type":"gemini","model":"g","content":[{"text":"ok"}],"tokens":{"input":1,"output":1,"total":2}}` +
-		`]}}`
-	path := writeGeminiChat(t, root, "h3", "session-2026-07-01T10-00-cccc3333.jsonl", meta, set)
-	database := openTestDB(t)
-	ing := New(database, nil)
-	ing.AddSource(geminiSource{root: root})
-	if _, _, err := ing.IngestFile(context.Background(), path, false); err != nil {
-		t.Fatal(err)
-	}
-	// Only m3 counts; m1 (assistant without tokens) and m2 (no native total)
-	// are each counted as skipped, never persisted as partial data.
-	got := readUsageRows(t, database, "gem-u3")
-	if got["g"].Total != 2 || got["g"].Input != 1 {
-		t.Fatalf("partial/absent tokens leaked into aggregate: %+v", got)
-	}
-	skipped, _, _ := readUsageDiag(t, database, path)
-	if skipped != 2 {
-		t.Fatalf("skipped=%d want 2", skipped)
 	}
 }
 

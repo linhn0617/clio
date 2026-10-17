@@ -16,18 +16,16 @@ import (
 // fakeReplaySource is a minimal whole-file-replay Source used to prove
 // IngestFile (task 2.2) forces startOffset=0/startSeq=0/changeFull for a
 // source that declares WholeFileReplay()==true, regardless of the stored
-// byte offset. Its format mirrors just enough of Gemini's op-log shape to
+// byte offset. Its format mirrors just enough of an op-log shape to
 // exercise the property that matters: a plain line APPENDS one message, but
 // a line "SET:a,b,c" REPLACES the whole reconstructed message list with
-// a,b,c (like a Gemini `$set`). Crucially a `SET:` line can be a true
+// a,b,c (like an op-log `$set`). Crucially a `SET:` line can be a true
 // byte-level append (the file's existing prefix bytes never change), so the
 // existing fingerprint-based rewrite detector (incremental.go) would treat
 // it as a safe incremental append and resume from the stored offset — WRONG
 // for this format, since the appended line means "discard everything
 // before". Only a source-level whole-file-replay force (task 2.2) parses
-// this correctly. This is deliberately not representative of Gemini's real
-// $set JSON format (that is exercised once the gemini adapter exists); this
-// fixture only proves the ingest.go orchestrator wiring.
+// this correctly. This fixture only proves the ingest.go orchestrator wiring.
 type fakeReplaySource struct{ root string }
 
 func (fakeReplaySource) Name() string { return "fakereplay" }
@@ -110,7 +108,7 @@ func writeFakeReplayFile(t *testing.T, dir, uuid, content string) string {
 // "A whole-file-replay source re-ingests its whole file on change". The
 // second write is a TRUE byte-level append (the existing prefix bytes are
 // untouched) of a "SET:" line that semantically discards everything before
-// it — exactly the Gemini `$set` shape (design.md §4). A byte-fingerprint
+// it — exactly the op-log `$set` shape (design.md §4). A byte-fingerprint
 // incremental resume would see an unchanged prefix, treat this as a safe
 // append, and parse only the new tail at a fresh seq — duplicating the
 // earlier messages instead of replacing them. Only forcing

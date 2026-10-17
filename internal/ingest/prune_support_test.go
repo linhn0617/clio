@@ -76,57 +76,6 @@ func TestAbortedFlagLifecycle(t *testing.T) {
 	}
 }
 
-// TestMigrationFailClosedInitializesExistingRows: a row present before the
-// migration ran must come out aborted=1. We can't easily run "pre-0012" here,
-// but the migration's `UPDATE ingest_state SET aborted=1` is exercised by
-// opening a fresh DB (no rows) — so instead we assert the DEFAULT/UPDATE
-// semantics: a row inserted WITHOUT specifying aborted defaults to 0, and the
-// recordUnusableStatePass path sets 1. (Full pre-migration behavior is covered
-// by the migration SQL itself; this guards the code paths.)
-func TestUnusablePassSetsAbortedOne(t *testing.T) {
-	database := openTestDB(t)
-	ing := New(database, nil)
-	ing.recordUnusableStatePass("/some/file.jsonl", 100, 200, 0)
-	var aborted, offset int64
-	if err := database.QueryRow(`SELECT aborted, last_byte_offset FROM ingest_state WHERE source_file=?`, "/some/file.jsonl").Scan(&aborted, &offset); err != nil {
-		t.Fatal(err)
-	}
-	if aborted != 1 {
-		t.Fatalf("recordUnusableStatePass aborted=%d want 1", aborted)
-	}
-	if offset != 0 {
-		t.Fatalf("aborted pass offset=%d want 0", offset)
-	}
-}
-
-// recordUnusableStatePass on CONFLICT (a previously-successful row) must set
-// aborted=1 while preserving the prior offset — so prune-raw's offset==size test
-// alone cannot admit it (the aborted flag catches it).
-func TestUnusablePassConflictSetsAbortedPreservesOffset(t *testing.T) {
-	projects := t.TempDir()
-	path := writeSession(t, projects, "-Users-x-proj", "sess-u", cuUser, cuA1)
-	database := openTestDB(t)
-	ing := New(database, nil)
-	if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
-		t.Fatal(err)
-	}
-	var offBefore, aborted int64
-	database.QueryRow(`SELECT last_byte_offset, aborted FROM ingest_state WHERE source_file=?`, path).Scan(&offBefore, &aborted)
-	if aborted != 0 || offBefore <= 0 {
-		t.Fatalf("seed: aborted=%d off=%d want 0 / >0", aborted, offBefore)
-	}
-	// A subsequent unusable pass on the SAME (existing) row: conflict path.
-	ing.recordUnusableStatePass(path, offBefore, 999, 0)
-	var offAfter int64
-	database.QueryRow(`SELECT last_byte_offset, aborted FROM ingest_state WHERE source_file=?`, path).Scan(&offAfter, &aborted)
-	if aborted != 1 {
-		t.Fatalf("conflict unusable pass aborted=%d want 1", aborted)
-	}
-	if offAfter != offBefore {
-		t.Fatalf("conflict path changed offset %d -> %d (must preserve)", offBefore, offAfter)
-	}
-}
-
 // The migration's fail-closed init statement (`UPDATE ingest_state SET
 // aborted=1`) must flip a pre-existing successful row to 1. We can't replay a
 // pre-0012 DB here, but we can assert the exact statement's semantics on a

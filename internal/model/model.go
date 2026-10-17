@@ -7,7 +7,6 @@ import "encoding/json"
 const (
 	SourceClaudeCode = "claude-code"
 	SourceCodex      = "codex"
-	SourceGemini     = "gemini"
 )
 
 // Roles stored in the messages table.
@@ -77,9 +76,8 @@ const (
 
 // SessionUsage is one session's token usage aggregate for one model (or a
 // sentinel). Raw token category counts only — no monetary amounts, ever.
-// TotalTokens is the source's native total when it provides one (Codex,
-// Gemini) or the fixed derived sum input+output+cache_read+cache_creation
-// (Claude); ranking surfaces order by it.
+// TotalTokens is the source's native total when it provides one (Codex) or the
+// fixed derived sum input+output+cache_read+cache_creation (Claude); ranking surfaces order by it.
 type SessionUsage struct {
 	SessionUUID    string
 	Source         string
