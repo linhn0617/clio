@@ -686,25 +686,55 @@ func ShellQuote(path string) string {
 	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }
 
+// isClioName reports whether a binary path's base name is clio (clio.exe on Windows).
+func isClioName(path string) bool {
+	base := filepath.Base(path)
+	return base == "clio" || base == "clio.exe"
+}
+
+// clioBinaryOf returns the binary path of a `<…/clio> args…` command: the exact
+// argument shape is required, the binary may live anywhere. The legacy unquoted
+// shape (a path with spaces) is resolved to the whole path.
+func clioBinaryOf(command, suffix string, args ...string) (string, bool) {
+	f, ok := shellwords.Split(command)
+	if ok && len(f) == 1+len(args) && isClioName(f[0]) {
+		match := true
+		for i, a := range args {
+			if f[1+i] != a {
+				match = false
+			}
+		}
+		if match {
+			return f[0], true
+		}
+	}
+	if isUnquotedClio(command, suffix) {
+		return strings.TrimRight(strings.TrimSuffix(command, suffix), " \t"), true
+	}
+	return "", false
+}
+
+func fileHistoryBinary(command string) (string, bool) {
+	return clioBinaryOf(command, " file-history --hook", "file-history", "--hook")
+}
+
+func recallBinary(command string) (string, bool) {
+	return clioBinaryOf(command, " recall", "recall")
+}
+
 // isClioFileHistory identifies the `<…/clio> file-history --hook` command with
 // the same exact-shape rule as isClioRecall: any binary path, exact arguments.
 func isClioFileHistory(command string) bool {
-	f, ok := shellwords.Split(command)
-	if ok && len(f) == 3 && f[1] == "file-history" && f[2] == "--hook" && filepath.Base(f[0]) == "clio" {
-		return true
-	}
-	return isUnquotedClio(command, " file-history --hook")
+	_, ok := fileHistoryBinary(command)
+	return ok
 }
 
 // isClioRecall identifies a `<…/clio> recall` hook command, regardless of the
 // binary's absolute path so it stays removable across reinstalls, but tightly
 // enough that unrelated commands (e.g. `clio-helper recall`) do not match.
 func isClioRecall(command string) bool {
-	f, ok := shellwords.Split(command)
-	if ok && len(f) == 2 && f[1] == "recall" && filepath.Base(f[0]) == "clio" {
-		return true
-	}
-	return isUnquotedClio(command, " recall")
+	_, ok := recallBinary(command)
+	return ok
 }
 
 // isUnquotedClio recognises the shape clio wrote before it quoted the binary path:
@@ -726,7 +756,7 @@ func isUnquotedClio(command, suffix string) bool {
 	}
 	exe := strings.TrimRight(strings.TrimSuffix(command, suffix), " \t")
 	if !strings.HasPrefix(exe, "/") || !strings.ContainsAny(exe, " \t") ||
-		strings.ContainsAny(exe, "\n\r'\"\\$`&|;<>()*?[]{}!#~") || filepath.Base(exe) != "clio" {
+		strings.ContainsAny(exe, "\n\r'\"\\$`&|;<>()*?[]{}!#~") || !isClioName(exe) {
 		return false
 	}
 	for _, f := range strings.Fields(exe)[1:] {
