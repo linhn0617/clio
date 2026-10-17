@@ -5,6 +5,35 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-10-17
+
+The file-context hook now also fires on Bash (openspec change
+`bash-file-context-hook`). Most file reads happen through `cat`/`sed`/`grep`
+rather than the Read tool, so until now the hook rarely had a chance to speak.
+
+### Added
+
+- **Bash file context.** `clio file-history --hook` handles `tool_name = Bash`:
+  it scans the command's shell words, keeps the first three that name an
+  existing regular file under the session's working directory (symlinks
+  resolved; heredoc bodies, comments, redirect and `tee` targets and flags are
+  skipped; at most 64 words are examined) and injects their past-session
+  timelines. Commands that name no file cost nothing beyond process start — the
+  index is not opened. Several files share the 8,000-character budget.
+- **`internal/shellwords`** — one shell word scanner shared by the hook and
+  the hook recogniser in `install-hook`.
+
+### Changed
+
+- **`clio install-hook` registers the file-history hook with matcher
+  `Read|Bash`.** An older install under matcher `Read` is upgraded in place
+  (a group shared with foreign hooks keeps them where they are). Matchers are
+  read by Claude Code's documented rules (`*`/empty = every tool, exact
+  `|`/`,` lists, anything else an unanchored regex); the hook counts as
+  installed only under a matcher that covers both Read and Bash, other
+  placements print a warning instead of adding a second group, and duplicate
+  entries are collapsed. The command now reports what it actually changed.
+
 ## [0.19.0] - 2026-10-17
 
 Removes the Gemini CLI source (openspec change `remove-gemini-cli-source`).
