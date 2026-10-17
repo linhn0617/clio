@@ -14,6 +14,7 @@ import (
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
 	"github.com/linhn0617/clio/internal/sessions"
+	"github.com/linhn0617/clio/internal/termsafe"
 )
 
 func newFileHistoryCmd() *cobra.Command {
@@ -194,13 +195,13 @@ func formatFileHistory(path string, rows []sessions.FileTouch) string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "clio — past sessions that touched %s\n", path)
+	fmt.Fprintf(&b, "clio — past sessions that touched %s\n", termsafe.Strip(path))
 	for _, r := range rows {
 		when := "(undated)       "
 		if r.TS > 0 {
 			when = formatTS(r.TS)
 		}
-		fmt.Fprintf(&b, "  - %s  %s (%s)  %s\n", when, oneLine(r.Title, 60), shortID(r.SessionUUID), strings.Join(r.Tools, ","))
+		fmt.Fprintf(&b, "  - %s  %s (%s)  %s\n", when, oneLine(r.Title, 60), shortID(r.SessionUUID), termsafe.Strip(strings.Join(r.Tools, ",")))
 	}
 	b.WriteString("(Details: clio show <id>, or the clio MCP read_session tool.)\n")
 	return b.String()

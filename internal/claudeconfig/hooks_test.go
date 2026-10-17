@@ -304,3 +304,312 @@ func TestIsClioFileHistoryShape(t *testing.T) {
 		}
 	}
 }
+
+func TestIsClioHookCommandsQuotedPaths(t *testing.T) {
+	for cmd, want := range map[string]bool{
+		`'/Users/me/My Tools/clio' recall`:              true,
+		`"/Users/me/My Tools/clio" recall`:              true,
+		`'/Users/me/My Tools/clio' file-history --hook`: false, // wrong kind for recall
+		`'/a/it'\''s here/clio' recall`:                 true,
+		`'/Users/me/My Tools/clio-helper' recall`:       false,
+		`'/Users/me/My Tools/clio recall`:               false, // unterminated quote
+		`/Users/me/My Tools/clio recall`:                true,  // the old unquoted, broken shape an older install wrote
+		`/Users/me/My Tools/clio-helper recall`:         false,
+		`echo /x/clio recall`:                           false, // not a bare absolute path
+		`/bin/x; /x/clio recall`:                        false, // shell metacharacter, not a path
+		`/usr/bin/env /opt/clio recall`:                 false, // a wrapper, not a split path
+		`/usr/bin/env ~/bin/clio recall`:                false,
+	} {
+		if got := isClioRecall(cmd); got != want {
+			t.Errorf("isClioRecall(%q) = %v, want %v", cmd, got, want)
+		}
+	}
+	for cmd, want := range map[string]bool{
+		`'/Users/me/My Tools/clio' file-history --hook`: true,
+		`"/Users/me/My Tools/clio" file-history --hook`: true,
+		`'/Users/me/My Tools/clio' file-history`:        false,
+		`/Users/me/My Tools/clio file-history --hook`:   true, // old unquoted, broken shape
+		`/Users/me/My Tools/clio file-history`:          false,
+		`/usr/bin/sudo /opt/clio file-history --hook`:   false, // a wrapper, not a split path
+	} {
+		if got := isClioFileHistory(cmd); got != want {
+			t.Errorf("isClioFileHistory(%q) = %v, want %v", cmd, got, want)
+		}
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	for in, want := range map[string]string{
+		"/Users/lin/go/bin/clio": "/Users/lin/go/bin/clio", // plain path unchanged
+		"clio":                   "clio",
+		"/a-b_c.d/clio+x@y:z":    "/a-b_c.d/clio+x@y:z",
+		"/My Tools/clio":         "'/My Tools/clio'",
+		"/it's/clio":             `'/it'\''s/clio'`,
+		"/a$b/clio":              "'/a$b/clio'",
+		"/a&b/clio":              "'/a&b/clio'",
+		"/a\\b/clio":             "'/a\\b/clio'",
+		"/tab\t/clio":            "'/tab\t/clio'",
+	} {
+		if got := ShellQuote(in); got != want {
+			t.Errorf("ShellQuote(%q) = %q, want %q", in, got, want)
+		}
+		toks, ok := splitCommand(ShellQuote(in) + " recall")
+		if !ok || len(toks) != 2 || toks[0] != in {
+			t.Errorf("round trip of %q gave %q ok=%v", in, toks, ok)
+		}
+	}
+}
+
+func TestInstallQuotedPathRegistersOnceAndUninstalls(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	exe := ShellQuote("/Users/me/My Tools/clio")
+	for i := 0; i < 2; i++ {
+		if err := AddClioHooks(path, exe+" recall", exe+" file-history --hook"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := readSettings(t, path)
+	if n := len(recallGroups(t, root)); n != 1 {
+		t.Fatalf("recall groups after re-install = %d, want 1", n)
+	}
+	if err := RemoveClioHooks(path); err != nil {
+		t.Fatal(err)
+	}
+	if has, _ := HasSessionStartHook(path); has {
+		t.Fatal("uninstall left the quoted recall hook")
+	}
+	if has, _ := HasPreToolUseReadHook(path); has {
+		t.Fatal("uninstall left the quoted file-history hook")
+	}
+}
+
+// recallGroups returns the SessionStart groups holding clio's recall entry.
+func recallGroups(t *testing.T, root map[string]any) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, g := range sessionStartGroups(t, root) {
+		if groupIsClioRecall(g) {
+			out = append(out, g.(map[string]any))
+		}
+	}
+	return out
+}
+
+func clioRecallEntry(t *testing.T, g map[string]any) map[string]any {
+	t.Helper()
+	for _, h := range g["hooks"].([]any) {
+		if hookIsClioRecall(h) {
+			return h.(map[string]any)
+		}
+	}
+	t.Fatal("group has no clio recall entry")
+	return nil
+}
+
+// The recall hook skips `fork` (it inherits the parent's context) and carries a
+// short timeout so a cold-cache index can never stall startup for 600 s.
+func TestAddSessionStartHookWritesMatcherAndTimeout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := AddSessionStartHook(path, "/x/clio recall"); err != nil {
+		t.Fatal(err)
+	}
+	gs := recallGroups(t, readSettings(t, path))
+	if len(gs) != 1 {
+		t.Fatalf("want 1 recall group, got %d", len(gs))
+	}
+	if gs[0]["matcher"] != "startup|resume|clear|compact" {
+		t.Errorf("matcher = %v", gs[0]["matcher"])
+	}
+	if to := clioRecallEntry(t, gs[0])["timeout"]; to != float64(10) {
+		t.Errorf("timeout = %v, want 10", to)
+	}
+}
+
+// An entry written by an older clio (no matcher, no timeout) is upgraded where
+// it sits, not duplicated.
+func TestAddSessionStartHookUpgradesLegacyInPlace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[
+		{"hooks":[{"type":"command","command":"/opt/scan.sh"}]},
+		{"hooks":[{"type":"command","command":"/old/bin/clio recall"}]}
+	]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if legacy, _ := HasLegacySessionStartHook(path); !legacy {
+		t.Fatal("legacy shape should be detected before upgrade")
+	}
+	if err := AddSessionStartHook(path, "/new/bin/clio recall"); err != nil {
+		t.Fatal(err)
+	}
+	root := readSettings(t, path)
+	ss := sessionStartGroups(t, root)
+	if len(ss) != 2 {
+		t.Fatalf("want 2 groups (foreign + upgraded clio), got %d: %v", len(ss), ss)
+	}
+	if _, has := ss[0].(map[string]any)["matcher"]; has {
+		t.Error("the foreign group must stay untouched")
+	}
+	g := ss[1].(map[string]any)
+	if g["matcher"] != "startup|resume|clear|compact" || clioRecallEntry(t, g)["timeout"] != float64(10) {
+		t.Errorf("legacy group not upgraded in place: %v", g)
+	}
+	if c := clioRecallEntry(t, g)["command"]; c != "/new/bin/clio recall" {
+		t.Errorf("in-place upgrade kept the old binary path: %v", c)
+	}
+	if legacy, _ := HasLegacySessionStartHook(path); legacy {
+		t.Error("no legacy entry should remain")
+	}
+	// A second run is a no-op.
+	if err := AddSessionStartHook(path, "/new/bin/clio recall"); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(sessionStartGroups(t, readSettings(t, path))); n != 2 {
+		t.Errorf("re-run changed the group count to %d", n)
+	}
+}
+
+// A legacy clio entry co-grouped with a foreign hook moves to its own matched
+// group; the foreign hook keeps firing on every event as before.
+func TestAddSessionStartHookUpgradesCoGroupedLegacy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[
+		{"hooks":[{"type":"command","command":"/opt/scan.sh"},{"type":"command","command":"/x/clio recall"}]}
+	]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddSessionStartHook(path, "/x/clio recall"); err != nil {
+		t.Fatal(err)
+	}
+	root := readSettings(t, path)
+	ss := sessionStartGroups(t, root)
+	if len(ss) != 2 {
+		t.Fatalf("want foreign group + clio group, got %v", ss)
+	}
+	first := ss[0].(map[string]any)
+	if _, has := first["matcher"]; has || len(first["hooks"].([]any)) != 1 || groupIsClioRecall(first) {
+		t.Errorf("foreign group should keep only its own hook, unmatched: %v", first)
+	}
+	gs := recallGroups(t, root)
+	if len(gs) != 1 || gs[0]["matcher"] != "startup|resume|clear|compact" {
+		t.Errorf("want exactly one matched recall group, got %v", gs)
+	}
+}
+
+// A recall entry the user placed under their own matcher is theirs: left as is.
+func TestAddSessionStartHookKeepsCustomMatcher(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	orig := `{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"/x/clio recall"}]}]}}`
+	if err := os.WriteFile(path, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddSessionStartHook(path, "/x/clio recall"); err != nil {
+		t.Fatal(err)
+	}
+	gs := recallGroups(t, readSettings(t, path))
+	if len(gs) != 1 || gs[0]["matcher"] != "startup" {
+		t.Errorf("custom matcher should be kept and nothing added, got %v", gs)
+	}
+}
+
+// Removal recognises both the legacy and the matched shape.
+func TestRemoveClioHooksRemovesBothRecallShapes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[
+		{"hooks":[{"type":"command","command":"/old/clio recall"}]},
+		{"matcher":"startup|resume|clear|compact","hooks":[{"type":"command","command":"/new/clio recall","timeout":10}]}
+	]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if recall, _, _ := HasAnyClioHookEntries(path); !recall {
+		t.Fatal("both shapes should be recognised")
+	}
+	if err := RemoveClioHooks(path); err != nil {
+		t.Fatal(err)
+	}
+	if recall, _, _ := HasAnyClioHookEntries(path); recall {
+		t.Error("a recall entry survived removal")
+	}
+}
+
+// An older install wrote the binary path unquoted, so a path with a space split
+// into extra words: install must upgrade that entry in place, not add a second
+// one, and uninstall must remove it.
+func TestInstallUpgradesUnquotedSpacePathAndUninstalls(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{
+		"SessionStart":[{"matcher":"startup|resume|clear|compact","hooks":[{"type":"command","command":"/Users/me/My Tools/clio recall","timeout":10}]}],
+		"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"/Users/me/My Tools/clio file-history --hook","timeout":10}]}]
+	}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exe := ShellQuote("/Users/me/My Tools/clio")
+	if err := AddClioHooks(path, exe+" recall", exe+" file-history --hook"); err != nil {
+		t.Fatal(err)
+	}
+	root := readSettings(t, path)
+	ss := sessionStartGroups(t, root)
+	if len(ss) != 1 {
+		t.Fatalf("SessionStart groups = %d, want 1: %v", len(ss), ss)
+	}
+	if c := clioRecallEntry(t, ss[0].(map[string]any))["command"]; c != `'/Users/me/My Tools/clio' recall` {
+		t.Errorf("recall command = %v, want the quoted form", c)
+	}
+	pt := preToolUseGroups(t, root)
+	if len(pt) != 1 {
+		t.Fatalf("PreToolUse groups = %d, want 1: %v", len(pt), pt)
+	}
+	h := pt[0].(map[string]any)["hooks"].([]any)
+	if len(h) != 1 || h[0].(map[string]any)["command"] != `'/Users/me/My Tools/clio' file-history --hook` {
+		t.Errorf("file-history hooks = %v, want one quoted entry", h)
+	}
+	if err := RemoveClioHooks(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := readSettings(t, path)["hooks"]; has {
+		t.Errorf("uninstall left hooks behind: %v", readSettings(t, path))
+	}
+}
+
+// Uninstall also removes a broken unquoted entry without an install in between.
+func TestRemoveClioHooksRemovesUnquotedSpacePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/Users/me/My Tools/clio recall"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveClioHooks(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := readSettings(t, path)["hooks"]; has {
+		t.Errorf("uninstall left the broken entry: %v", readSettings(t, path))
+	}
+}
+
+// A foreign wrapper around clio (env, sudo) is someone else's hook: install must
+// neither rewrite it nor count it as ours, and uninstall must keep it.
+func TestWrapperCommandsAreNotClioHooks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{
+		"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"/usr/bin/env /opt/clio recall"}]}],
+		"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"/usr/bin/sudo /opt/clio file-history --hook"}]}]
+	}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddClioHooks(path, "/new/clio recall", "/new/clio file-history --hook"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveClioHooks(path); err != nil {
+		t.Fatal(err)
+	}
+	root := readSettings(t, path)
+	ss := sessionStartGroups(t, root)
+	pt := preToolUseGroups(t, root)
+	if len(ss) != 1 || len(pt) != 1 {
+		t.Fatalf("wrapper hooks not kept: SessionStart=%v PreToolUse=%v", ss, pt)
+	}
+	if c := ss[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)["command"]; c != "/usr/bin/env /opt/clio recall" {
+		t.Errorf("SessionStart wrapper rewritten to %v", c)
+	}
+	if c := pt[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)["command"]; c != "/usr/bin/sudo /opt/clio file-history --hook" {
+		t.Errorf("PreToolUse wrapper rewritten to %v", c)
+	}
+}

@@ -34,13 +34,21 @@ func newInstallHookCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			legacyRecall, err := claudeconfig.HasLegacySessionStartHook(settingsPath)
+			if err != nil {
+				return err
+			}
 			hadFile, err := claudeconfig.HasPreToolUseReadHook(settingsPath)
 			if err != nil {
 				return err
 			}
-			// debt: exe is embedded unquoted (same shape as the recall hook); a
-			// binary path with a space would split at install time and never match
-			// the recognisers. Fix both hooks together if such a path ever shows up.
+			unquoted, err := claudeconfig.HasUnquotedClioHook(settingsPath)
+			if err != nil {
+				return err
+			}
+			// The hook command runs through a shell, so a path with spaces must be
+			// quoted; plain paths stay unquoted to keep existing installs identical.
+			exe = claudeconfig.ShellQuote(exe)
 			fileHistoryCmd := exe + " file-history --hook"
 			if noFileContext {
 				fileHistoryCmd = "" // also removes a previously installed file-history hook
@@ -62,8 +70,14 @@ func newInstallHookCmd() *cobra.Command {
 			switch {
 			case len(added) > 0:
 				fmt.Fprintf(out, "Registered %s in %s.\n", strings.Join(added, " and "), settingsPath)
-			case !removedFile:
+			case !removedFile && !legacyRecall && !unquoted:
 				fmt.Fprintf(out, "clio hooks already registered in %s; nothing to add.\n", settingsPath)
+			}
+			if legacyRecall {
+				fmt.Fprintln(out, "Upgraded the recall SessionStart hook (skips forked sessions; 10 s timeout).")
+			}
+			if unquoted {
+				fmt.Fprintln(out, "Upgraded a clio hook whose binary path contained a space to the quoted current path.")
 			}
 			if removedFile {
 				fmt.Fprintln(out, "Removed the file-history PreToolUse hook (--no-file-context).")

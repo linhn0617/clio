@@ -6,6 +6,7 @@ import (
 
 	"github.com/linhn0617/clio/internal/search"
 	"github.com/linhn0617/clio/internal/sessions"
+	"github.com/linhn0617/clio/internal/termsafe"
 )
 
 // formatSessionLine renders one `clio list` row, annotating a parent that spawned
@@ -30,7 +31,7 @@ func subagentNote(s sessions.Session) string {
 		return ""
 	}
 	if s.AgentType != "" {
-		return fmt.Sprintf("↳ subagent (%s) of %s", s.AgentType, shortID(s.ParentSession))
+		return fmt.Sprintf("↳ subagent (%s) of %s", termsafe.Strip(s.AgentType), shortID(s.ParentSession))
 	}
 	return fmt.Sprintf("↳ subagent of %s", shortID(s.ParentSession))
 }
@@ -44,7 +45,7 @@ func formatSubagentsSection(children []sessions.Session) string {
 	var b strings.Builder
 	b.WriteString("## Subagents\n\n")
 	for _, c := range children {
-		typ := c.AgentType
+		typ := termsafe.Strip(c.AgentType)
 		if typ == "" {
 			typ = "subagent"
 		}
@@ -58,7 +59,7 @@ func formatSubagentsSection(children []sessions.Session) string {
 func formatSearchResult(r search.Result) string {
 	tag := ""
 	if r.ParentSession != "" {
-		typ := r.AgentType
+		typ := termsafe.Strip(r.AgentType)
 		if typ == "" {
 			typ = "subagent"
 		}
@@ -66,5 +67,5 @@ func formatSearchResult(r search.Result) string {
 	}
 	return fmt.Sprintf("%s  %s  %s  [%s]%s\n    %s",
 		shortID(r.SessionUUID), formatTS(r.TS), trimProject(r.ProjectPath), r.Role, tag,
-		strings.ReplaceAll(strings.TrimSpace(r.Snippet), "\n", " "))
+		strings.ReplaceAll(strings.TrimSpace(termsafe.Strip(r.Snippet)), "\n", " "))
 }

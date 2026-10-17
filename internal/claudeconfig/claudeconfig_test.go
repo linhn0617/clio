@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -398,5 +399,70 @@ func TestPreExistingBakPreservedWhenNoBackupWritten(t *testing.T) {
 	}
 	if string(got) != "unrelated backup" {
 		t.Fatalf("pre-existing .bak changed: %q", got)
+	}
+}
+
+// dotfiles setups symlink ~/.claude.json / settings.json into a repo; the
+// write must follow the link instead of replacing it with a regular file.
+func TestMutateFollowsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	targetDir := filepath.Join(dir, "dotfiles")
+	linkDir := filepath.Join(dir, "home")
+	for _, d := range []string{targetDir, linkDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(targetDir, "claude.json")
+	link := filepath.Join(linkDir, ".claude.json")
+	if err := os.WriteFile(target, []byte(`{"theme":"dark"}`), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := AddServer(link, "clio", ServerEntry{Command: "clio", Args: []string{"mcp"}}); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(link)
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("symlink replaced by a regular file (err=%v)", err)
+	}
+	if _, ok := servers(t, read(t, target))["clio"]; !ok {
+		t.Fatal("target not updated")
+	}
+	if _, err := os.Stat(target + ".bak"); err != nil {
+		t.Fatalf(".bak not beside the target: %v", err)
+	}
+	if _, err := os.Lstat(link + ".bak"); err == nil {
+		t.Fatal(".bak must not be created beside the symlink")
+	}
+	entries, _ := os.ReadDir(targetDir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".claude.json.tmp-") {
+			t.Fatalf("temp file left in target dir: %s", e.Name())
+		}
+	}
+	if m, _ := os.ReadDir(linkDir); len(m) != 1 {
+		t.Fatalf("link dir should hold only the link, got %v", m)
+	}
+}
+
+// A dangling link has no content to preserve and its intended target is
+// unknown to us (the user may have mistyped it), so fail instead of guessing.
+func TestMutateRefusesDanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, ".claude.json")
+	if err := os.Symlink(filepath.Join(dir, "missing", "claude.json"), link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := AddServer(link, "clio", ServerEntry{Command: "clio"}); err == nil {
+		t.Fatal("expected an error for a dangling symlink")
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("dangling symlink must stay as is (err=%v)", err)
+	}
+	if m, _ := os.ReadDir(dir); len(m) != 1 {
+		t.Fatalf("unexpected files created: %v", m)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/registry"
 	"github.com/linhn0617/clio/internal/sessions"
+	"github.com/linhn0617/clio/internal/termsafe"
 )
 
 // browseListLimit bounds how many recent sessions the Browse list loads.
@@ -292,7 +293,7 @@ func (v browseView) renderList(w, h int) string {
 		}
 		var row string
 		if r.child {
-			typ := r.sess.AgentType
+			typ := termsafe.Strip(r.sess.AgentType)
 			if typ == "" {
 				typ = "subagent"
 			}

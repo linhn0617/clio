@@ -28,7 +28,7 @@ func TestReconcileDetectsTruncation(t *testing.T) {
 		src, 22, 1, 22, "fp", 1); err != nil {
 		t.Fatal(err)
 	}
-	if m, _, tr, _, _, _ := reconcile(d, []string{dir}); m != 0 || tr != 0 {
+	if m, _, _, tr, _, _, _ := reconcile(d, []string{dir}); m != 0 || tr != 0 {
 		t.Fatalf("expected clean before truncation, got missing=%d truncated=%d", m, tr)
 	}
 
@@ -36,7 +36,7 @@ func TestReconcileDetectsTruncation(t *testing.T) {
 	if err := os.WriteFile(src, []byte("0123\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, tr, _, _, _ := reconcile(d, []string{dir}); tr != 1 {
+	if _, _, _, tr, _, _, _ := reconcile(d, []string{dir}); tr != 1 {
 		t.Fatalf("expected 1 truncated, got %d", tr)
 	}
 }
@@ -67,7 +67,7 @@ func TestReconcileDetectsSameSizeRewrite(t *testing.T) {
 		src, fi.Size(), fi.ModTime().UnixNano(), fi.Size(), "fp", 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, rw, _, _ := reconcile(d, []string{dir}); rw != 0 {
+	if _, _, _, _, rw, _, _ := reconcile(d, []string{dir}); rw != 0 {
 		t.Fatalf("expected clean before rewrite, got rewritten=%d", rw)
 	}
 
@@ -84,7 +84,7 @@ func TestReconcileDetectsSameSizeRewrite(t *testing.T) {
 	if err := os.Chtimes(src, newMTime, newMTime); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, tr, rw, _, _ := reconcile(d, []string{dir}); tr != 0 || rw != 1 {
+	if _, _, _, tr, rw, _, _ := reconcile(d, []string{dir}); tr != 0 || rw != 1 {
 		t.Fatalf("expected the same-size rewrite detected (rewritten=1, truncated=0), got truncated=%d rewritten=%d", tr, rw)
 	}
 }
@@ -98,7 +98,7 @@ func TestReconcileDetectsMissing(t *testing.T) {
 	defer d.Close()
 	d.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at) VALUES (?,?,?,?,?,?)`,
 		filepath.Join(dir, "gone.jsonl"), 10, 1, 10, "fp", 1)
-	if m, _, _, _, _, _ := reconcile(d, []string{dir}); m != 1 {
+	if m, _, _, _, _, _, _ := reconcile(d, []string{dir}); m != 1 {
 		t.Fatalf("expected 1 missing, got %d", m)
 	}
 }
@@ -355,7 +355,7 @@ func TestReconcileFlagsUnverifiable(t *testing.T) {
 	defer d.Close()
 	d.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at) VALUES (?,?,?,?,?,?)`,
 		filepath.Join(notDir, "child.jsonl"), 10, 1, 10, "fp", 1)
-	m, _, _, _, _, rerr := reconcile(d, []string{dir})
+	m, _, _, _, _, _, rerr := reconcile(d, []string{dir})
 	if rerr != nil {
 		t.Fatalf("unexpected error: %v", rerr)
 	}
@@ -375,7 +375,7 @@ func TestReconcilePreservesFilesUnderUnavailableRoot(t *testing.T) {
 	// is preservation (the root is unavailable), not a deletion.
 	d.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at) VALUES (?,?,?,?,?,?)`,
 		filepath.Join(dir, "unavailable-root", "rollout-x.jsonl"), 10, 1, 10, "fp", 1)
-	m, preserved, _, _, _, rerr := reconcile(d, []string{filepath.Join(dir, "available-root")})
+	m, preserved, _, _, _, _, rerr := reconcile(d, []string{filepath.Join(dir, "available-root")})
 	if rerr != nil {
 		t.Fatal(rerr)
 	}
@@ -631,5 +631,195 @@ func TestRunPrunedRawZeroWhenNone(t *testing.T) {
 	}
 	if p := byName["pruned raw_json"]; !p.OK || p.Detail != "0" {
 		t.Fatalf("clean db pruned raw_json=%+v want OK/0", p)
+	}
+}
+
+// A transcript deleted by Claude Code's cleanupPeriodDays but kept by clio
+// (source_missing_at set) is retained, not a reconciliation failure; an unmarked
+// vanished file is still missing.
+func TestReconcileCountsRetainedNotMissing(t *testing.T) {
+	dir := t.TempDir()
+	d, err := db.Open(filepath.Join(dir, "x.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if _, err := d.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at,source_missing_at) VALUES (?,10,1,10,'fp',1,100),(?,10,1,10,'fp',1,NULL)`,
+		filepath.Join(dir, "kept.jsonl"), filepath.Join(dir, "gone.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	m, preserved, retained, _, _, _, rerr := reconcile(d, []string{dir})
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if m != 1 || retained != 1 || preserved != 0 {
+		t.Fatalf("missing=%d retained=%d preserved=%d want 1/1/0", m, retained, preserved)
+	}
+}
+
+// Retained rows have no file on disk; counting them as tracked would make
+// tracked > on-disk forever and hide a real coverage gap of the same size.
+func TestCoverageBySourceExcludesRetained(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "claude-projects")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"a.jsonl", "b.jsonl"} {
+		if err := os.WriteFile(filepath.Join(root, n), []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, err := db.Open(filepath.Join(dir, "x.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	// a.jsonl tracked; b.jsonl on disk but never ingested; old.jsonl retained.
+	if _, err := d.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at,source_missing_at) VALUES (?,3,1,3,'fp',1,NULL),(?,3,1,3,'fp',1,100)`,
+		filepath.Join(root, "a.jsonl"), filepath.Join(root, "old.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	ok, detail, err := coverageBySource(d, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok || !strings.Contains(detail, "2 on disk, 1 tracked") {
+		t.Fatalf("retained row masked the gap: ok=%v detail=%q", ok, detail)
+	}
+}
+
+func TestRunReportsRetainedSessions(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "x.sqlite")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	const suffix = " session(s) kept after their transcript was deleted (clio index --purge-missing to drop)"
+	if r := findResult(t, Run(d, dir, dbPath), "retained sessions"); !r.OK || r.Detail != "0"+suffix {
+		t.Fatalf("empty db retained=%+v", r)
+	}
+	gone := filepath.Join(dir, "gone.jsonl")
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, source_file, turn_count) VALUES ('s1',?,1)`, gone); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO messages(session_uuid, seq, role, content, raw_json) VALUES ('s1',0,'user','hi','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at,source_missing_at) VALUES (?,10,1,10,'fp',1,100)`, gone); err != nil {
+		t.Fatal(err)
+	}
+	results := Run(d, dir, dbPath)
+	if r := findResult(t, results, "retained sessions"); !r.OK || r.Detail != "1"+suffix {
+		t.Fatalf("retained=%+v", r)
+	}
+	if r := findResult(t, results, "source reconciliation"); !r.OK {
+		t.Fatalf("retained session made reconciliation fail: %+v", r)
+	}
+}
+
+// doctor opens read-only, so a DB from before migration 0013 has no
+// source_missing_at column; that must read as "nothing retained", not an error.
+func TestRunToleratesMissingSourceMissingColumn(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "x.sqlite")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if _, err := d.Exec(`ALTER TABLE ingest_state DROP COLUMN source_missing_at`); err != nil {
+		t.Skipf("DROP COLUMN unsupported: %v", err)
+	}
+	src := filepath.Join(dir, "s.jsonl")
+	os.WriteFile(src, []byte("{}\n"), 0o600)
+	fi, _ := os.Stat(src)
+	if _, err := d.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at) VALUES (?,?,?,?,'fp',1)`,
+		src, fi.Size(), fi.ModTime().UnixNano(), fi.Size()); err != nil {
+		t.Fatal(err)
+	}
+	results := Run(d, dir, dbPath)
+	for _, name := range []string{"retained sessions", "source reconciliation"} {
+		if r := findResult(t, results, name); !r.OK {
+			t.Fatalf("%s on pre-0013 db: %+v", name, r)
+		}
+	}
+	// Called directly: Run's coverage line also walks the real registry roots.
+	if ok, detail, err := coverageBySource(d, []string{dir}); err != nil || !ok {
+		t.Fatalf("coverage on pre-0013 db: ok=%v detail=%q err=%v", ok, detail, err)
+	}
+}
+
+func TestDbstatAvailableForFTSBloat(t *testing.T) {
+	dir := t.TempDir()
+	d, err := db.Open(filepath.Join(dir, "x.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	var n int64
+	if err := d.QueryRow(`SELECT COALESCE(SUM(pgsize),0) FROM dbstat WHERE name = 'messages_fts_data'`).Scan(&n); err != nil {
+		t.Fatalf("dbstat unavailable in this sqlite build: %v", err)
+	}
+	if n <= 0 {
+		t.Fatalf("expected a positive messages_fts_data size, got %d", n)
+	}
+}
+
+func TestFTSBloatVerdict(t *testing.T) {
+	const mb = 1 << 20
+	cases := []struct {
+		name         string
+		fts, msg     int64
+		wantOK       bool
+		wantContains string
+	}{
+		{"healthy", 300 * mb, 557 * mb, true, "ratio 0.5"},
+		{"bloated", 2135 * mb, 557 * mb, false, "run clio index --full to optimize"},
+		{"tiny db is never flagged", 8 * mb, 1 * mb, true, "ratio 8.0"},
+		{"empty messages", 0, 0, true, "ratio 0.0"},
+	}
+	for _, c := range cases {
+		ok, detail := ftsBloatVerdict(c.fts, c.msg)
+		if ok != c.wantOK || !strings.Contains(detail, c.wantContains) {
+			t.Errorf("%s: ok=%v detail=%q", c.name, ok, detail)
+		}
+	}
+	if _, detail := ftsBloatVerdict(2135*mb, 557*mb); !strings.Contains(detail, "fts 2135.0 MB vs messages 557.0 MB (ratio 3.8)") {
+		t.Errorf("unexpected format: %q", detail)
+	}
+}
+
+func TestRunReportsFTSBloat(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "x.sqlite")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	var got *Result
+	for _, r := range Run(d, dir, dbPath) {
+		if r.Name == "fts bloat" {
+			r := r
+			got = &r
+		}
+	}
+	if got == nil || !got.OK || strings.Contains(got.Detail, "unavailable") {
+		t.Fatalf("fts bloat line missing/failing on fresh db: %+v", got)
+	}
+}
+
+func TestFTSBloatUnavailableIsNotRed(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "x.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Close() // every query now fails, standing in for a build without dbstat
+	ok, detail := ftsBloat(d)
+	if !ok || !strings.Contains(detail, "unavailable") {
+		t.Fatalf("measurement failure must be ok=true/unavailable, got %v %q", ok, detail)
 	}
 }

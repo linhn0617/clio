@@ -11,6 +11,7 @@ import (
 
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/sessions"
+	"github.com/linhn0617/clio/internal/termsafe"
 )
 
 func newUsageCmd() *cobra.Command {
@@ -131,7 +132,7 @@ directly (clio show <uuid>); project/model rows show a drill-down instead.
 func formatUsageSessionRow(r sessions.UsageSessionRow) string {
 	flag := ""
 	if r.AgentType != "" {
-		flag = "  ↳" + r.AgentType
+		flag = "  ↳" + termsafe.Strip(r.AgentType)
 	}
 	stale := ""
 	if r.Stale {
@@ -155,14 +156,17 @@ func formatUsageGroupRow(by string, r sessions.UsageGroupRow) string {
 	if r.StaleSessions > 0 {
 		stale = fmt.Sprintf("  [stale: %d sessions]", r.StaleSessions)
 	}
-	key := r.Key
+	// The drill-down hint is copy-paste text, so it is stripped too; a key that
+	// held escapes yields a hint for the stripped key, which cannot match it.
+	rawKey := termsafe.Strip(r.Key)
+	key := rawKey
 	drill := ""
 	switch by {
 	case "project":
 		key = trimProject(key)
-		drill = fmt.Sprintf("  → clio usage --project %s --by session --source %s", shellQuote(r.Key), r.Source)
+		drill = fmt.Sprintf("  → clio usage --project %s --by session --source %s", shellQuote(rawKey), r.Source)
 	case "model":
-		drill = fmt.Sprintf("  → clio usage --model %s --by session --source %s", shellQuote(r.Key), r.Source)
+		drill = fmt.Sprintf("  → clio usage --model %s --by session --source %s", shellQuote(rawKey), r.Source)
 	}
 	return fmt.Sprintf("  %9s  %4d sessions  %s%s%s", humanTokens(r.TotalTokens), r.Sessions, key, stale, drill)
 }
@@ -232,12 +236,14 @@ func printQuota(cmd *cobra.Command, database *db.DB, asJSON bool) error {
 				reset = ", reset time passed"
 			}
 		}
+		// limit_id and plan_type are read from session files, so they may carry
+		// terminal escapes.
 		plan := ""
 		if s.PlanType != "" {
-			plan = " (" + s.PlanType + ")"
+			plan = " (" + termsafe.Strip(s.PlanType) + ")"
 		}
 		fmt.Fprintf(os.Stdout, "  %s %s%s: %.1f%% used — observed %s%s%s\n",
-			s.Source, s.LimitID, plan, s.UsedPercent, humanAge(s.ObservedAt, now), reset, state)
+			s.Source, termsafe.Strip(s.LimitID), plan, s.UsedPercent, humanAge(s.ObservedAt, now), reset, state)
 	}
 	return nil
 }

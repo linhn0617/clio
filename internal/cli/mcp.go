@@ -179,9 +179,9 @@ func leaderLoop(ctx context.Context, lease *lock.Lease, leaderFlag *atomic.Bool,
 		if err := ing.BackfillActivity(wctx); err != nil {
 			log.Warn("activity backfill failed", "err", err)
 		}
-		// Reflect deletions that happened while clio was down before we start
-		// serving, so a just-promoted leader (and CLI readers deferring to it)
-		// don't surface sources that no longer exist.
+		// Reconcile deletions that happened while clio was down before we start
+		// serving: deleted transcripts are marked retained (kept, not purged), and
+		// files that came back are unmarked.
 		if err := ing.PurgeMissing(wctx, projects); err != nil {
 			log.Warn("startup purge failed", "err", err)
 		}

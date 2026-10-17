@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/linhn0617/clio/internal/sessions"
+	"github.com/linhn0617/clio/internal/termsafe"
 )
 
 func newActivityCmd() *cobra.Command {
@@ -55,16 +56,20 @@ func newActivityCmd() *cobra.Command {
 				return nil
 			}
 			for _, r := range rows {
-				fmt.Fprintf(os.Stdout, "%6d  %s\n", r.Count, r.Value)
+				fmt.Fprintln(os.Stdout, formatActivityRow(r))
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&by, "by", "tool", "Group by: file|command|tool|pattern|url")
 	cmd.Flags().StringVar(&since, "since", "", "Only activity since this time (e.g. 7d)")
-	cmd.Flags().StringVar(&project, "project", "", "Filter by project path prefix")
+	cmd.Flags().StringVar(&project, "project", "", "Filter by project path (matches it and anything beneath)")
 	cmd.Flags().IntVar(&limit, "limit", 30, "Maximum number of rows")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Output JSON")
 	addSourceFlag(cmd, &source)
 	return cmd
+}
+
+func formatActivityRow(r sessions.ActivityCount) string {
+	return fmt.Sprintf("%6d  %s", r.Count, termsafe.Strip(r.Value))
 }

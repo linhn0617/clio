@@ -204,7 +204,7 @@ func TestGetRecall(t *testing.T) {
 	addTarget(t, d, "other", "file", "/elsewhere/x.go")
 	addTarget(t, d, "other", "command", "ls")
 
-	r, err := GetRecall(context.Background(), d, "/proj", 0, 5, 5)
+	r, err := GetRecall(context.Background(), d, "/proj", "", 0, 5, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,9 +615,9 @@ func TestListSessionsPromotesChildWhenParentFilteredOut(t *testing.T) {
 	}
 }
 
-// A recent subagent whose parent falls outside the current page (LIMIT) is promoted
-// to the listing, not hidden behind an off-page parent.
-func TestListSessionsPromotesRecentChildBeyondParentPage(t *testing.T) {
+// A subagent whose parent passes the filters stays hidden even when the parent
+// ranks below LIMIT: hiding must not depend on which page the parent lands on.
+func TestListSessionsHidesChildWhenParentBeyondPage(t *testing.T) {
 	d := testDB(t)
 	ins := func(uuid string, ended int64, parent any) {
 		if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session) VALUES (?,?,?,?,?,1,?,?)`,
@@ -625,8 +625,8 @@ func TestListSessionsPromotesRecentChildBeyondParentPage(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// C (a subagent of P) is the single most recent session; P is older and would
-	// fall outside a one-row page.
+	// C (a subagent of P) is the single most recent session; P is older and falls
+	// outside a one-row page, but is in the index and passes the (empty) filters.
 	ins("C", 100, "P")
 	ins("T1", 90, nil)
 	ins("P", 80, nil)
@@ -634,8 +634,8 @@ func TestListSessionsPromotesRecentChildBeyondParentPage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].UUID != "C" {
-		t.Fatalf("the most recent row is subagent C; it must be promoted, not hidden behind its off-page parent: got %+v", got)
+	if len(got) != 1 || got[0].UUID != "T1" {
+		t.Fatalf("subagent C must stay hidden (parent P is indexed); the page should be T1: got %+v", got)
 	}
 }
 
@@ -711,7 +711,7 @@ func TestGetRecallLastAssistantText(t *testing.T) {
 	addMsg(t, d, "new", 1, "assistant", "Done: the thing. Next: the other thing.")
 	addMsg(t, d, "new", 2, "tool_use", "Bash go test ./...")
 
-	r, err := GetRecall(context.Background(), d, "/proj", 0, 5, 5)
+	r, err := GetRecall(context.Background(), d, "/proj", "", 0, 5, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -736,7 +736,7 @@ func TestGetRecallExcerptIgnoresSince(t *testing.T) {
 		t.Fatal(err)
 	}
 	since := time.Now().Add(-14 * 24 * time.Hour).Unix()
-	r, err := GetRecall(context.Background(), d, "/proj", since, 5, 5)
+	r, err := GetRecall(context.Background(), d, "/proj", "", since, 5, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -753,7 +753,7 @@ func TestGetRecallExcerptIgnoresSince(t *testing.T) {
 	if _, err := d.Exec(`INSERT INTO messages(session_uuid, seq, ts, role, content, raw_json) VALUES ('idle-child',0,?, 'assistant','child words','{}')`, fourWeeksAgo+10); err != nil {
 		t.Fatal(err)
 	}
-	r, err = GetRecall(context.Background(), d, "/proj", since, 5, 5)
+	r, err = GetRecall(context.Background(), d, "/proj", "", since, 5, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -773,7 +773,7 @@ func TestGetRecallExcerptMatchesDigestFirstRow(t *testing.T) {
 	addMsg(t, d, "P", 0, "assistant", "p words")
 	addMsg(t, d, "T", 0, "assistant", "t words")
 	addMsg(t, d, "C", 0, "assistant", "c words")
-	r, err := GetRecall(context.Background(), d, "/proj", 100, 5, 5)
+	r, err := GetRecall(context.Background(), d, "/proj", "", 100, 5, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -791,7 +791,7 @@ func TestGetRecallSkipsBlankAssistantRow(t *testing.T) {
 	addSessionAt(t, d, "s", "/proj", 1000, "")
 	addMsg(t, d, "s", 0, "assistant", "Done")
 	addMsg(t, d, "s", 1, "assistant", "   ")
-	r, err := GetRecall(context.Background(), d, "/proj", 0, 5, 5)
+	r, err := GetRecall(context.Background(), d, "/proj", "", 0, 5, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -810,7 +810,7 @@ func TestGetRecallExcerptTSFallbackAndTiebreak(t *testing.T) {
 		t.Fatal(err)
 	}
 	addMsg(t, d, "aaa", 0, "assistant", "not me")
-	r, err := GetRecall(context.Background(), d, "/proj", 0, 5, 5)
+	r, err := GetRecall(context.Background(), d, "/proj", "", 0, 5, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -827,7 +827,7 @@ func TestGetRecallNoAssistantTextIsNil(t *testing.T) {
 	addSessionAt(t, d, "s", "/proj", 1000, "")
 	addMsg(t, d, "s", 0, "user", "hello")
 	addMsg(t, d, "s", 1, "tool_use", "Bash ls")
-	r, err := GetRecall(context.Background(), d, "/proj", 0, 5, 5)
+	r, err := GetRecall(context.Background(), d, "/proj", "", 0, 5, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -848,7 +848,7 @@ func TestGetRecallNewestFollowsListSessions(t *testing.T) {
 	addSessionAt(t, d, "child", "/proj", 2000, "parent")
 	addMsg(t, d, "parent", 0, "assistant", "parent words")
 	addMsg(t, d, "child", 0, "assistant", "child words")
-	r, err := GetRecall(context.Background(), d, "/proj", 0, 5, 5)
+	r, err := GetRecall(context.Background(), d, "/proj", "", 0, 5, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -859,11 +859,173 @@ func TestGetRecallNewestFollowsListSessions(t *testing.T) {
 	d2 := testDB(t)
 	addSessionAt(t, d2, "orphan", "/proj", 2000, "gone-parent")
 	addMsg(t, d2, "orphan", 0, "assistant", "orphan words")
-	r2, err := GetRecall(context.Background(), d2, "/proj", 0, 5, 5)
+	r2, err := GetRecall(context.Background(), d2, "/proj", "", 0, 5, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if r2.LastAssistant == nil || r2.LastAssistant.SessionUUID != "orphan" {
 		t.Fatalf("promoted orphan should supply the excerpt: %+v", r2.LastAssistant)
+	}
+}
+
+// A project filter matches the path itself and anything beneath it, never a
+// sibling that merely shares the prefix (/x/foo must not pull in /x/foo-bar).
+func TestListSessionsProjectPathBoundary(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "root", "/x/foo", 1)
+	addSession(t, d, "sub", "/x/foo/sub", 1)
+	addSession(t, d, "sibling", "/x/foo-bar", 1)
+	for _, p := range []string{"/x/foo", "/x/foo/"} {
+		rows, err := ListSessions(context.Background(), d, ListFilter{ProjectPrefix: p})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]bool{}
+		for _, s := range rows {
+			got[s.UUID] = true
+		}
+		if !got["root"] || !got["sub"] || got["sibling"] || len(rows) != 2 {
+			t.Errorf("project %q: want root+sub only, got %+v", p, rows)
+		}
+	}
+}
+
+func TestActivityByKindProjectPathBoundary(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "in", "/x/foo", 1)
+	addSession(t, d, "sibling", "/x/foo-bar", 1)
+	addTarget(t, d, "in", "file", "/x/foo/a.go")
+	addTarget(t, d, "sibling", "file", "/x/foo-bar/b.go")
+	got, err := ActivityByKind(context.Background(), d, "file", 0, "/x/foo", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Value != "/x/foo/a.go" {
+		t.Fatalf("sibling project leaked into activity: %+v", got)
+	}
+}
+
+func TestActivitySummaryProjectPathBoundary(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "in", "/x/foo", 1)
+	addSession(t, d, "sibling", "/x/foo-bar", 1)
+	since := time.Now().Add(-time.Hour).Unix()
+	buckets, err := ActivitySummary(context.Background(), d, since, "project", "/x/foo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 1 || buckets[0].Key != "/x/foo" {
+		t.Fatalf("sibling project leaked into summary: %+v", buckets)
+	}
+}
+
+// The SessionStart hook fires for the session being opened (resume/compact
+// reopen an already-indexed one): it and its subagents must not be recalled as
+// "the last session", nor feed the files/commands sections.
+func TestGetRecallExcludesCurrentSession(t *testing.T) {
+	d := testDB(t)
+	addSessionAt(t, d, "prev", "/proj", 1000, "")
+	addSessionAt(t, d, "cur", "/proj", 3000, "")
+	addSessionAt(t, d, "cur-child", "/proj", 3500, "cur")
+	addMsg(t, d, "prev", 0, "assistant", "prev closing words")
+	addMsg(t, d, "cur", 0, "assistant", "current closing words")
+	addMsg(t, d, "cur-child", 0, "assistant", "child closing words")
+	addTarget(t, d, "prev", "file", "/proj/prev.go")
+	addTarget(t, d, "cur", "file", "/proj/cur.go")
+	addTarget(t, d, "cur-child", "file", "/proj/child.go")
+	addTarget(t, d, "prev", "command", "make prev")
+	addTarget(t, d, "cur", "command", "make cur")
+	addTarget(t, d, "cur-child", "command", "make child")
+
+	r, err := GetRecall(context.Background(), d, "/proj", "cur", 0, 5, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Sessions) != 1 || r.Sessions[0].UUID != "prev" {
+		t.Fatalf("current session (or its subagent) listed: %+v", r.Sessions)
+	}
+	if r.LastAssistant == nil || r.LastAssistant.SessionUUID != "prev" {
+		t.Fatalf("excerpt must come from the previous session: %+v", r.LastAssistant)
+	}
+	if len(r.Files) != 1 || r.Files[0].Value != "/proj/prev.go" {
+		t.Fatalf("files must exclude the current session tree: %+v", r.Files)
+	}
+	if len(r.Commands) != 1 || r.Commands[0].Value != "make prev" {
+		t.Fatalf("commands must exclude the current session tree: %+v", r.Commands)
+	}
+
+	// The since-empty fallback honours the exclusion too.
+	r, err = GetRecall(context.Background(), d, "/proj", "cur", 2000, 5, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.LastAssistant == nil || r.LastAssistant.SessionUUID != "prev" {
+		t.Fatalf("fallback excerpt must skip the current session: %+v", r.LastAssistant)
+	}
+}
+
+// Touched files are limited to paths under the project root, and the limit is
+// applied after that filter so out-of-project noise cannot crowd them out.
+func TestGetRecallFilesUnderProjectOnly(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/proj", 1)
+	for i := 0; i < 5; i++ {
+		addTarget(t, d, "s1", "file", "/tmp/scratch/notes.md")
+		addTarget(t, d, "s1", "file", "/proj-other/y.go")
+	}
+	addTarget(t, d, "s1", "file", "/proj/a.go")
+	addTarget(t, d, "s1", "file", "/proj/b.go")
+	addTarget(t, d, "s1", "file", "/proj/b.go")
+	addTarget(t, d, "s1", "command", "ls /tmp")
+
+	r, err := GetRecall(context.Background(), d, "/proj", "", 0, 5, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Files) != 2 || r.Files[0].Value != "/proj/b.go" || r.Files[1].Value != "/proj/a.go" {
+		t.Fatalf("want the 2 in-project files, got %+v", r.Files)
+	}
+	if len(r.Commands) != 1 || r.Commands[0].Value != "ls /tmp" {
+		t.Fatalf("commands are not path-filtered: %+v", r.Commands)
+	}
+}
+
+// codex review #5: SQLite LIKE folds ASCII case, so on a case-sensitive
+// filesystem /x/foo must not pull in /x/FOO/sub. LIKE wildcards in the path stay
+// literal, and a non-ASCII path compares by the same character count on both sides.
+func TestListSessionsProjectPathCaseSensitive(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "root", "/x/foo", 1)
+	addSession(t, d, "sub", "/x/foo/sub", 1)
+	addSession(t, d, "upper", "/x/FOO/sub", 1)
+	addSession(t, d, "us", "/x/a_b/sub", 1)
+	addSession(t, d, "usx", "/x/axb/sub", 1)
+	addSession(t, d, "pct", "/x/a%b/sub", 1)
+	addSession(t, d, "cjk", "/x/中文/sub", 1)
+	addSession(t, d, "rel", "rel/path", 1)
+	for p, want := range map[string][]string{
+		"/x/foo": {"root", "sub"},
+		"/x/FOO": {"upper"},
+		"/x/a_b": {"us"},
+		"/x/a%b": {"pct"},
+		"/x/中文":  {"cjk"},
+		"/x/中文/": {"cjk"},
+		"/":      {"root", "sub", "upper", "us", "usx", "pct", "cjk"},
+	} {
+		rows, err := ListSessions(context.Background(), d, ListFilter{ProjectPrefix: p})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]bool{}
+		for _, s := range rows {
+			got[s.UUID] = true
+		}
+		ok := len(rows) == len(want)
+		for _, w := range want {
+			ok = ok && got[w]
+		}
+		if !ok {
+			t.Errorf("project %q: want %v, got %v", p, want, got)
+		}
 	}
 }

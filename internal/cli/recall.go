@@ -14,6 +14,7 @@ import (
 	"github.com/linhn0617/clio/internal/config"
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/sessions"
+	"github.com/linhn0617/clio/internal/termsafe"
 )
 
 func newRecallCmd() *cobra.Command {
@@ -29,13 +30,14 @@ func newRecallCmd() *cobra.Command {
 		Short: "Print a recent-activity digest for the current project (used by the SessionStart hook)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Never break session startup: any failure yields empty output, exit 0.
-			if out := recallDigest(project, since, limit, tailRunes, noCommands); out != "" {
+			hook := parseHookPayload(readStdinIfPiped())
+			if out := recallDigest(hook, project, since, limit, tailRunes, noCommands); out != "" {
 				fmt.Fprint(os.Stdout, out)
 			}
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&project, "project", "", "Project path prefix (default: detected from the working directory)")
+	cmd.Flags().StringVar(&project, "project", "", "Project path (matches it and anything beneath; default: detected from the working directory)")
 	cmd.Flags().StringVar(&since, "since", "14d", "Look back this far for touched files and run commands")
 	cmd.Flags().IntVar(&limit, "limit", 5, "Max items per section")
 	cmd.Flags().IntVar(&tailRunes, "tail-runes", 600, "Max length of the last session's closing message excerpt (0 omits it)")
@@ -44,10 +46,12 @@ func newRecallCmd() *cobra.Command {
 }
 
 // recallDigest builds the digest text, swallowing every error (returns "" on any
-// problem) so the SessionStart hook can never break Claude Code startup.
-func recallDigest(project, since string, limit, tailRunes int, noCommands bool) string {
+// problem) so the SessionStart hook can never break Claude Code startup. hook is
+// the SessionStart payload (zero for a manual run): its session is the one being
+// opened, so it is excluded from the digest.
+func recallDigest(hook recallHook, project, since string, limit, tailRunes int, noCommands bool) string {
 	if project == "" {
-		project = detectProject()
+		project = detectProject(hook.Cwd)
 	}
 	if project == "" {
 		return ""
@@ -69,7 +73,7 @@ func recallDigest(project, since string, limit, tailRunes int, noCommands bool) 
 	if ts, err := parseSince(since); err == nil {
 		sinceTS = ts
 	}
-	r, err := sessions.GetRecall(context.Background(), database, project, sinceTS, limit, limit)
+	r, err := sessions.GetRecall(context.Background(), database, project, hook.SessionID, sinceTS, limit, limit)
 	if err != nil {
 		return ""
 	}
@@ -101,10 +105,9 @@ func applyTailBound(r *sessions.Recall, runes int) {
 	r.LastAssistant.Text = text
 }
 
-// detectProject resolves the current project: the SessionStart hook pipes a JSON
-// payload with `cwd` on stdin; a manual run falls back to the working directory.
-func detectProject() string {
-	cwd := parseHookCwd(readStdinIfPiped())
+// detectProject resolves the current project from the hook payload's `cwd`; a
+// manual run (no payload) falls back to the working directory.
+func detectProject(cwd string) string {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
@@ -143,29 +146,93 @@ func readStdinIfPiped() []byte {
 	return data
 }
 
-// parseHookCwd extracts `cwd` from a Claude Code hook JSON payload.
-func parseHookCwd(data []byte) string {
-	if len(data) == 0 {
-		return ""
-	}
-	var p struct {
-		Cwd string `json:"cwd"`
-	}
-	if json.Unmarshal(data, &p) != nil {
-		return ""
-	}
-	return p.Cwd
+// recallHook is the subset of the SessionStart stdin JSON recall reads.
+type recallHook struct {
+	Cwd       string `json:"cwd"`
+	SessionID string `json:"session_id"`
 }
 
-// formatRecall renders the digest, or "" when there is nothing to recall.
+// parseHookPayload decodes a SessionStart payload; empty or garbage input
+// yields the zero value (a manual run).
+func parseHookPayload(data []byte) recallHook {
+	var h recallHook
+	if len(data) == 0 || json.Unmarshal(data, &h) != nil {
+		return recallHook{}
+	}
+	return h
+}
+
+// parseHookCwd extracts `cwd` from a Claude Code hook JSON payload.
+func parseHookCwd(data []byte) string {
+	return parseHookPayload(data).Cwd
+}
+
+// recallMaxChars caps the digest below Claude Code's 10,000-character hook-output
+// limit, past which it injects only a file path and a 2,000-character preview.
+// Counted in runes like hookMaxChars: Claude Code speaks of characters, and a
+// byte count would cut CJK text to a third of the room.
+// debt: runes, not UTF-16 units; an astral character (emoji) counts 2 toward
+// Claude Code's limit, so revisit if digests heavy in emoji approach the cap.
+const recallMaxChars = 9500
+
+// recallExcerptFloor is how far the closing excerpt is cut when the digest is
+// still too long with one session left.
+const recallExcerptFloor = 200
+
+// formatRecall renders the digest within recallMaxChars, or "" when there is
+// nothing to recall.
 func formatRecall(project string, r sessions.Recall) string {
+	return formatRecallCapped(project, r, recallMaxChars)
+}
+
+// formatRecallCapped shrinks the digest until it fits maxChars runes, dropping
+// the least "where did we leave off" material first: the commands section, then
+// the files section, then all sessions but the newest, then the excerpt past
+// recallExcerptFloor runes; a digest still too long is hard-cut with "…".
+func formatRecallCapped(project string, r sessions.Recall, maxChars int) string {
+	if r.LastAssistant != nil {
+		e := *r.LastAssistant // shrinking below must not touch the caller's excerpt
+		r.LastAssistant = &e
+	}
+	steps := []func(){
+		func() { r.Commands = nil },
+		func() { r.Files = nil },
+		func() {
+			if len(r.Sessions) > 1 {
+				r.Sessions = r.Sessions[:1]
+			}
+		},
+		func() {
+			if e := r.LastAssistant; e != nil {
+				if rs := []rune(e.Text); len(rs) > recallExcerptFloor {
+					e.Text = string(rs[:recallExcerptFloor]) + "…"
+				}
+			}
+		},
+	}
+	out := renderRecall(project, r)
+	for _, shrink := range steps {
+		if len([]rune(out)) <= maxChars {
+			return out
+		}
+		shrink()
+		out = renderRecall(project, r)
+	}
+	if rs := []rune(out); len(rs) > maxChars {
+		out = string(rs[:maxChars-1]) + "…"
+	}
+	return out
+}
+
+// renderRecall renders the digest uncapped, or "" when there is nothing to recall.
+func renderRecall(project string, r sessions.Recall) string {
 	if r.LastAssistant == nil && len(r.Sessions) == 0 && len(r.Files) == 0 && len(r.Commands) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "clio — recent activity in %s\n", project)
+	fmt.Fprintf(&b, "clio — recent activity in %s\n", termsafe.Strip(project))
 	if e := r.LastAssistant; e != nil && e.Text != "" {
-		fmt.Fprintf(&b, "Last session left off (%s, %s):\n  %s\n", formatTS(e.TS), shortID(e.SessionUUID), e.Text)
+		fmt.Fprintf(&b, "Last session left off (%s, %s):\n  %s\n", formatTS(e.TS), shortID(e.SessionUUID), termsafe.Strip(e.Text))
 	}
 	if len(r.Sessions) > 0 {
 		b.WriteString("Recent sessions:\n")
@@ -176,7 +243,7 @@ func formatRecall(project string, r sessions.Recall) string {
 	if len(r.Files) > 0 {
 		b.WriteString("Recently touched files:\n")
 		for _, f := range r.Files {
-			fmt.Fprintf(&b, "  - %s (%dx)\n", f.Value, f.Count)
+			fmt.Fprintf(&b, "  - %s (%dx)\n", termsafe.Strip(f.Value), f.Count)
 		}
 	}
 	if len(r.Commands) > 0 {

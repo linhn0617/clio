@@ -67,7 +67,9 @@ func TestWatcherIngestsAppend(t *testing.T) {
 	waitFor(t, base+1, d)
 }
 
-func TestWatcherBackstopPurgesDeleted(t *testing.T) {
+// The backstop keeps a deleted transcript's indexed copy (Claude Code's
+// cleanupPeriodDays must not erase clio's history) and only marks it missing.
+func TestWatcherBackstopRetainsDeleted(t *testing.T) {
 	orig := backstopPeriod
 	backstopPeriod = 200 * time.Millisecond
 	t.Cleanup(func() { backstopPeriod = orig })
@@ -94,14 +96,19 @@ func TestWatcherBackstopPurgesDeleted(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		var n int
-		d.QueryRow(`SELECT count(*) FROM sessions WHERE uuid='del-1'`).Scan(&n)
-		if n == 0 {
+		var marked int
+		d.QueryRow(`SELECT count(*) FROM ingest_state WHERE source_file=? AND source_missing_at IS NOT NULL`, path).Scan(&marked)
+		if marked == 1 {
+			var n int
+			d.QueryRow(`SELECT count(*) FROM sessions WHERE uuid='del-1'`).Scan(&n)
+			if n != 1 {
+				t.Fatalf("backstop deleted the retained session (n=%d)", n)
+			}
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatal("deleted source not purged by backstop")
+	t.Fatal("deleted source not marked missing by backstop")
 }
 
 func TestWatcherPicksUpNewProjectDir(t *testing.T) {

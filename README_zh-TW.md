@@ -91,6 +91,10 @@ clio doctor                     # 健康檢查
 
 短查詢（1-2 個字，例如大多數中文詞）會自動 fallback 到子字串掃描，因為 trigram 索引需要 3 個字以上才能匹配。
 
+### Claude Code 刪掉舊逐字稿時
+
+Claude Code 會把超過 `cleanupPeriodDays`（預設 **30** 天）的 session 逐字稿從 `~/.claude/projects/` 刪掉。從本版起，逐字稿被刪後 clio 仍保留該 session 已索引的副本，所以搜尋、`ask`、`show` 與用量在較舊的歷史上照常可用。若也想保留原始逐字稿，請在 `~/.claude/settings.json` 調高 `cleanupPeriodDays`（例如 `"cleanupPeriodDays": 365`）。`clio doctor` 會顯示以這種方式保留的 session 數；`clio index --purge-missing` 會把它們從索引刪除（`clio mcp` 持有索引鎖時會拒絕；24 小時內（含）大量消失時也會拒絕（相隔超過 24 小時的批次分開計算），那通常是目錄沒掛載而不是真的刪除，可加 `--force` 覆寫）。
+
 ## MCP tools
 
 透過 `clio install-mcp` 註冊後，Claude Code 可呼叫：

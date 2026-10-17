@@ -94,6 +94,10 @@ Want Claude to carry context between sessions automatically? Opt in with `clio i
 
 Short queries (1-2 characters, e.g. most CJK words) automatically fall back to a substring scan, since the trigram index needs 3+ characters.
 
+### When Claude Code deletes old transcripts
+
+Claude Code deletes session transcripts older than `cleanupPeriodDays` (default **30** days) from `~/.claude/projects/`. Starting with this release clio keeps the indexed copy of a session after its transcript is deleted, so search, `ask`, `show` and usage keep working on older history. To keep the original transcripts as well, raise `cleanupPeriodDays` in `~/.claude/settings.json` (e.g. `"cleanupPeriodDays": 365`). `clio doctor` reports how many sessions are retained this way; `clio index --purge-missing` deletes them from the index (it refuses while `clio mcp` holds the index lock, and refuses when many tracked files went missing within 24 hours of each other (batches more than 24 hours apart count separately), which usually means an unmounted directory rather than deletions — add `--force` to delete anyway).
+
 ## MCP tools
 
 When registered via `clio install-mcp`, Claude Code can call:

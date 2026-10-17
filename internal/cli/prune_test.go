@@ -769,3 +769,31 @@ func TestPruneCommandLevelSkipReasons(t *testing.T) {
 		}
 	})
 }
+
+// A session retained after Claude Code deleted its transcript has no source to
+// re-derive raw_json from, so prune-raw must never blank it.
+func TestPruneRawSkipsRetainedSession(t *testing.T) {
+	database, path := pruneSandbox(t, "sess-old", 30)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	projects := filepath.Dir(filepath.Dir(path))
+	if err := ingest.New(database, nil).PurgeMissing(context.Background(), projects); err != nil {
+		t.Fatal(err)
+	}
+	var marked int
+	database.QueryRow(`SELECT count(*) FROM ingest_state WHERE source_file=? AND source_missing_at IS NOT NULL`, path).Scan(&marked)
+	if marked != 1 {
+		t.Fatalf("setup: session not retained/marked (%d)", marked)
+	}
+	database.Close()
+	out := runPruneCmd(t, "--older-than", "14d", "--source", "all")
+	if !strings.Contains(out, "missing 1") {
+		t.Fatalf("retained session should be skipped as 'missing':\n%s", out)
+	}
+	d := reopen(t)
+	defer d.Close()
+	if raw := rawJSONOf(t, d, "sess-old"); len(raw) == 0 || raw[0] == "" {
+		t.Fatal("retained session's raw_json was pruned")
+	}
+}

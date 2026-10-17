@@ -9,6 +9,7 @@ import (
 
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/sessions"
+	"github.com/linhn0617/clio/internal/termsafe"
 )
 
 // detailDebounce delays a selection-driven detail load (Search/Browse preview,
@@ -111,14 +112,14 @@ func renderPreview(msgs []sessions.Message, loadErr error, markSeq int) string {
 			marker = previewMatchMarker
 		}
 		b.WriteString(marker + m.Role + "\n")
-		b.WriteString(m.Content + "\n\n")
+		b.WriteString(termsafe.Strip(m.Content) + "\n\n")
 	}
 	return b.String()
 }
 
 // oneLine collapses text onto a single line for list rows.
 func oneLine(s string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(s, "\r", " "), "\n", " ")
+	return strings.ReplaceAll(strings.ReplaceAll(termsafe.Strip(s), "\r", " "), "\n", " ")
 }
 
 // shortID abbreviates a session UUID for list rows.

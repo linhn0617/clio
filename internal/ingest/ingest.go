@@ -12,6 +12,9 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/linhn0617/clio/internal/db"
@@ -655,13 +658,14 @@ func (ing *Ingester) upsertIngestState(tx *sql.Tx, fs FileState, monotonic bool)
 	}
 	// aborted=0: reaching upsertIngestState means this pass committed successfully
 	// (called only from commit()); a full ingest clears any prior aborted flag.
+	// source_missing_at=NULL: commit() just re-stat'd the file, so it exists.
 	q := `INSERT INTO ingest_state(source_file, last_size, last_mtime, last_byte_offset, tail_fingerprint, head_fingerprint, last_ingested_at, unparsed_lines, usage_skipped, usage_unmapped, usage_stale, aborted)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,0)
 		ON CONFLICT(source_file) DO UPDATE SET last_size=excluded.last_size, last_mtime=excluded.last_mtime,
 		last_byte_offset=excluded.last_byte_offset, tail_fingerprint=excluded.tail_fingerprint,
 		head_fingerprint=excluded.head_fingerprint, last_ingested_at=excluded.last_ingested_at,
 		usage_skipped=` + skippedExpr + `, usage_unmapped=` + unmappedExpr + `, usage_stale=` + staleExpr + `,
-		aborted=0,
+		aborted=0, source_missing_at=NULL,
 		unparsed_lines=` + unparsedExpr
 	if monotonic {
 		q += ` WHERE excluded.last_byte_offset >= ingest_state.last_byte_offset`
@@ -704,15 +708,46 @@ func (ing *Ingester) upsertSession(tx *sql.Tx, s model.Session, userTurns int, k
 	return err
 }
 
-// PurgeMissing reconciles the DB against the filesystem and removes rows for source
-// files confirmed gone (a not-exist stat result). It is the authoritative deletion path
-// (fsnotify Remove/Rename events fire during atomic temp->rename writes, so a raw event
-// is not trustworthy). It is partitioned per source root: a root that is missing or
-// unreadable is in "preservation mode" — its rows are kept and it never authorizes
-// purging another root's rows, so a temporarily-absent root (e.g. Codex not mounted)
-// cannot wipe its index. A second guard refuses to purge when the missing set is both a
-// large count and most of the candidate corpus (a filesystem problem, not deletions).
+// ErrPurgeRefused means DeleteMissing found a large set of sources that went missing
+// together and deleted nothing: that pattern is a filesystem problem (an unmounted or
+// restored directory), not real deletions. ForceDeleteMissing skips the check.
+var ErrPurgeRefused = errors.New("purge refused")
+
+// PurgeMissing reconciles the DB against the filesystem without deleting history:
+// a tracked source file confirmed gone (a not-exist stat result) gets
+// ingest_state.source_missing_at set, and a marked file that exists again is
+// unmarked. Claude Code deletes transcripts after cleanupPeriodDays (default 30), and
+// clio's purpose is history that outlives that, so deletion is the explicit
+// DeleteMissing (`clio index --purge-missing`). This stays the authoritative
+// reconciliation path (fsnotify Remove/Rename events fire during atomic temp->rename
+// writes, so a raw event is not trustworthy). It is partitioned per source root: a
+// root that is missing or unreadable is in "preservation mode" — its rows are neither
+// marked nor purged, and it never authorizes touching another root's rows.
+//
+// Marking is not subject to DeleteMissing's mass-disappearance cap: a mark is
+// reversible (the next pass clears it when the file is back) and deletes nothing, while
+// skipping it would leave a genuine bulk cleanup — e.g. Claude Code's first start after
+// a long break — reported by doctor as unexplained "missing" files.
 func (ing *Ingester) PurgeMissing(ctx context.Context, projectsDir string) error {
+	_, err := ing.reconcileMissing(ctx, projectsDir, false, false)
+	return err
+}
+
+// DeleteMissing runs PurgeMissing's marking pass, then deletes the rows of every
+// source still missing. It refuses (ErrPurgeRefused) when the largest cluster of
+// sources marked missing within 24h (inclusive) of each other is both a large count
+// and most of the candidate corpus. Returns the number of sources purged.
+func (ing *Ingester) DeleteMissing(ctx context.Context, projectsDir string) (int, error) {
+	return ing.reconcileMissing(ctx, projectsDir, true, false)
+}
+
+// ForceDeleteMissing is DeleteMissing without the mass-disappearance check
+// (`clio index --purge-missing --force`).
+func (ing *Ingester) ForceDeleteMissing(ctx context.Context, projectsDir string) (int, error) {
+	return ing.reconcileMissing(ctx, projectsDir, true, true)
+}
+
+func (ing *Ingester) reconcileMissing(ctx context.Context, projectsDir string, purge, force bool) (int, error) {
 	// Determine which source roots are currently available (ReadDir, so an unreadable
 	// root counts as unavailable too).
 	roots := append([]string{projectsDir}, ing.extraRoots()...)
@@ -728,17 +763,22 @@ func (ing *Ingester) PurgeMissing(ctx context.Context, projectsDir string) error
 		avail = append(avail, r)
 	}
 	if len(avail) == 0 {
-		return nil // no root readable — never read that as "the user deleted everything"
+		return 0, nil // no root readable — never read that as "the user deleted everything"
 	}
 
 	// A refused (conflicting) file has no ingest_state/sessions row, so it never enters
-	// the purge candidate set below; clear its source_conflicts record here if the file
-	// is gone (under an available root), so doctor stops reporting a deleted transcript.
+	// the candidate set below; clear its source_conflicts record here if the file is
+	// gone (under an available root), so doctor stops reporting a deleted transcript.
+	// It holds no history, so this is cleanup rather than a purge.
 	ing.purgeStaleConflicts(avail)
 
 	srcs, err := ing.allSourceFiles()
 	if err != nil {
-		return err
+		return 0, err
+	}
+	marked, err := ing.markedSourceFiles()
+	if err != nil {
+		return 0, err
 	}
 	// Candidates: tracked files under an available root. Files under a missing root
 	// (or attributable to no current root) are preserved.
@@ -752,35 +792,146 @@ func (ing *Ingester) PurgeMissing(ctx context.Context, projectsDir string) error
 	var missing []string
 	for _, src := range candidates {
 		if err := ctx.Err(); err != nil {
-			return err
+			return 0, err
 		}
-		if _, serr := os.Stat(src); errors.Is(serr, fs.ErrNotExist) {
+		_, serr := os.Stat(src)
+		switch {
+		case errors.Is(serr, fs.ErrNotExist):
 			missing = append(missing, src)
+		case serr == nil && marked[src]:
+			// Back on disk (restored, or a transient absence). Bytes unchanged since the
+			// last ingest are skipped by IngestFile, so only this pass can unmark them.
+			if _, err := ing.db.Exec(`UPDATE ingest_state SET source_missing_at = NULL WHERE source_file = ?`, src); err != nil {
+				ing.log.Warn("clear missing mark failed", "file", src, "err", err)
+			}
 		}
 	}
-	if len(missing) == 0 {
-		return nil
+
+	now := time.Now().Unix()
+	// One transaction for the whole batch: committed piecemeal, a pass killed midway
+	// would spread one disappearance over two mark times and could split it into two
+	// clusters that each slip under the purge cap. uuids are resolved first because
+	// the pool has a single connection, which the transaction holds.
+	uuids := make([]string, len(missing))
+	for i, src := range missing {
+		uuids[i] = ing.sessionUUIDForPurge(src)
+	}
+	var retained []string
+	tx, err := ing.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	for i, src := range missing {
+		moved, err := markMissing(tx, src, uuids[i], now)
+		if err != nil {
+			tx.Rollback()
+			return 0, fmt.Errorf("mark missing %s: %w", src, err)
+		}
+		if !moved {
+			retained = append(retained, src)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if !purge || len(missing) == 0 {
+		return 0, nil
 	}
 
-	// Safety cap: refuse a purge that is BOTH a large absolute count AND most of the
-	// candidate corpus (files under available roots) — that pattern is a filesystem
-	// problem, not real deletions. A small number of genuine deletions still purges.
+	// Safety cap: refuse when the sources that went missing together (marked within
+	// 24h of each other, inclusive) are BOTH a large absolute count AND most of the
+	// candidate corpus (files under available roots) — that pattern is a filesystem problem, not real
+	// deletions. Clustering by mark time, not counting every mark, matters because
+	// marks accumulate: Claude Code's cleanup removes transcripts in small daily
+	// batches, and their sum would otherwise eventually block every purge.
 	const minPurgeForCap = 10
-	if len(missing) > minPurgeForCap && len(missing)*2 > len(candidates) {
-		ing.log.Warn("purge refused: most sources missing at once, likely a filesystem problem",
-			"missing", len(missing), "candidates", len(candidates))
-		return nil
+	if cluster := ing.largestMissingCluster(retained, now); !force && cluster > minPurgeForCap && cluster*2 > len(candidates) {
+		ing.log.Warn("purge refused: many sources went missing together, likely a filesystem problem",
+			"cluster", cluster, "missing", len(retained), "candidates", len(candidates))
+		return 0, fmt.Errorf("%w: %d files went missing together within 24h (%d of %d tracked) — likely an unmounted or restored directory; re-run with --force to delete anyway",
+			ErrPurgeRefused, cluster, len(retained), len(candidates))
 	}
+	// debt: no "only marked for at least N days" threshold; add an --older-than flag if users want expiry-style cleanup
 
-	for _, src := range missing {
+	// Every source still missing was marked just above (or has no ingest_state row to
+	// mark, a legacy ghost that the pre-retention purge also deleted).
+	purged := 0
+	for _, src := range retained {
 		if err := ctx.Err(); err != nil {
-			return err
+			return purged, err
 		}
-		if err := ing.purgeSource(src); err != nil {
+		ok, err := ing.purgeSource(src)
+		if err != nil {
 			ing.log.Warn("purge source failed", "file", src, "err", err)
+			continue
+		}
+		if ok {
+			purged++
 		}
 	}
-	return nil
+	return purged, nil
+}
+
+// largestMissingCluster returns the size of the largest group of srcs whose
+// missing marks fall within 24h (inclusive) of the group's earliest mark. A src without an
+// ingest_state row (a legacy ghost) counts as marked now.
+func (ing *Ingester) largestMissingCluster(srcs []string, now int64) int {
+	const window = 24 * 60 * 60
+	times := make([]int64, 0, len(srcs))
+	for _, src := range srcs {
+		var at sql.NullInt64
+		if err := ing.db.QueryRow(`SELECT source_missing_at FROM ingest_state WHERE source_file = ?`, src).Scan(&at); err != nil || !at.Valid {
+			at.Int64 = now
+		}
+		times = append(times, at.Int64)
+	}
+	sort.Slice(times, func(i, j int) bool { return times[i] < times[j] })
+	best := 0
+	for i, j := 0, 0; i < len(times); i++ {
+		for j < len(times) && times[j]-times[i] <= window {
+			j++
+		}
+		if j-i > best {
+			best = j - i
+		}
+	}
+	return best
+}
+
+// markMissing records that src is gone. When the session row for src's uuid now
+// points at a different path (the file was moved/renamed and re-ingested there) the
+// history is not lost, so the stale ingest_state row is simply dropped (moved=true)
+// instead of being marked — otherwise doctor would count a live session as retained.
+func markMissing(tx *sql.Tx, src, uuid string, now int64) (moved bool, err error) {
+	var curSource sql.NullString
+	serr := tx.QueryRow(`SELECT source_file FROM sessions WHERE uuid = ?`, uuid).Scan(&curSource)
+	if serr != nil && !errors.Is(serr, sql.ErrNoRows) {
+		return false, serr
+	}
+	if serr == nil && curSource.Valid && curSource.String != "" && curSource.String != src {
+		_, err := tx.Exec(`DELETE FROM ingest_state WHERE source_file = ?`, src)
+		return true, err
+	}
+	_, err = tx.Exec(`UPDATE ingest_state SET source_missing_at = ? WHERE source_file = ? AND source_missing_at IS NULL`, now, src)
+	return false, err
+}
+
+// markedSourceFiles returns the ingest_state paths currently marked missing.
+func (ing *Ingester) markedSourceFiles() (map[string]bool, error) {
+	rows, err := ing.db.Query(`SELECT source_file FROM ingest_state WHERE source_missing_at IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out[s] = true
+	}
+	return out, rows.Err()
 }
 
 // purgeStaleConflicts drops source_conflicts rows whose file (under an available root)
@@ -871,17 +1022,83 @@ func (ing *Ingester) sessionUUIDFromDB(src string) string {
 	return uuid
 }
 
-func (ing *Ingester) purgeSource(src string) error {
+// liveDuplicateSource returns another tracked path for uuid that still exists on
+// disk, or "" if there is none. Only the file name is matched: a subagent
+// transcript sits under <parent uuid>/subagents/, so its directory names the
+// parent without being a copy of it. An error means the answer is unknown and
+// the caller must not purge.
+func (ing *Ingester) liveDuplicateSource(uuid, src string) (string, error) {
+	if uuid == "" {
+		return "", nil
+	}
+	rows, err := ing.db.Query(`SELECT source_file FROM ingest_state
+		WHERE source_file <> ? AND source_file LIKE '%' || ? || '%' ESCAPE '\'`, src, db.EscapeLike(uuid))
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var hits []string
+	for rows.Next() {
+		var other string
+		if err := rows.Scan(&other); err != nil {
+			return "", err
+		}
+		if strings.Contains(filepath.Base(other), uuid) {
+			hits = append(hits, other)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	rows.Close() // release the single connection before stat-ing
+	for _, other := range hits {
+		if _, err := os.Stat(other); err == nil {
+			return other, nil
+		}
+	}
+	return "", nil
+}
+
+// repointSession records that uuid's history now lives at live: sessions.source_file
+// follows it and src's state row is dropped.
+func (ing *Ingester) repointSession(uuid, src, live string) error {
+	tx, err := ing.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE sessions SET source_file = ? WHERE uuid = ? AND source_file = ?`, live, uuid, src); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM ingest_state WHERE source_file = ?`, src); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (ing *Ingester) purgeSource(src string) (bool, error) {
 	// Purge only when a fresh stat still confirms the file is gone. Skip on success
 	// (reappeared) AND on any non-ErrNotExist error (permission/IO) — those don't prove
 	// deletion and must never trigger a purge.
 	if _, err := os.Stat(src); !errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return false, nil
 	}
 	uuid := ing.sessionUUIDForPurge(src)
+	// sessions.source_file names only one path, but a full reindex that met a copy of
+	// the transcript elsewhere leaves another ingest_state row for the same uuid while
+	// source_file still names src. That copy still holds the history, so it is a move:
+	// repoint the session at it rather than leaving it reported as retained forever.
+	live, err := ing.liveDuplicateSource(uuid, src)
+	if err != nil {
+		return false, fmt.Errorf("duplicate source lookup: %w", err)
+	}
+	if live != "" {
+		ing.log.Info("purge: session moved to a live copy", "file", src, "live", live)
+		return false, ing.repointSession(uuid, src, live)
+	}
 	tx, err := ing.db.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 
@@ -891,32 +1108,35 @@ func (ing *Ingester) purgeSource(src string) error {
 	var curSource sql.NullString
 	serr := tx.QueryRow(`SELECT source_file FROM sessions WHERE uuid = ?`, uuid).Scan(&curSource)
 	if serr != nil && !errors.Is(serr, sql.ErrNoRows) {
-		return serr
+		return false, serr
 	}
 	owns := errors.Is(serr, sql.ErrNoRows) || !curSource.Valid || curSource.String == "" || curSource.String == src
 
 	if owns {
 		if _, err := tx.Exec(`DELETE FROM messages WHERE session_uuid = ?`, uuid); err != nil {
-			return err
+			return false, err
 		}
 		if _, err := tx.Exec(`DELETE FROM tool_calls WHERE message_id NOT IN (SELECT id FROM messages)`); err != nil {
-			return err
+			return false, err
 		}
 		if _, err := tx.Exec(`DELETE FROM tool_targets WHERE session_uuid = ?`, uuid); err != nil {
-			return err
+			return false, err
 		}
 		if _, err := tx.Exec(`DELETE FROM session_usage WHERE session_uuid = ?`, uuid); err != nil {
-			return err
+			return false, err
 		}
 		if _, err := tx.Exec(`DELETE FROM sessions WHERE uuid = ?`, uuid); err != nil {
-			return err
+			return false, err
 		}
 	}
 	// Always drop the stale ingest_state row for this exact source path.
 	if _, err := tx.Exec(`DELETE FROM ingest_state WHERE source_file = ?`, src); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (ing *Ingester) loadState(path string) (*FileState, error) {

@@ -112,3 +112,15 @@ func TestWriteAnswerOmitsSourceTagWhenNotAll(t *testing.T) {
 		t.Fatalf("source tag should be omitted for a single-source query: %q", buf.String())
 	}
 }
+
+func TestWriteAnswerStripsTerminalEscapes(t *testing.T) {
+	ans := ask.Answer{Question: "q", Groups: []ask.EvidenceGroup{{
+		SessionUUID: "abcdef123", Title: "t\x1b]0;pwn\x07itle", Project: "/p/pr\x1b[2Joj", Source: "codex",
+		Excerpts: []ask.Excerpt{{Role: "user", Text: "x\x1b]52;c;QQ==\x07y\x1b[2J", IsHit: true}},
+	}}}
+	var buf bytes.Buffer
+	writeAnswer(&buf, ans, "all")
+	if out := buf.String(); strings.ContainsRune(out, 0x1b) || strings.ContainsRune(out, 0x07) {
+		t.Fatalf("answer carries a control byte: %q", out)
+	}
+}

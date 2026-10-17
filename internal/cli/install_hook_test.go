@@ -5,7 +5,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/linhn0617/clio/internal/claudeconfig"
 )
 
 // setupInstallHookHome points $HOME at a fresh temp dir, pre-creates
@@ -362,6 +365,33 @@ func TestInstallHookUpgradesRecallOnlyConfig(t *testing.T) {
 	if got := preToolUseCommands(t, root); len(got) != 1 {
 		t.Fatalf("PreToolUse hook should be added once, got %v", got)
 	}
+	// The pre-matcher recall entry is upgraded in place.
+	g := root["hooks"].(map[string]any)["SessionStart"].([]any)[0].(map[string]any)
+	h := g["hooks"].([]any)[0].(map[string]any)
+	if g["matcher"] != "startup|resume|clear|compact" || h["timeout"] != float64(10) {
+		t.Fatalf("legacy recall entry not upgraded: %v", g)
+	}
+}
+
+// Re-running install-hook over a pre-matcher recall entry says it upgraded it.
+func TestInstallHookReportsRecallUpgrade(t *testing.T) {
+	settingsPath := setupInstallHookHome(t)
+	stubClioExecutable(t)
+	orig := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/fake/bin/clio recall"}]}]}}`
+	if err := os.WriteFile(settingsPath, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	cmd := newInstallHookCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--no-file-context"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Upgraded the recall SessionStart hook") || strings.Contains(out.String(), "nothing to add") {
+		t.Fatalf("install-hook output should report the upgrade:\n%s", out.String())
+	}
 }
 
 // install-hook never touches ~/.claude.json's MCP registration.
@@ -429,5 +459,88 @@ func TestUninstallHookRemovesBothHooks(t *testing.T) {
 	}
 	if got := hookCommands(t, root); len(got) != 0 {
 		t.Fatalf("SessionStart clio entry should be gone, got %v", got)
+	}
+}
+
+func TestInstallHookQuotesExecutablePathWithSpaces(t *testing.T) {
+	settings := setupInstallHookHome(t)
+	orig := osExecutable
+	osExecutable = func() (string, error) { return "/Users/me/My Tools/clio", nil }
+	t.Cleanup(func() { osExecutable = orig })
+
+	for i := 0; i < 2; i++ { // second run must recognise the quoted entries
+		if err := runInstallHook(t); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmds := hookCommands(t, readSettingsJSON(t, settings))
+	if len(cmds) != 1 || cmds[0] != `'/Users/me/My Tools/clio' recall` {
+		t.Fatalf("SessionStart commands = %q", cmds)
+	}
+	if has, _ := claudeconfig.HasPreToolUseReadHook(settings); !has {
+		t.Fatal("file-history hook not registered")
+	}
+
+	cmd := newUninstallHookCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if hasR, hasF, _ := claudeconfig.HasAnyClioHookEntries(settings); hasR || hasF {
+		t.Fatalf("uninstall left hooks behind (recall=%v file=%v)", hasR, hasF)
+	}
+}
+
+// An older install wrote a space-containing binary path unquoted: re-running
+// install-hook repairs that entry to the quoted current path (one entry, not two),
+// and uninstall-hook removes it.
+func TestInstallHookRepairsUnquotedSpacePath(t *testing.T) {
+	settingsPath := setupInstallHookHome(t)
+	orig := osExecutable
+	osExecutable = func() (string, error) { return "/Users/me/My Tools/clio", nil }
+	t.Cleanup(func() { osExecutable = orig })
+	broken := `{"hooks":{"SessionStart":[{"matcher":"startup|resume|clear|compact","hooks":[{"type":"command","command":"/Users/me/My Tools/clio recall","timeout":10}]}]}}`
+	if err := os.WriteFile(settingsPath, []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runInstallHook(t); err != nil {
+		t.Fatal(err)
+	}
+	got := hookCommands(t, readSettingsJSON(t, settingsPath))
+	if len(got) != 1 || got[0] != `'/Users/me/My Tools/clio' recall` {
+		t.Fatalf("SessionStart commands = %q, want one quoted entry", got)
+	}
+	cmd := newUninstallHookCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got := hookCommands(t, readSettingsJSON(t, settingsPath)); len(got) != 0 {
+		t.Fatalf("uninstall left %q", got)
+	}
+}
+
+// Repairing a broken unquoted entry is reported as an upgrade, not "nothing to add".
+func TestInstallHookReportsUnquotedRepair(t *testing.T) {
+	settingsPath := setupInstallHookHome(t)
+	orig := osExecutable
+	osExecutable = func() (string, error) { return "/Users/me/My Tools/clio", nil }
+	t.Cleanup(func() { osExecutable = orig })
+	broken := `{"hooks":{"SessionStart":[{"matcher":"startup|resume|clear|compact","hooks":[{"type":"command","command":"/Users/me/My Tools/clio recall","timeout":10}]}]}}`
+	if err := os.WriteFile(settingsPath, []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	cmd := newInstallHookCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--no-file-context"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Upgraded") || strings.Contains(out.String(), "nothing to add") {
+		t.Fatalf("install-hook output should report the repair:\n%s", out.String())
 	}
 }

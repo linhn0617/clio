@@ -93,7 +93,7 @@ func newListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&since, "since", "", "Only sessions since this time (e.g. 7d)")
-	cmd.Flags().StringVar(&project, "project", "", "Filter by project path prefix")
+	cmd.Flags().StringVar(&project, "project", "", "Filter by project path (matches it and anything beneath)")
 	cmd.Flags().IntVar(&minTurns, "min-turns", 0, "Only sessions with at least this many turns")
 	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum number of sessions")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Output JSON")

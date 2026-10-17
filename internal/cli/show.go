@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/linhn0617/clio/internal/sessions"
+	"github.com/linhn0617/clio/internal/termsafe"
 )
 
 const defaultShowMessages = 100000
@@ -115,27 +116,15 @@ func newShowCmd() *cobra.Command {
 				}
 				return nil
 			case "markdown", "":
-				fmt.Fprintf(os.Stdout, "# %s\n\n_%s · %s · %d turns_\n\n",
-					orPlaceholder(sess.Title, "(untitled session)"), sess.ProjectPath, formatTS(sess.StartedAt), sess.TurnCount)
-				if note := subagentNote(sess); note != "" {
-					fmt.Fprintf(os.Stdout, "_%s_\n\n", note)
-				}
-				for _, m := range msgs {
-					fmt.Fprintf(os.Stdout, "## %s\n\n%s\n\n", m.Role, m.Content)
-				}
-				if sec := formatSubagentsSection(children); sec != "" {
-					fmt.Fprintf(os.Stdout, "%s\n", sec)
-				}
+				writeShowMarkdown(os.Stdout, sess, msgs, children)
 				if includeSubagents {
 					for _, c := range children {
 						cmsgs, _, err := sessions.GetMessages(cmd.Context(), database, c.UUID, 0, limit, !noToolOutput, true)
 						if err != nil {
 							return err
 						}
-						fmt.Fprintf(os.Stdout, "---\n\n# ↳ subagent %s (%s)\n\n", shortID(c.UUID), orPlaceholder(c.AgentType, "subagent"))
-						for _, m := range cmsgs {
-							fmt.Fprintf(os.Stdout, "## %s\n\n%s\n\n", m.Role, m.Content)
-						}
+						fmt.Fprintf(os.Stdout, "---\n\n# ↳ subagent %s (%s)\n\n", shortID(c.UUID), termsafe.Strip(orPlaceholder(c.AgentType, "subagent")))
+						writeMarkdownMessages(os.Stdout, cmsgs)
 					}
 				}
 				return nil
@@ -151,6 +140,25 @@ func newShowCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&includeSubagents, "include-subagents", false, "Inline the transcripts of this session's subagents")
 	addSourceFlag(cmd, &source)
 	return cmd
+}
+
+// writeShowMarkdown renders the human-readable `show` view of one session.
+func writeShowMarkdown(w io.Writer, sess sessions.Session, msgs []sessions.Message, children []sessions.Session) {
+	fmt.Fprintf(w, "# %s\n\n_%s · %s · %d turns_\n\n",
+		termsafe.Strip(orPlaceholder(sess.Title, "(untitled session)")), termsafe.Strip(sess.ProjectPath), formatTS(sess.StartedAt), sess.TurnCount)
+	if note := subagentNote(sess); note != "" {
+		fmt.Fprintf(w, "_%s_\n\n", note)
+	}
+	writeMarkdownMessages(w, msgs)
+	if sec := formatSubagentsSection(children); sec != "" {
+		fmt.Fprintf(w, "%s\n", sec)
+	}
+}
+
+func writeMarkdownMessages(w io.Writer, msgs []sessions.Message) {
+	for _, m := range msgs {
+		fmt.Fprintf(w, "## %s\n\n%s\n\n", termsafe.Strip(m.Role), termsafe.Strip(m.Content))
+	}
 }
 
 // writeRaw prints each message's raw_json, collapsing only runs of consecutive

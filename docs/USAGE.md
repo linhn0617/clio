@@ -162,7 +162,7 @@ clio ask "big feature investigation" --max-tokens 500 --json
 | Flag | English | 中文 | Default |
 |------|---------|------|---------|
 | `--since` | Only sessions since this time | 只看這時間之後的 session | — |
-| `--project` | Filter by project path prefix | 依專案路徑前綴過濾 | — |
+| `--project` | Filter by project path (the path itself and anything beneath it) | 依專案路徑過濾（該路徑及其底下） | — |
 | `--min-turns` | Only sessions with at least this many turns | 至少這麼多 turn 的 session | `0` |
 | `--limit` | Maximum number of sessions | session 上限 | `50` |
 | `--include-subagents` | Also list subagent child sessions (hidden by default; see [Subagents](#subagents--子代理)) | 連子代理子 session 一起列（預設隱藏；見 [子代理](#subagents--子代理)） | `false` |
@@ -272,7 +272,7 @@ Summarize indexed activity. `clio search` and `clio list` also accept
 |------|---------|------|---------|
 | `--by` | Group by `file`\|`command`\|`tool`\|`pattern`\|`url` | 依類別分組 | `file` |
 | `--since` | Period start | 期間起點 | — |
-| `--project` | Filter by project path prefix | 依專案前綴過濾 | — |
+| `--project` | Filter by project path (the path itself and anything beneath it) | 依專案路徑過濾（該路徑及其底下） | — |
 
 ```bash
 clio activity --by file --since 7d        # files touched most / 最常動的檔
@@ -368,6 +368,8 @@ instead of blank lines; `--format markdown` is unaffected.
 | Flag | English | 中文 |
 |------|---------|------|
 | `--full` | Force a full re-index instead of incremental | 強制從頭重建（而非增量） |
+| `--purge-missing` | Delete indexed sessions whose transcript no longer exists (kept by default); refused when many went missing within 24h (inclusive) of each other | 刪除逐字稿已不存在的已索引 session（預設保留）；24 小時內（含）大量消失時會拒絕 |
+| `--force` | With `--purge-missing`: delete even then | 搭配 `--purge-missing`：仍照樣刪除 |
 
 ```bash
 clio index            # incremental / 增量
