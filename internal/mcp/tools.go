@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -28,6 +29,13 @@ const (
 	defaultMaxTokens = 2000
 	minMaxTokens     = 200
 	maxMaxTokens     = 8000
+
+	// Response budget: Claude Code spills tool output over 50,000 characters
+	// to a file and hands the model only the path, costing a second read. The
+	// default stays under that threshold; max_chars may move it within bounds.
+	defaultMaxChars = 40000
+	minMaxChars     = 4000
+	maxMaxChars     = 48000
 )
 
 // parseSince is the MCP-side wrapper: same parsing as the CLI, but a bad value
@@ -100,7 +108,16 @@ func handleSearch(database *db.DB, beforeRead func()) func(context.Context, mcp.
 		for _, r := range res {
 			out = append(out, hit{r.SessionUUID, r.ParentSession, r.AgentType, r.Source, r.ProjectPath, r.Role, tsString(r.TS), r.Snippet})
 		}
-		return mcp.NewToolResultJSON(map[string]any{"results": out, "count": len(out)})
+		maxChars := maxCharsOf(req)
+		resp, _, _ := fitBudget(len(out), maxChars, func(k int) map[string]any {
+			m := map[string]any{"results": out[:k], "count": k}
+			if k < len(out) {
+				m["truncated"] = true
+				m["next"] = fmt.Sprintf("showing %d of %d results to fit max_chars=%d; narrow with since/project/role or a smaller limit, or raise max_chars (max %d)", k, len(out), maxChars, maxMaxChars)
+			}
+			return m
+		})
+		return mcp.NewToolResultJSON(resp)
 	}
 }
 
@@ -139,7 +156,16 @@ func handleListSessions(database *db.DB, beforeRead func()) func(context.Context
 		for _, s := range rows {
 			out = append(out, srow{s.UUID, s.ParentSession, s.AgentType, s.SubagentCount, s.Source, s.ProjectPath, s.Title, tsString(s.StartedAt), tsString(s.EndedAt), s.TurnCount})
 		}
-		return mcp.NewToolResultJSON(map[string]any{"sessions": out, "count": len(out)})
+		maxChars := maxCharsOf(req)
+		resp, _, _ := fitBudget(len(out), maxChars, func(k int) map[string]any {
+			m := map[string]any{"sessions": out[:k], "count": k}
+			if k < len(out) {
+				m["truncated"] = true
+				m["next"] = fmt.Sprintf("showing %d of %d sessions to fit max_chars=%d; narrow with since/project/min_turns or a smaller limit, or raise max_chars (max %d)", k, len(out), maxChars, maxMaxChars)
+			}
+			return m
+		})
+		return mcp.NewToolResultJSON(resp)
 	}
 }
 
@@ -153,6 +179,7 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 			since = time.Now().Add(-7 * 24 * time.Hour).Unix()
 		}
 		groupBy := req.GetString("group_by", "day")
+		maxChars := maxCharsOf(req)
 		source := req.GetString("source", registry.DefaultSource())
 		switch groupBy {
 		case "day", "project":
@@ -160,10 +187,15 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
-			return mcp.NewToolResultJSON(map[string]any{
-				"since":   tsString(since),
-				"buckets": buckets,
+			resp, _, _ := fitBudget(len(buckets), maxChars, func(k int) map[string]any {
+				m := map[string]any{"since": tsString(since), "buckets": buckets[:k]}
+				if k < len(buckets) {
+					m["truncated"] = true
+					m["next"] = fmt.Sprintf("showing %d of %d buckets to fit max_chars=%d; use a shorter since or a project filter, or raise max_chars (max %d)", k, len(buckets), maxChars, maxMaxChars)
+				}
+				return m
 			})
+			return mcp.NewToolResultJSON(resp)
 		case "file", "command", "tool", "pattern", "url":
 			counts, err := sessions.ActivityByKind(ctx, database, groupBy, since,
 				req.GetString("project", ""), source, clamp(req.GetInt("limit", 30), 30, maxSearchLimit))
@@ -178,11 +210,15 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 			for _, c := range counts {
 				out = append(out, ac{c.Value, c.Count})
 			}
-			return mcp.NewToolResultJSON(map[string]any{
-				"since":    tsString(since),
-				"group_by": groupBy,
-				"activity": out,
+			resp, _, _ := fitBudget(len(out), maxChars, func(k int) map[string]any {
+				m := map[string]any{"since": tsString(since), "group_by": groupBy, "activity": out[:k]}
+				if k < len(out) {
+					m["truncated"] = true
+					m["next"] = fmt.Sprintf("showing %d of %d rows to fit max_chars=%d; use a smaller limit or a project filter, or raise max_chars (max %d)", k, len(out), maxChars, maxMaxChars)
+				}
+				return m
 			})
+			return mcp.NewToolResultJSON(resp)
 		case "usage":
 			// Session-level token aggregates with source attribution and
 			// jump-through ids for read_session. Per-source subtotals only —
@@ -197,13 +233,21 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
-			return mcp.NewToolResultJSON(map[string]any{
-				"since":    tsString(since),
-				"group_by": "usage",
-				"note":     "token counts are per source and not comparable across sources; stale=true means the last usage scan failed and values are last-known, not current",
-				"totals":   totals,
-				"sessions": rows,
+			resp, _, _ := fitBudget(len(rows), maxChars, func(k int) map[string]any {
+				m := map[string]any{
+					"since":    tsString(since),
+					"group_by": "usage",
+					"note":     "token counts are per source and not comparable across sources; stale=true means the last usage scan failed and values are last-known, not current",
+					"totals":   totals,
+					"sessions": rows[:k],
+				}
+				if k < len(rows) {
+					m["truncated"] = true
+					m["next"] = fmt.Sprintf("showing %d of %d sessions to fit max_chars=%d; use a smaller limit or a project filter, or raise max_chars (max %d)", k, len(rows), maxChars, maxMaxChars)
+				}
+				return m
 			})
+			return mcp.NewToolResultJSON(resp)
 		default:
 			return mcp.NewToolResultError(`group_by must be one of "day", "project", "file", "command", "tool", "pattern", "url", "usage"`), nil
 		}
@@ -223,9 +267,48 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		offset := req.GetInt("offset", 0)
 		limit := clamp(req.GetInt("limit", defaultReadLimit), defaultReadLimit, maxReadLimit)
-		msgs, hasMore, err := sessions.GetMessages(ctx, database, sess.UUID, offset, limit, req.GetBool("include_tool_output", false), false)
+		inclTool := req.GetBool("include_tool_output", false)
+
+		// Three mutually exclusive ways to pick the page. offset=0 counts as
+		// unset because the tool schema advertises 0 as its default and
+		// clients may echo defaults back; around_sequence=0 is a real value,
+		// so that one is detected by presence.
+		offset := req.GetInt("offset", 0)
+		lastN := req.GetInt("last_n", 0)
+		aroundArg, hasAround := req.GetArguments()["around_sequence"]
+		hasAround = hasAround && aroundArg != nil
+		modes := 0
+		for _, set := range []bool{offset != 0, lastN != 0, hasAround} {
+			if set {
+				modes++
+			}
+		}
+		if modes > 1 {
+			return mcp.NewToolResultError("offset, last_n and around_sequence are mutually exclusive: pass at most one"), nil
+		}
+		if offset < 0 || lastN < 0 {
+			return mcp.NewToolResultError("offset and last_n must not be negative"), nil
+		}
+		total, err := sessions.CountMessages(ctx, database, sess.UUID, inclTool, nil)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		switch {
+		case lastN > 0:
+			// The page is the tail, so its size is last_n (capped like limit)
+			// and the start offset is derived from the total.
+			limit = min(lastN, maxReadLimit)
+			offset = max(0, total-limit)
+		case hasAround:
+			seq := req.GetInt("around_sequence", 0)
+			before, err := sessions.CountMessages(ctx, database, sess.UUID, inclTool, &seq)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			offset = max(0, before-limit/2)
+		}
+		msgs, hasMore, err := sessions.GetMessages(ctx, database, sess.UUID, offset, limit, inclTool, false)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -270,17 +353,50 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 			}
 			subs = append(subs, row)
 		}
-		return mcp.NewToolResultJSON(map[string]any{
-			"session": map[string]any{
-				"uuid": sess.UUID, "project": sess.ProjectPath, "title": sess.Title,
-				"started_at": tsString(sess.StartedAt), "turn_count": sess.TurnCount,
-				"parent_session": sess.ParentSession, "agent_type": sess.AgentType,
-			},
-			"messages":  out,
-			"subagents": subs,
-			"offset":    offset,
-			"has_more":  hasMore,
-		})
+		maxChars := maxCharsOf(req)
+		sessionInfo := map[string]any{
+			"uuid": sess.UUID, "project": sess.ProjectPath, "title": sess.Title,
+			"started_at": tsString(sess.StartedAt), "turn_count": sess.TurnCount,
+			"parent_session": sess.ParentSession, "agent_type": sess.AgentType,
+		}
+		build := func(stripSubs bool) (map[string]any, bool) {
+			subsOut := subs
+			if stripSubs {
+				// Last resort when even one parent message plus the inlined
+				// subagent transcripts overflow: keep the subagent list but
+				// drop their messages (each is still readable by its uuid).
+				subsOut = make([]sub, len(subs))
+				for i, c := range subs {
+					if len(c.Messages) > 0 {
+						c.Messages, c.HasMore = nil, true
+					}
+					subsOut[i] = c
+				}
+			}
+			resp, _, oversized := fitBudget(len(out), maxChars, func(k int) map[string]any {
+				m := map[string]any{
+					"session":   sessionInfo,
+					"messages":  out[:k],
+					"subagents": subsOut,
+					"offset":    offset,
+					"total":     total,
+					"has_more":  hasMore,
+				}
+				if k < len(out) {
+					m["has_more"] = true
+					m["truncated"] = true
+					m["next_offset"] = offset + k
+					m["next"] = fmt.Sprintf("showing %d of %d requested messages to fit max_chars=%d; continue with offset=%d, use a smaller limit, or raise max_chars (max %d)", k, len(out), maxChars, offset+k, maxMaxChars)
+				}
+				return m
+			})
+			return resp, oversized
+		}
+		resp, oversized := build(false)
+		if oversized && inclSub {
+			resp, _ = build(true)
+		}
+		return mcp.NewToolResultJSON(resp)
 	}
 }
 
@@ -327,11 +443,38 @@ func handleAsk(database *db.DB, beforeRead func()) func(context.Context, mcp.Cal
 			}
 			groups = append(groups, group{g.SessionUUID, g.Title, g.Project, tsString(g.EndedAt), g.Source, ex})
 		}
-		return mcp.NewToolResultJSON(map[string]any{
-			"question": ans.Question,
-			"groups":   groups,
-			"count":    len(groups),
+		// The budget unit is one excerpt, so a single huge session group can
+		// shrink without dropping the whole group; groups left with no
+		// excerpt disappear. Groups keep their relevance order.
+		totalEx := 0
+		for _, g := range groups {
+			totalEx += len(g.Excerpts)
+		}
+		maxChars := maxCharsOf(req)
+		resp, _, _ := fitBudget(totalEx, maxChars, func(k int) map[string]any {
+			if k >= totalEx {
+				return map[string]any{"question": ans.Question, "groups": groups, "count": len(groups)}
+			}
+			kept := make([]group, 0, len(groups))
+			left := k
+			for _, g := range groups {
+				if left == 0 {
+					break
+				}
+				n := min(left, len(g.Excerpts))
+				g.Excerpts = g.Excerpts[:n]
+				left -= n
+				kept = append(kept, g)
+			}
+			return map[string]any{
+				"question":  ans.Question,
+				"groups":    kept,
+				"count":     len(kept),
+				"truncated": true,
+				"next":      fmt.Sprintf("included %d of %d sessions (%d of %d excerpts) to fit max_chars=%d; narrow with since/project, lower max_tokens or limit, or raise max_chars (max %d)", len(kept), len(groups), k, totalEx, maxChars, maxMaxChars),
+			}
 		})
+		return mcp.NewToolResultJSON(resp)
 	}
 }
 
