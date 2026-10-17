@@ -32,7 +32,7 @@ Each source's usage aggregate SHALL be a deterministic function of complete stat
 recomputed by a dedicated usage pass over the session's **original source file** (not the
 filtered messages table), deduplicated by outer message uuid with the later line in the file
 winning; Codex: the latest observed cumulative `total_token_usage` of the session's single
-rollout file; Gemini: recomputed during whole-file replay. Aggregate writes SHALL be limited to
+rollout file. Aggregate writes SHALL be limited to
 replace, delete (when complete state yields no usage), and no-op (Codex tail without token
 events); no delta accumulation is stored for aggregates (per-file diagnostic counters follow
 their pass-scope semantics: whole-file passes replace, Codex incremental accumulates). A
@@ -73,7 +73,7 @@ of stale sessions it contains; stale sessions are included in (not excluded from
 
 ### Requirement: total_tokens is reproducibly defined per source
 The `total_tokens` column SHALL store the source's native total when one exists (Codex
-`total_token_usage.total_tokens`, Gemini `tokens.total`) and otherwise the fixed derived sum
+`total_token_usage.total_tokens`) and otherwise the fixed derived sum
 input + output + cache_read + cache_creation (Claude). Categories present only in
 `categories_json` SHALL NOT contribute to `total_tokens`. All ranking surfaces SHALL order by
 this column.
@@ -83,7 +83,7 @@ this column.
 - **THEN** `total_tokens` equals input + output + cache_read + cache_creation both times
 
 #### Scenario: Native totals win
-- **WHEN** a Codex or Gemini record carries a native total
+- **WHEN** a Codex record carries a native total
 - **THEN** `total_tokens` stores the native value, not a re-derived sum
 
 ### Requirement: No persisted or displayed monetary cost

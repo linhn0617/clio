@@ -13,11 +13,11 @@ its most recent activity (`COALESCE(ended_at, started_at, 0)`) is strictly older
 than the cutoff; its `source_file` is a regular, readable file; it lies under any
 currently-scanned source root; and its `ingest_state` row is a completed current ingest
 (`last_size==fi.Size()`, `last_mtime==fi.ModTime()`, `last_byte_offset==last_size`,
-AND `aborted==0` — offset alone is insufficient because an aborted pass preserves
-a prior offset on conflict; migration 0012's `aborted` flag (existing rows
-initialized 1, fail-closed) makes successful completion independently
-observable, so a session is prunable only after a successful full reindex
-validates it). The UPDATE SHALL carry a
+AND `aborted==0` — migration 0012's `aborted` flag (existing rows initialized 1,
+fail-closed) makes successful completion independently observable, so a
+session is prunable only after a successful full reindex validates it; no
+current source produces an aborted pass at runtime, the flag remains as the
+fail-closed default for pre-0012 rows). The UPDATE SHALL carry a
 `raw_json <> ''` guard (idempotent reruns; counts = newly-pruned rows).
 `content`/FTS postings, `session_usage`, quota snapshots, and `tool_targets`
 SHALL be byte-identical after pruning.
@@ -78,14 +78,14 @@ count, and skipped-by-reason counts, and SHALL NOT modify the database.
 ### Requirement: pruned raw_json is restorable and restore failure is visible
 Pruning SHALL be reversible for every eligible (restorable) session: a
 subsequent `clio index --full` re-derives and re-stores `raw_json` from the
-source file (Claude re-parse, Codex rollout, Gemini whole-file replay). Because
+source file (Claude re-parse, Codex rollout). Because
 full reindex logs per-file failures and continues, `clio index --full` SHALL,
 after a full run, report and exit non-zero if any session still has pruned
 `raw_json`, so an unrestored prune is never silent. The prune command SHALL
 print the restore path on completion.
 
-#### Scenario: Full reindex restores pruned raw_json for all three sources
-- **WHEN** Claude, Codex, and Gemini sessions are each pruned and then `clio
+#### Scenario: Full reindex restores pruned raw_json for both sources
+- **WHEN** Claude and Codex sessions are each pruned and then `clio
   index --full` runs with their source files present
 - **THEN** each session's `raw_json` is repopulated
 
