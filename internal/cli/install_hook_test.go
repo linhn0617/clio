@@ -419,6 +419,29 @@ func TestInstallHookReportsFileHistoryMatcherUpgrade(t *testing.T) {
 	}
 }
 
+// A Read|Bash entry already exists and a shared Read group holds a leftover clio
+// entry: the leftover is dropped, and nothing is reported as upgraded.
+func TestInstallHookNoUpgradeMessageWhenNothingRetargeted(t *testing.T) {
+	settingsPath := setupInstallHookHome(t)
+	stubClioExecutable(t)
+	orig := `{"hooks":{"SessionStart":[{"matcher":"startup|resume|clear|compact","hooks":[{"type":"command","command":"/fake/bin/clio recall","timeout":10}]}],` +
+		`"PreToolUse":[{"matcher":"Read|Bash","hooks":[{"type":"command","command":"/fake/bin/clio file-history --hook","timeout":10}]},` +
+		`{"matcher":"Read","hooks":[{"type":"command","command":"/opt/gate.sh"},{"type":"command","command":"/fake/bin/clio file-history --hook"}]}]}}`
+	if err := os.WriteFile(settingsPath, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	cmd := newInstallHookCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "Upgraded the file-history") {
+		t.Fatalf("no matcher was changed, so nothing should be reported as upgraded:\n%s", out.String())
+	}
+}
+
 // install-hook never touches ~/.claude.json's MCP registration.
 func TestInstallHookLeavesClaudeJSONUntouched(t *testing.T) {
 	settingsPath := setupInstallHookHome(t)
