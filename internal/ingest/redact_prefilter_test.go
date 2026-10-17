@@ -1,11 +1,13 @@
 package ingest
 
 import (
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"math/rand"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -96,41 +98,73 @@ func TestPrefilterEquivalentOnKnownCases(t *testing.T) {
 	}
 }
 
-// Every rule must declare its prefilter decision explicitly, and the foldCase
-// flag must track the (?i) in the pattern: a drift between the two would make
-// the non-ASCII fallback skip a rule it must run.
-func TestPrefilterTableMatchesRules(t *testing.T) {
-	for i, r := range redactRules {
-		ci := strings.HasPrefix(r.re.String(), "(?i)")
-		if r.foldCase != ci {
-			t.Errorf("rule %d: foldCase=%v but pattern case-insensitive=%v (%s)", i, r.foldCase, ci, r.re)
+// The rule table's safety constraints are enforced at init (panic); this checks
+// the validator itself rejects the two ways a table can silently go unsafe.
+func TestValidateRedactRules(t *testing.T) {
+	if err := validateRedactRules(redactRules); err != nil {
+		t.Fatalf("shipped table invalid: %v", err)
+	}
+	ci := regexp.MustCompile(`(?i)abc`)
+	cs := regexp.MustCompile(`abc`)
+	bad := map[string]redactRule{
+		"foldCase but pattern case-sensitive": {re: cs, needles: []string{"abc"}, foldCase: true},
+		"(?i) pattern but foldCase unset":     {re: ci, needles: []string{"abc"}},
+		"upper-case needle on foldCase rule":  {re: ci, needles: []string{"ABC"}, foldCase: true},
+	}
+	for name, r := range bad {
+		if err := validateRedactRules([]redactRule{r}); err == nil {
+			t.Errorf("%s: expected an error", name)
 		}
-		if r.needles == nil && !r.runAlways {
-			t.Errorf("rule %d: no needles and not marked runAlways (%s)", i, r.re)
-		}
-		for _, n := range r.needles {
-			if r.foldCase && n != strings.ToLower(n) {
-				t.Errorf("rule %d: needle %q must be lower-case for a foldCase rule", i, n)
-			}
-		}
+	}
+	if err := validateRedactRules([]redactRule{{re: cs}}); err != nil {
+		t.Errorf("nil needles (always run) must be valid: %v", err)
 	}
 }
 
-// Non-ASCII input must make the (?i) rules run unconditionally: the regexp
-// engine folds U+212A to k and U+017F to s, so an ASCII needle search would
-// wrongly skip them.
+// Go's (?i) folds U+017F LONG S to s and U+212A KELVIN SIGN to k; foldLower
+// must keep the (?i) rules reachable for both without any non-ASCII fallback.
 func TestPrefilterNonASCIIFoldsStillRedact(t *testing.T) {
 	for _, in := range []string{
 		"API_\u212aEY=supersecretvalue123",
 		"pa\u017f\u017fword=abcdefgh",
 		"coo\u212aie: a=b",
 		"\u017fet-cookie: a=b",
+		"\u4e2d\u6587 x\u017fecret=abcdefgh",
 	} {
-		got := Redact(in)
+		var ran []int
+		got := redactWith(in, true, &ran)
 		if !strings.Contains(got, "[REDACTED") {
-			t.Errorf("expected redaction of %q, got %q", in, got)
+			t.Errorf("expected redaction of %q, got %q (ran rules %v)", in, got, ran)
 		}
 		checkSame(t, in)
+	}
+}
+
+// Text with non-ASCII letters but no secret feature must still be filtered:
+// the KEY=value (12) and Cookie (11) rules are skipped, and the output equals
+// the unfiltered run.
+func TestPrefilterSkipsRulesOnCJKText(t *testing.T) {
+	for _, in := range []string{
+		"\u9a57\u8b49\u6d41\u7a0b\u5c0d\u4f7f\u7528\u8005\u7684\u8aaa\u660e",
+		"\u4e2d\u6587 plain text with a colon: and equals = signs",
+	} {
+		var ran []int
+		got := redactWith(in, true, &ran)
+		for _, idx := range ran {
+			if idx == 11 || idx == 12 {
+				t.Errorf("rule %d ran on %q; ran=%v", idx, in, ran)
+			}
+		}
+		if got != redactUnfiltered(in) {
+			t.Errorf("output differs for %q: %q", in, got)
+		}
+	}
+	// A secret-bearing CJK text still runs the rule that matters.
+	var ran []int
+	in := "\u4e2d\u6587 API_KEY=supersecretvalue123"
+	got := redactWith(in, true, &ran)
+	if !strings.Contains(got, "[REDACTED:secret]") {
+		t.Fatalf("got %q", got)
 	}
 }
 
@@ -154,31 +188,32 @@ func TestRedactIdempotentOnKnownCases(t *testing.T) {
 	}
 }
 
-// Characterization (not a requirement): Redact is not idempotent when one
-// rule's value capture swallows text that only becomes a separate token after
-// an earlier match shrinks (here the KEY=value rule eats up to the next space,
-// and after the first pass the leftover "-----BEGIN" abuts the marker). A second
-// redaction pass can therefore change output, so it cannot be deleted blindly.
-func TestRedactNotIdempotentOnAdversarialText(t *testing.T) {
-	in := "passwordcookie:<private>@pk_test_[REDACTED:secret]'-----BEGIN API_KEYAPI_KEYhttp9"
-	once := Redact(in)
-	if Redact(once) == once {
-		t.Fatalf("expected the known second-pass difference, got identical %q", once)
+// A tool call's content is redactString(name + " " + summary) where summary is
+// already firstLine(redactString(cmd), 200): that second pass must stay, because
+// redaction is not idempotent on these inputs (the first pass leaves text the
+// second one still changes). The test pins that the stored content equals the
+// two-pass result, and that the inputs really are ones where one pass differs.
+func TestToolUseContentKeepsSecondRedactionPass(t *testing.T) {
+	cmds := []string{
+		`{"ghp_abcdefghijklmnopqrstuvwxyz0123456789":1}`,
+		"passwordcookie:<private>@pk_test_[REDACTED:secret]'-----BEGIN API_KEY" + "API_KEYhttp9",
 	}
-}
-
-// Characterization (not a requirement): redactString is NOT idempotent on
-// embedded JSON whose key was itself redacted. The marker text "[REDACTED:…
-// token]" then reads as a secret-named key on the second pass, so its value
-// becomes [REDACTED:key]. This is why a second redaction pass cannot simply be
-// deleted: it would change today's output for such input. Update this test if
-// the behaviour is ever fixed deliberately.
-func TestRedactStringNotIdempotentOnRedactedJSONKey(t *testing.T) {
-	in := `{"ghp_abcdefghijklmnopqrstuvwxyz0123456789":1}`
-	once := redactString(in)
-	twice := redactString(once)
-	if once == twice {
-		t.Fatalf("expected the known second-pass difference, got identical %q", once)
+	for _, cmd := range cmds {
+		cmdJSON, _ := json.Marshal(cmd)
+		line := `{"type":"assistant","timestamp":"2026-04-26T11:00:00Z","cwd":"/p","sessionId":"s","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":` + string(cmdJSON) + `}}]}}`
+		msgs, _, err := NewParser(0).ParseLine([]byte(line))
+		if err != nil || len(msgs) != 1 {
+			t.Fatalf("parse: %v %d", err, len(msgs))
+		}
+		summary := firstLine(redactString(cmd), 200)
+		onePass := "Bash " + summary
+		twoPass := strings.TrimSpace(redactString("Bash " + summary))
+		if onePass == twoPass {
+			t.Fatalf("test input %q no longer distinguishes one pass from two", cmd)
+		}
+		if msgs[0].Content != twoPass {
+			t.Errorf("content lost the second redaction pass\n got:  %q\n want: %q", msgs[0].Content, twoPass)
+		}
 	}
 }
 
@@ -226,30 +261,33 @@ func TestRedactStringEquivalentWithAndWithoutPrefilter(t *testing.T) {
 		inputs = append(inputs, randomRedactInput(r)+`{"apiKey":"x`+randomRedactInput(r)+`"}`+randomRedactInput(r))
 	}
 	for _, s := range inputs {
-		on := redactString(s)
-		prefilterOff = true
-		off := redactString(s)
-		prefilterOff = false
+		on := redactStringWith(s, true)
+		off := redactStringWith(s, false)
 		if on != off {
 			t.Fatalf("redactString differs\nin:  %q\non:  %q\noff: %q", s, on, off)
 		}
 	}
 }
 
-// The non-ASCII fallback is only needed for needles containing k or s: those
-// are the only ASCII letters whose Unicode simple-fold orbit has non-ASCII
-// members. This pins that fact against the running Go version.
+// Go's (?i) folds exactly two non-ASCII runes onto ASCII letters (U+212A to k,
+// U+017F to s). foldLower must map each back to that letter, so ASCII needles
+// find them without a non-ASCII fallback. Pinned against the running Go version.
 func TestSimpleFoldOnlyKAndS(t *testing.T) {
-	got := map[rune]bool{}
+	got := map[rune]rune{}
 	for r := rune(0x80); r <= unicode.MaxRune; r++ {
 		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
 			if f < 0x80 && unicode.IsLetter(f) {
-				got[unicode.ToLower(f)] = true
+				got[r] = unicode.ToLower(f)
 			}
 		}
 	}
-	if len(got) != 2 || !got['k'] || !got['s'] {
-		t.Fatalf("non-ASCII runes fold onto ASCII letters %v, want exactly {k, s}", got)
+	if len(got) != 2 || got[0x212a] != 'k' || got[0x017f] != 's' {
+		t.Fatalf("non-ASCII runes folding onto ASCII letters = %U, want {U+212A:k U+017F:s}", got)
+	}
+	for r, letter := range got {
+		if fl := foldLower(string(r)); fl != string(letter) {
+			t.Errorf("foldLower(%U) = %q, want %q", r, fl, string(letter))
+		}
 	}
 }
 

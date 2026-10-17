@@ -76,11 +76,13 @@ the stored output SHALL be exactly what running every rule would produce.
   for every input including text with markers from an earlier redaction, word-boundary edges,
   and rules that have no literal feature (which always run)
 
-#### Scenario: Non-ASCII text keeps case-insensitive rules exact
+#### Scenario: Case folding keeps case-insensitive rules exact
 
-- **WHEN** text contains a non-ASCII byte and a case-insensitive rule's feature contains `k` or
-  `s` (Go folds U+212A to `k` and U+017F to `s`, e.g. `API_\u212aEY=supersecretvalue123`)
-- **THEN** that rule SHALL run unconditionally, so the secret is redacted as without a prefilter
+- **WHEN** text spells a secret keyword with a rune Go's `(?i)` folds onto an ASCII letter
+  (U+212A for `k`, U+017F for `s`, e.g. `API_\u212aEY=supersecretvalue123`), or contains other
+  non-ASCII text such as Chinese
+- **THEN** the secret SHALL be redacted exactly as without a prefilter, and text with no secret
+  feature SHALL still skip the rules that cannot match
 
 #### Scenario: A tool call's input is redacted once for its summary and target
 

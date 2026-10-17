@@ -3,7 +3,7 @@
 - [x] 1.1 Tests first: filtered vs unfiltered equivalence (known cases, every literal of
       `redact_test.go`, Unicode fold and `\b` cases, seeded random, fuzz target), table-sync test,
       non-ASCII fold test, `k`/`s` fold pin
-- [x] 1.2 `redactRule` gains `needles` / `also` / `foldCase` / `runAlways`; `Redact` skips rules whose
+- [x] 1.2 `redactRule` gains `needles` / `also` / `foldCase` (nil needles = always run; table validated at init); `Redact` skips rules whose
       needle is absent; `redactUnfiltered` is the reference path
 - [x] 1.3 Mutation check: breaking the non-ASCII fallback, a needle, or the `passwd` needle turns
       the equivalence tests red

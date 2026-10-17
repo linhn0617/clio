@@ -15,9 +15,12 @@ content), which the precheck makes cheaper but does not remove.
   (for example `AKIA`, `sk-`, `eyJ`, `://` plus `@`, or one of the secret-name keywords plus `:`
   or `=`); a rule whose feature is absent from the text is skipped. The output SHALL be
   byte-for-byte what running every rule would produce. Case-insensitive rules compare against a
-  lower-cased copy; because Go's `(?i)` uses Unicode simple folding (U+212A KELVIN SIGN matches
-  `k`, U+017F LONG S matches `s`), a rule whose feature contains `k` or `s` runs unconditionally
-  on text with any non-ASCII byte. A rule with no safe literal feature is marked `runAlways`.
+  lower-cased copy; because Go's `(?i)` uses Unicode simple folding, the only non-ASCII runes
+  that fold onto ASCII letters are U+212A KELVIN SIGN (`k`) and U+017F LONG S (`s`).
+  `strings.ToLower` already maps U+212A to `k`, and the copy additionally maps U+017F to `s`,
+  so non-ASCII text (for example Chinese) is filtered like any other. The rule table is
+  validated at init (a `(?i)` rule must be marked and have lower-case needles; violations
+  panic). A rule with no needles always runs.
 - **session-ingest (B2, single pass)**: a tool call's summary and its activity target redact the
   same input string; they now share one `redactString` result (a one-entry memo). Output is
   unchanged. Other repeated passes are NOT removed: redaction is not idempotent in general (a

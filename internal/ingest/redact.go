@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"regexp"
 	"sort"
@@ -15,25 +16,44 @@ import (
 //
 //   - needles: the match must contain at least one of these literal substrings
 //     (a regexp match that lacks them is impossible). nil means "no safe literal
-//     feature", which requires runAlways to be set: such a rule always runs.
+//     feature": the rule always runs (the safe default).
 //   - also: if non-empty, the match must additionally contain at least one of
 //     these bytes (e.g. the ':' or '=' of KEY=value).
-//   - foldCase: the pattern is (?i). needles are then lower-case and matched
-//     against a lower-cased copy of the text. Go's (?i) uses Unicode simple
-//     folding (U+212A KELVIN SIGN matches k, U+017F LONG S matches s), so when a
-//     needle contains k or s and the text has any non-ASCII byte, the rule runs
-//     unconditionally (those are the only ASCII letters with non-ASCII fold
-//     partners; TestSimpleFoldOnlyKAndS pins that). Needles without k/s, and
-//     needles that are not letters, are unaffected by the non-ASCII fold.
-//   - foldFallback: derived from the above at init; not set by hand.
+//   - foldCase: the pattern is (?i). needles must then be lower-case and are
+//     matched against foldLower(text). Go's (?i) uses Unicode simple folding;
+//     the only non-ASCII runes that fold onto an ASCII letter are U+212A KELVIN
+//     SIGN (k) and U+017F LONG S (s) (TestSimpleFoldOnlyKAndS pins that).
+//     strings.ToLower already maps U+212A to k, and foldLower additionally maps
+//     U+017F to s, so no non-ASCII fallback is needed.
+//
+// validateRedactRules (run from init) panics on a table that breaks these
+// constraints.
 type redactRule struct {
-	re           *regexp.Regexp
-	repl         string
-	needles      []string
-	also         string
-	foldCase     bool
-	runAlways    bool
-	foldFallback bool
+	re       *regexp.Regexp
+	repl     string
+	needles  []string
+	also     string
+	foldCase bool
+}
+
+// validateRedactRules enforces the prefilter table's safety constraints:
+// foldCase must agree with a leading (?i) in the pattern, and a foldCase rule's
+// needles must be lower-case (they are compared with a lower-cased text).
+func validateRedactRules(rules []redactRule) error {
+	for i, r := range rules {
+		ci := strings.HasPrefix(r.re.String(), "(?i)")
+		if r.foldCase != ci {
+			return fmt.Errorf("redact rule %d: foldCase=%v but pattern case-insensitive=%v (%s)", i, r.foldCase, ci, r.re)
+		}
+		if r.foldCase {
+			for _, n := range r.needles {
+				if n != strings.ToLower(n) {
+					return fmt.Errorf("redact rule %d: needle %q must be lower-case for a foldCase rule", i, n)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // redactRules is a conservative set: high-signal secret shapes only, to avoid
@@ -158,71 +178,75 @@ func stripPrivate(s string) string {
 }
 
 func init() {
-	for i := range redactRules {
-		r := &redactRules[i]
-		if r.foldCase {
-			for _, n := range r.needles {
-				if strings.ContainsAny(n, "ks") {
-					r.foldFallback = true
-				}
-			}
-		}
+	if err := validateRedactRules(redactRules); err != nil {
+		panic(err)
 	}
 }
 
-// prefilterOff makes Redact run every rule unconditionally. Tests flip it to
-// compare the filtered and unfiltered paths; production never sets it.
-var prefilterOff bool
+// foldLower lower-cases s the way Go's (?i) matching sees ASCII letters:
+// strings.ToLower (which maps U+212A to k) plus U+017F to s. The result is only
+// used for substring tests of lower-case ASCII needles; extra spurious letters
+// it may produce merely let a regexp run.
+func foldLower(s string) string {
+	l := strings.ToLower(s) // no allocation when s has no upper-case letter
+	if strings.Contains(l, "\u017f") {
+		l = strings.ReplaceAll(l, "\u017f", "s")
+	}
+	return l
+}
 
 // mayMatch reports whether r could match s. It is a necessary condition only:
 // false means the regexp provably cannot match (skip it), true means "run it".
-// lower is strings.ToLower(s) (a superset test for ASCII needles: lower-casing
-// never removes an ASCII letter run, and may only add spurious ones, which merely
-// run the regexp); ascii says s is pure ASCII.
-func (r *redactRule) mayMatch(s, lower string, ascii bool) bool {
-	if r.runAlways {
+// lower returns foldLower(s) on demand, so the copy is built only for a
+// foldCase rule that got past the cheap checks.
+func (r *redactRule) mayMatch(s string, lower func() string) bool {
+	if r.needles == nil {
 		return true
+	}
+	if r.also != "" && !strings.ContainsAny(s, r.also) {
+		return false
 	}
 	hay := s
 	if r.foldCase {
-		if !ascii && r.foldFallback {
-			return true
-		}
-		hay = lower
+		hay = lower()
 	}
-	found := false
 	for _, n := range r.needles {
 		if strings.Contains(hay, n) {
-			found = true
-			break
+			return true
 		}
 	}
-	return found && (r.also == "" || strings.ContainsAny(s, r.also))
+	return false
 }
 
 // Redact replaces recognized secret patterns in s. It is intentionally
 // conservative; see redactRules. Each rule's regexp only runs when its cheap
 // necessary-condition prefilter passes; the output is identical to running
 // every rule (redactUnfiltered, pinned by tests and a real-corpus comparison).
-func Redact(s string) string {
-	if prefilterOff {
-		return redactUnfiltered(s)
-	}
-	ascii := true
-	for i := 0; i < len(s); i++ {
-		if s[i] >= 0x80 {
-			ascii = false
-			break
+func Redact(s string) string { return redactWith(s, true, nil) }
+
+// redactWith is Redact with the prefilter switchable (filtered=false runs every
+// rule, the reference path). If ran is non-nil it receives the index of every
+// rule whose regexp was executed, so tests can observe what was skipped.
+func redactWith(s string, filtered bool, ran *[]int) string {
+	var lower string
+	haveLower := false
+	getLower := func() string {
+		if !haveLower {
+			lower, haveLower = foldLower(s), true
 		}
+		return lower
 	}
-	lower := strings.ToLower(s) // no allocation when s has no upper-case letter
 	for i := range redactRules {
 		r := &redactRules[i]
-		if r.mayMatch(s, lower, ascii) {
-			if ns := r.re.ReplaceAllString(s, r.repl); ns != s {
-				s = ns
-				lower = strings.ToLower(s) // text changed: refresh the folded copy
-			}
+		if filtered && !r.mayMatch(s, getLower) {
+			continue
+		}
+		if ran != nil {
+			*ran = append(*ran, i)
+		}
+		if ns := r.re.ReplaceAllString(s, r.repl); ns != s {
+			s = ns
+			haveLower = false // text changed: rebuild the folded copy on demand
 		}
 	}
 	return s
@@ -275,21 +299,25 @@ func isSecretKey(k string) bool {
 // (so a secret under a generic key like {"apiKey":"…"} is caught even amid
 // surrounding prose), and applies the shape regexes to the non-JSON text around
 // those spans. Free-text secrets with no recognizable shape are best-effort.
-func redactString(s string) string {
+func redactString(s string) string { return redactStringWith(s, true) }
+
+// redactStringWith is redactString with the regex prefilter switchable, so tests
+// can compare the filtered and unfiltered paths through the whole JSON walk.
+func redactStringWith(s string, filtered bool) string {
 	// Strip <private> first, while the string is still whole: the JSON split
 	// below would otherwise hand a private block containing JSON to the regex
 	// in pieces that never match.
 	s = stripPrivate(s)
 	if !strings.ContainsAny(s, "{[") {
-		return Redact(s) // fast path: no JSON to find
+		return redactWith(s, filtered, nil) // fast path: no JSON to find
 	}
 	var out strings.Builder
 	textStart := 0
 	for i := 0; i < len(s); {
 		if s[i] == '{' || s[i] == '[' {
-			if red, n, ok := redactJSONAt(s[i:]); ok {
-				out.WriteString(Redact(s[textStart:i])) // regex-redact preceding prose
-				out.WriteString(red)                    // structurally-redacted JSON span
+			if red, n, ok := redactJSONAt(s[i:], filtered); ok {
+				out.WriteString(redactWith(s[textStart:i], filtered, nil)) // regex-redact preceding prose
+				out.WriteString(red)                                       // structurally-redacted JSON span
 				i += n
 				textStart = i
 				continue
@@ -297,7 +325,7 @@ func redactString(s string) string {
 		}
 		i++
 	}
-	out.WriteString(Redact(s[textStart:]))
+	out.WriteString(redactWith(s[textStart:], filtered, nil))
 	return out.String()
 }
 
@@ -307,8 +335,10 @@ func redactString(s string) string {
 // pure function of its input). A nil *redactMemo just calls redactString.
 // debt: the third pass over the same string (the raw_json walk in redactJSON)
 // and the final pass over name+" "+summary are not shared: redaction is not
-// idempotent in general (TestRedactNotIdempotentOnAdversarialText), so only
+// idempotent in general (TestToolUseContentKeepsSecondRedactionPass), so only
 // passes over the identical input can be merged without changing output.
+//
+// debt: 工具輸入 JSON 仍被 summary 與 target 各解析一次；在呼叫點解析一次並把選定值傳給兩邊即可移除 memo
 type redactMemo struct {
 	in, out string
 	set     bool
@@ -329,7 +359,7 @@ func (m *redactMemo) redact(s string) string {
 // On success it returns the structurally-redacted JSON and the bytes consumed.
 // Bare scalars are NOT treated as embedded JSON, so a stray '{'/'[' in prose
 // (or things like "{1,2}" which are not valid JSON) do not trigger.
-func redactJSONAt(t string) (string, int, bool) {
+func redactJSONAt(t string, filtered bool) (string, int, bool) {
 	dec := json.NewDecoder(strings.NewReader(t))
 	dec.UseNumber()
 	var v any
@@ -344,7 +374,7 @@ func redactJSONAt(t string) (string, int, bool) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(redactWalk(v)); err != nil {
+	if err := enc.Encode(redactWalkDepth(v, 0, filtered)); err != nil {
 		return "", 0, false
 	}
 	return strings.TrimRight(buf.String(), "\n"), int(dec.InputOffset()), true
@@ -390,9 +420,9 @@ func redactJSONValue(b []byte) (string, bool) {
 const maxRedactDepth = 200
 
 // redactWalk recursively walks a decoded JSON value and redacts secrets.
-func redactWalk(v any) any { return redactWalkDepth(v, 0) }
+func redactWalk(v any) any { return redactWalkDepth(v, 0, true) }
 
-func redactWalkDepth(v any, depth int) any {
+func redactWalkDepth(v any, depth int, filtered bool) any {
 	if depth > maxRedactDepth {
 		return "[REDACTED:depth]" // fail closed: never pass unredacted deep content through
 	}
@@ -412,9 +442,9 @@ func redactWalkDepth(v any, depth int) any {
 			if isSecretKey(k) { // judged on the original key name
 				val = "[REDACTED:key]" // whole subtree, any type
 			} else {
-				val = redactWalkDepth(x[k], depth+1)
+				val = redactWalkDepth(x[k], depth+1, filtered)
 			}
-			nk := redactString(k)
+			nk := redactStringWith(k, filtered)
 			if _, dup := out[nk]; dup {
 				// Two keys redacted to the same name: keeping either value would
 				// pick one arbitrarily and could surface the other's content
@@ -426,11 +456,11 @@ func redactWalkDepth(v any, depth int) any {
 		return out
 	case []any:
 		for i := range x {
-			x[i] = redactWalkDepth(x[i], depth+1)
+			x[i] = redactWalkDepth(x[i], depth+1, filtered)
 		}
 		return x
 	case string:
-		return redactString(x) // recurse into JSON-in-string + regex
+		return redactStringWith(x, filtered) // recurse into JSON-in-string + regex
 	default:
 		return v // numbers (json.Number), bools, null
 	}
