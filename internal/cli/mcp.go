@@ -100,13 +100,16 @@ type mcpRuntime struct {
 	watch func(ctx context.Context)
 }
 
+// runWatcher is a seam so tests can capture the watcher newMCPRuntime builds.
+var runWatcher = func(ctx context.Context, w *watcher.Watcher) error { return w.Run(ctx) }
+
 // newMCPRuntime is a seam for tests; guard is handed to the watcher's backstop.
 var newMCPRuntime = func(rw *db.DB, projects string, log *slog.Logger, guard func() func()) mcpRuntime {
 	ing := ingest.NewWithBuiltinSources(rw, log)
 	return mcpRuntime{ing: ing, watch: func(ctx context.Context) {
 		w := watcher.New(ing, projects, log)
 		w.BackstopGuard = guard
-		if err := w.Run(ctx); err != nil {
+		if err := runWatcher(ctx, w); err != nil {
 			log.Warn("watcher stopped", "err", err)
 		}
 	}}
@@ -146,10 +149,13 @@ func (e *leaderEnv) tryWalk() func() {
 // for a confirmed leader (the watcher keeps the DB fresh). A process that holds
 // the lease but is still in its startup catch-up is not yet flagged leader, so
 // early reads land here; ingestMu keeps them off the leader's in-flight walk.
-func newBeforeRead(ctx context.Context, env *leaderEnv, leaderFlag *atomic.Bool, projects string, log *slog.Logger) func() {
+// The walk stops when either the request's ctx or cmdCtx is cancelled: mcp-go
+// waits for in-flight handlers after stdin closes, so a cold-index walk bound
+// only to the command ctx would hold shutdown hostage.
+func newBeforeRead(cmdCtx context.Context, env *leaderEnv, leaderFlag *atomic.Bool, projects string, log *slog.Logger) func(context.Context) {
 	var mu sync.Mutex
 	var lastCatchup time.Time
-	return func() {
+	return func(reqCtx context.Context) {
 		if projects == "" || leaderFlag.Load() {
 			return
 		}
@@ -163,19 +169,21 @@ func newBeforeRead(ctx context.Context, env *leaderEnv, leaderFlag *atomic.Bool,
 		if release == nil {
 			return // another walk (leader startup / earlier read) is running
 		}
+		defer release()
 		// The leader publishes the flag while holding ingestMu, so a flag that turned
 		// true while we were acquiring means the walk is already done.
 		if leaderFlag.Load() {
-			release()
 			return
 		}
+		ctx, cancel := context.WithCancel(reqCtx)
+		defer cancel()
+		defer context.AfterFunc(cmdCtx, cancel)()
 		_, err := env.ing.IngestAll(ctx, projects, false)
-		release()
 
 		mu.Lock()
 		lastCatchup = time.Now()
 		mu.Unlock()
-		if err != nil {
+		if err != nil && ctx.Err() == nil {
 			log.Warn("read catch-up failed (serving possibly-stale)", "err", err)
 		}
 	}
@@ -187,6 +195,7 @@ func newBeforeRead(ctx context.Context, env *leaderEnv, leaderFlag *atomic.Bool,
 // can win the lock and run a cold rebuild of its own; leaderLoop inherits and
 // releases it.
 func startLeaseRole(ctx context.Context, lease *lock.Lease, isLeader bool, leaderFlag *atomic.Bool, env *leaderEnv, projects string, log *slog.Logger) (wait func()) {
+	// debt: 三個機制（預先持鎖跨 goroutine、TryLock、flag 重查）可由單一三態 role 原子（starting/leader/follower）取代；若再有呼叫者需要 leaderLoop 就要換。
 	preHeld := isLeader && projects != ""
 	if preHeld {
 		env.ingestMu.Lock()
@@ -254,6 +263,7 @@ func pollUntilLeader(ctx context.Context, lease *lock.Lease, log *slog.Logger) b
 // catch-up, the catch-up is cancelled and we demote at once. Everything started
 // here (renewer, watcher) has exited when it returns.
 // preHeld means the caller already holds env.ingestMu; the catch-up releases it.
+// debt: 三個機制（預先持鎖跨 goroutine、TryLock、flag 重查）可由單一三態 role 原子（starting/leader/follower）取代；若再有呼叫者需要 leaderLoop 就要換。
 // leaderFlag is flipped to true only after the catch-up completes, while still
 // holding ingestMu, so a just-promoted follower never serves stale reads and no
 // early read can start a walk of its own in between.
@@ -332,7 +342,7 @@ func startupCatchup(wctx context.Context, leaderFlag *atomic.Bool, env *leaderEn
 			return false
 		}
 		if superseded(wctx) {
-			log.Info("catch-up cancelled: superseded")
+			log.Warn("catch-up cancelled: superseded")
 		} else {
 			log.Info("catch-up cancelled: shutting down")
 		}

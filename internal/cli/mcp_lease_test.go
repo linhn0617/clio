@@ -226,7 +226,7 @@ func TestBeforeReadDuringLeaderCatchupDoesNotWalkConcurrently(t *testing.T) {
 
 	br := newBeforeRead(ctx, env, &flag, "/p", discardLogger())
 	start := time.Now()
-	br()
+	br(context.Background())
 	if d := time.Since(start); d > 300*time.Millisecond {
 		t.Fatalf("beforeRead blocked %v behind the leader catch-up", d)
 	}
@@ -250,14 +250,14 @@ func TestBeforeReadFollowerCatchesUp(t *testing.T) {
 	env := testEnv(fake, time.Second)
 	var flag atomic.Bool
 	br := newBeforeRead(context.Background(), env, &flag, "/p", discardLogger())
-	br()
-	br() // within 1s: throttled
+	br(context.Background())
+	br(context.Background()) // within 1s: throttled
 	if n := fake.ingestAll.Load(); n != 1 {
 		t.Fatalf("IngestAll calls = %d, want 1", n)
 	}
 	flag.Store(true)
 	time.Sleep(1100 * time.Millisecond)
-	br()
+	br(context.Background())
 	if n := fake.ingestAll.Load(); n != 1 {
 		t.Fatalf("leader beforeRead walked: calls = %d", n)
 	}
@@ -275,9 +275,9 @@ func TestStartLeaseRoleEarlyReadCannotRunColdRebuild(t *testing.T) {
 	wait := startLeaseRole(ctx, lease, true, &flag, env, "/p", discardLogger())
 
 	br := newBeforeRead(ctx, env, &flag, "/p", discardLogger())
-	br() // arrives before the role goroutine has even started
+	br(context.Background()) // arrives before the role goroutine has even started
 	<-fake.started
-	br()
+	br(context.Background())
 	if flag.Load() {
 		t.Fatal("precondition: flag must still be false during catch-up")
 	}
@@ -312,7 +312,7 @@ func TestBeforeReadRechecksLeaderFlagUnderLock(t *testing.T) {
 	}()
 	// Spin until the lock is free and the flag is true; no call may ever walk.
 	for i := 0; i < 50; i++ {
-		br()
+		br(context.Background())
 		time.Sleep(5 * time.Millisecond)
 	}
 	if n := fake.ingestAll.Load(); n != 0 {
@@ -350,8 +350,12 @@ func TestShutdownJoinsCatchupAndWatcher(t *testing.T) {
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	var flag2 atomic.Bool
 	wait2 := startLeaseRole(ctx2, lease2, true, &flag2, env2, "/p", discardLogger())
-	for !flag2.Load() {
+	flagDeadline := time.Now().Add(3 * time.Second)
+	for !flag2.Load() && time.Now().Before(flagDeadline) {
 		time.Sleep(5 * time.Millisecond)
+	}
+	if !flag2.Load() {
+		t.Fatal("leader never finished its catch-up")
 	}
 	time.Sleep(50 * time.Millisecond) // let the watcher goroutine start
 	cancel2()
@@ -367,7 +371,7 @@ func TestSupersededCatchupStopsBeforeLaterPhases(t *testing.T) {
 	lease, lockPath := leaseFixture(t)
 	fake := &fakeIngester{slow: time.Minute, ignoreCtx: true, started: make(chan struct{}, 1)}
 	buf := &syncBuf{}
-	log := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	log := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	var flag atomic.Bool
 	done := make(chan bool, 1)
 	go func() {

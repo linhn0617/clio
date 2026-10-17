@@ -130,8 +130,8 @@ the leader's catch-up.)
   happened while it was hung): **cancel any catch-up in progress, stop the watcher
   and renew loop, demote to
   follower** (start the promotion poll). This guarantees at most one live watcher.
-- **Follower:** runs the promotion poll; on successful `TryPromote()` it runs a
-  catch-up then starts the watcher + renew loop and stops polling.
+- **Follower:** runs the promotion poll; on successful `TryPromote()` it starts the renew loop first, then runs its
+  catch-up, then starts the watcher and stops polling (renewal covers the whole catch-up; see change `mcp-startup-lease`).
 - Only the leader does startup catch-up; followers stay fresh via §4.3 (avoids the
   N-way startup thundering herd when several sessions launch at once).
 

@@ -132,16 +132,41 @@ func TestStdioPurityE2E(t *testing.T) {
 		}
 	}
 	_ = stdin.Close()
-	for l := range lines { // drain until the server exits; still must be JSON
-		if strings.TrimSpace(l) == "" {
-			continue
-		}
-		var obj map[string]any
-		if err := json.Unmarshal([]byte(l), &obj); err != nil {
-			t.Fatalf("non-JSON line on stdout (purity violated): %q", l)
+	// Shutdown must be prompt too: drain until stdout closes, then wait for exit,
+	// both under a deadline so a hung server fails the test instead of the suite.
+	exitDeadline := time.After(30 * time.Second)
+	dump := func() string {
+		return fmt.Sprintf("stdout:\n%s\nstderr: %s", stdout.String(), stderr.String())
+	}
+drain:
+	for {
+		select {
+		case l, ok := <-lines:
+			if !ok {
+				break drain
+			}
+			stdout.WriteString(l + "\n")
+			if strings.TrimSpace(l) == "" {
+				continue
+			}
+			var obj map[string]any
+			if err := json.Unmarshal([]byte(l), &obj); err != nil {
+				t.Fatalf("non-JSON line on stdout (purity violated): %q", l)
+			}
+		case <-exitDeadline:
+			_ = cmd.Process.Kill()
+			t.Fatalf("server did not close stdout within 30s of stdin EOF.\n%s", dump())
 		}
 	}
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("clio mcp exited with error: %v\nstderr: %s", err, stderr.String())
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			t.Fatalf("clio mcp exited with error: %v\n%s", err, dump())
+		}
+	case <-exitDeadline:
+		_ = cmd.Process.Kill()
+		t.Fatalf("server did not exit within 30s of stdin EOF.\n%s", dump())
 	}
 }
