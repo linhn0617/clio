@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/linhn0617/clio/internal/config"
-	"github.com/linhn0617/clio/internal/ingest"
 	"github.com/linhn0617/clio/internal/lock"
 )
 
@@ -35,7 +35,8 @@ func TestLeaderLoopDemotesOnSupersede(t *testing.T) {
 	defer cancel()
 	done := make(chan bool, 1)
 	var flag atomic.Bool
-	go func() { done <- leaderLoop(ctx, lease, &flag, ingest.New(nil, nil), "", discardLogger()) }()
+	env := &leaderEnv{ing: &fakeIngester{}, ingestMu: &sync.Mutex{}, renewEvery: leaderRenewInterval}
+	go func() { done <- leaderLoop(ctx, lease, &flag, env, "", discardLogger()) }()
 
 	// Simulate another process taking over: overwrite the lease file with a
 	// different nonce + fresh timestamp. The next Renew (<= ~3s) must see the

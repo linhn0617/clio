@@ -47,11 +47,21 @@ func TestStdioPurityE2E(t *testing.T) {
 		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"authentication"}}}`,
 	}, "\n") + "\n"
 
-	cmd := exec.Command(bin, "mcp")
-	cmd.Env = append(os.Environ(),
+	env := append(os.Environ(),
 		"HOME="+home,
 		"XDG_DATA_HOME="+filepath.Join(home, "data"),
 	)
+	// The server no longer ingests synchronously before serving (its startup
+	// catch-up runs in the background), so index first: this test is about stdout
+	// purity, not about how fast the index becomes ready.
+	idx := exec.Command(bin, "index")
+	idx.Env = env
+	if out, err := idx.CombinedOutput(); err != nil {
+		t.Fatalf("clio index failed: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(bin, "mcp")
+	cmd.Env = env
 	// Drive the server like a real client: keep stdin open until every
 	// response has arrived. mcp-go >= 1.0 runs tool calls on a worker pool
 	// and cancels in-flight requests as soon as stdin hits EOF, so feeding
