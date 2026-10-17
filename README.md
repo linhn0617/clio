@@ -83,7 +83,7 @@ To remove the integration later: `clio uninstall-mcp`.
 Want Claude to carry context between sessions automatically? Opt in with `clio install-hook` (undo with `clio uninstall-hook`). It registers two Claude Code hooks in `~/.claude/settings.json`:
 
 - **SessionStart → `clio recall`**: each new session opens with the project's recent sessions, files and commands, headed by the *previous session's closing message* (Claude's own last words, verbatim — not a summary, and it may quote whatever that session was reading; `--tail-runes 0` turns that section off).
-- **PreToolUse(Read) → `clio file-history --hook`**: before Claude reads a file, it sees which past sessions touched that file, when, and with which tools. Skipped when the file has no indexed history or was modified after its last indexed touch; never blocks the read; ~10 ms on a warm index.
+- **PreToolUse(Read|Bash) → `clio file-history --hook`**: before Claude reads a file, it sees which past sessions touched that file, when, and with which tools. On Bash it fires only when the command names an existing regular file under the working directory (at most 3 files; quoted paths with spaces work) — any other Bash call exits at once without opening the index, so it costs nothing beyond process start. Skipped when the file has no indexed history or was modified after its last indexed touch; never blocks the call; ~10 ms on a warm index. Re-running `clio install-hook` upgrades an older `Read`-only install.
 
 `clio install-hook --no-file-context` keeps only the recall hook. If you ran `install-hook` with an older clio, run it again to add the file-history hook.
 
