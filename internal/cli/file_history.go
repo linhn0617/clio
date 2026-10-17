@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -14,6 +15,7 @@ import (
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
 	"github.com/linhn0617/clio/internal/sessions"
+	"github.com/linhn0617/clio/internal/shellwords"
 	"github.com/linhn0617/clio/internal/termsafe"
 )
 
@@ -73,30 +75,90 @@ const hookMaxChars = 8000
 type hookPayload struct {
 	ToolName  string `json:"tool_name"`
 	SessionID string `json:"session_id"`
+	Cwd       string `json:"cwd"`
 	ToolInput struct {
-		FilePath string `json:"file_path"`
+		FilePath string `json:"file_path"` // Read
+		Command  string `json:"command"`   // Bash
 	} `json:"tool_input"`
 }
 
-// fileHistoryHook answers a PreToolUse payload: the file's past-session timeline
-// as additional context, or "" (nothing to say, or any failure). It never emits
-// a permission decision, so the Read proceeds through the normal flow.
+// bashMaxFiles bounds how many candidate files one Bash command may query, so
+// the hook's DB cost stays at a small constant per call.
+const bashMaxFiles = 3
+
+// bashMaxTokens bounds how many words of a Bash command are examined: a stat per
+// word on a pathological command line must not stretch the hook's latency.
+const bashMaxTokens = 64
+
+// candidateFile is a file the hook may look up; info (when the file exists) is
+// kept from candidate selection so the staleness gate needs no second stat.
+type candidateFile struct {
+	path string
+	info os.FileInfo
+}
+
+// historyPointer closes every digest; with several files it is emitted once.
+const historyPointer = "(Details: clio show <id>, or the clio MCP read_session tool.)\n"
+
+// hookSegment is one file's timeline, ready to be formatted.
+type hookSegment struct {
+	path string
+	rows []sessions.FileTouch
+}
+
+// fileHistoryHook answers a PreToolUse payload: the touched files' past-session
+// timeline as additional context, or "" (nothing to say, or any failure). It
+// never emits a permission decision, so the tool call proceeds through the
+// normal flow. Read looks up its file_path; Bash looks up the (at most
+// bashMaxFiles) existing files under cwd that the command names.
 func fileHistoryHook(payload []byte, dbPath string, limit int) string {
+	return fileHistoryHookWith(payload, dbPath, limit, db.OpenReadOnly)
+}
+
+// fileHistoryHookWith is fileHistoryHook with the index opener injected: opening
+// a WAL database read-only can still create its -shm/-wal files, but tests count
+// opens directly to prove the zero-candidate path never touches the index.
+func fileHistoryHookWith(payload []byte, dbPath string, limit int, open func(string) (*db.DB, error)) string {
 	var p hookPayload
 	if len(payload) == 0 || json.Unmarshal(payload, &p) != nil {
 		return ""
 	}
-	if p.ToolName != "Read" || strings.TrimSpace(p.ToolInput.FilePath) == "" {
+	var files []candidateFile
+	switch p.ToolName {
+	case "Read":
+		if strings.TrimSpace(p.ToolInput.FilePath) != "" {
+			fi, _ := os.Stat(p.ToolInput.FilePath) // nil on failure: the gate is skipped
+			files = []candidateFile{{p.ToolInput.FilePath, fi}}
+		}
+	case "Bash":
+		files = bashFileCandidates(p.ToolInput.Command, p.Cwd, bashMaxFiles)
+	}
+	// Zero candidates return before any DB access: most Bash calls end here.
+	if len(files) == 0 {
 		return ""
 	}
-	key := fileHistoryKey(p.ToolInput.FilePath)
-	rows, newest, err := fileHistoryRows(dbPath, key, p.SessionID, 0, limit)
-	if err != nil || len(rows) == 0 {
+	if _, err := os.Stat(dbPath); err != nil {
 		return ""
 	}
-	// Staleness gate: a file edited after its newest indexed touch would get a
-	// misleading timeline. A failed stat (file not on disk yet) skips the gate.
-	if fi, err := os.Stat(p.ToolInput.FilePath); err == nil && fi.ModTime().Unix() > newest {
+	database, err := open(dbPath)
+	if err != nil {
+		return ""
+	}
+	defer database.Close()
+	var segs []hookSegment
+	for _, f := range files {
+		rows, newest, err := sessions.FileHistory(context.Background(), database, fileHistoryKey(f.path), p.SessionID, 0, limit)
+		if err != nil || len(rows) == 0 {
+			continue
+		}
+		// Staleness gate: a file edited after its newest indexed touch would get a
+		// misleading timeline.
+		if f.info != nil && f.info.ModTime().Unix() > newest {
+			continue
+		}
+		segs = append(segs, hookSegment{f.path, rows})
+	}
+	if len(segs) == 0 {
 		return ""
 	}
 	// The cap must hold on the ENCODED envelope: JSON escaping can expand a
@@ -104,11 +166,24 @@ func fileHistoryHook(payload []byte, dbPath string, limit int) string {
 	// own length, and Claude Code measures its 10,000-character limit on what
 	// it receives. Shrink the digest until the encoding fits.
 	for budget := hookMaxChars; budget > 0; budget = budget * 3 / 4 {
-		digest := formatFileHistoryCapped(p.ToolInput.FilePath, rows, budget)
-		if digest == "" {
+		// Each file may use at most an equal share of what is left; what it does
+		// not use carries to the next, and a file that cannot fit its share is
+		// dropped. So one file with a huge history cannot starve the others.
+		remaining := budget - len([]rune(historyPointer))
+		var b strings.Builder
+		for i, s := range segs {
+			share := remaining / (len(segs) - i)
+			d := strings.TrimSuffix(formatFileHistoryCapped(s.path, s.rows, share+len([]rune(historyPointer))), historyPointer)
+			if d == "" || len([]rune(d)) > share {
+				continue
+			}
+			b.WriteString(d)
+			remaining -= len([]rune(d))
+		}
+		if b.Len() == 0 {
 			return "" // nothing fits: stay silent rather than send an empty context
 		}
-		out := encodeHookEnvelope(digest)
+		out := encodeHookEnvelope(b.String() + historyPointer)
 		if out == "" {
 			return ""
 		}
@@ -148,7 +223,7 @@ func formatFileHistoryCapped(path string, rows []sessions.FileTouch, maxChars in
 		more := fmt.Sprintf("  (+%d more)\n", len(rows)-n)
 		if len([]rune(kept))+len([]rune(more)) <= maxChars {
 			// Insert the marker before the trailing pointer line.
-			i := strings.LastIndex(kept, "(Details:")
+			i := strings.LastIndex(kept, historyPointer)
 			return kept[:i] + more + kept[i:]
 		}
 	}
@@ -203,6 +278,143 @@ func formatFileHistory(path string, rows []sessions.FileTouch) string {
 		}
 		fmt.Fprintf(&b, "  - %s  %s (%s)  %s\n", when, oneLine(r.Title, 60), shortID(r.SessionUUID), termsafe.Strip(strings.Join(r.Tools, ",")))
 	}
-	b.WriteString("(Details: clio show <id>, or the clio MCP read_session tool.)\n")
+	b.WriteString(historyPointer)
 	return b.String()
+}
+
+// bashFileCandidates returns up to max distinct existing regular files under cwd
+// that command names, in first-appearance order. It is a cheap lexical filter,
+// not a shell: a false candidate costs one DB lookup, a miss costs nothing but
+// the context hint. Relative words resolve against the payload cwd, which Claude
+// Code keeps current across earlier Bash calls but which is the directory from
+// before this command ran: after a `cd`/`pushd` inside the same command the real
+// directory is unknowable, so such a command contributes absolute paths only.
+// Heredoc bodies, comments, redirect and tee targets are not reads of the named
+// file and are skipped; the file must stay under cwd after symlinks are resolved.
+// debt: 沒做 $VAR／~／glob／命令替換展開；若使用者常以 $PWD/x 或 glob 讀檔就要補
+func bashFileCandidates(command, cwd string, max int) []candidateFile {
+	if !filepath.IsAbs(cwd) || strings.TrimSpace(command) == "" {
+		return nil
+	}
+	toks, ok := shellwords.Scan(stripHeredocBodies(command))
+	if !ok {
+		return nil
+	}
+	cwd = filepath.Clean(cwd)
+	realCwd, err := evalSymlinks(cwd)
+	if err != nil {
+		return nil
+	}
+	cdSeen := false
+	for _, t := range toks {
+		if !t.Op && (t.Text == "cd" || t.Text == "pushd") {
+			cdSeen = true
+		}
+	}
+	var out []candidateFile
+	seen := map[string]bool{}
+	skipNext, inTee, cmdStart := false, false, true
+	words := 0
+	for _, t := range toks {
+		if t.Op {
+			// A redirect operator consumes the next word as its target (`<<` and
+			// `<<<` introduce a heredoc/here-string, not a file to read).
+			skipNext = strings.ContainsAny(t.Text, "<>")
+			inTee = false
+			// A command position follows `;`, `|`, `&&`, `||`, `(` or a newline; a
+			// redirection operator (`2>&1`) does not start one.
+			cmdStart = t.Text == "\n" || (!skipNext && strings.ContainsAny(t.Text, ";|&("))
+			continue
+		}
+		atStart := cmdStart
+		cmdStart = false
+		if words++; words > bashMaxTokens {
+			break
+		}
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		if atStart && filepath.Base(t.Text) == "tee" {
+			inTee = true // every word up to the next operator is a write target
+			continue
+		}
+		if inTee {
+			continue
+		}
+		tok := strings.Trim(t.Text, ",:")
+		if tok == "" || tok[0] == '-' || tok[0] == '$' {
+			continue
+		}
+		if !filepath.IsAbs(tok) {
+			if cdSeen {
+				continue
+			}
+			tok = filepath.Join(cwd, tok)
+		}
+		tok = filepath.Clean(tok)
+		if seen[tok] {
+			continue
+		}
+		seen[tok] = true
+		// Stat first: most words name nothing, and a miss costs one syscall.
+		// The boundary is judged once, on the symlink-resolved paths (so a
+		// symlinked cwd spelling and a symlink leading out of cwd are both right).
+		if fi, err := os.Stat(tok); err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		real, err := evalSymlinks(tok)
+		if err != nil || !pathUnder(realCwd, real) {
+			continue
+		}
+		fi, err := os.Stat(real)
+		if err != nil {
+			continue
+		}
+		out = append(out, candidateFile{tok, fi})
+		if len(out) == max {
+			break
+		}
+	}
+	return out
+}
+
+// heredocStart finds `<<WORD`, `<<-WORD`, `<<'WORD'` or `<<"WORD"` (not `<<<`). A delimiter never
+// starts with a digit and `<<` is not preceded by `(`, so `$((1<<2))` and `((x<<2))` shifts are not heredocs.
+var heredocStart = regexp.MustCompile(`(?:^|[^<(])<<(-?)\s*(?:'([^']+)'|"([^"]+)"|\\?([^\s;|&()<>'"\\0-9][^\s;|&()<>'"\\]*))`)
+
+// stripHeredocBodies removes heredoc bodies (the lines after a `<<WORD` line up
+// to the terminator line) so text that is only data never yields a candidate and
+// stray quotes inside it cannot unbalance the scan. The command line itself is
+// kept. A heredoc marker inside a quoted string over-strips; that only drops
+// candidates.
+func stripHeredocBodies(command string) string {
+	lines := strings.Split(command, "\n")
+	var out []string
+	for i := 0; i < len(lines); i++ {
+		out = append(out, lines[i])
+		for _, m := range heredocStart.FindAllStringSubmatch(lines[i], -1) {
+			word := m[2] + m[3] + m[4]
+			for i++; i < len(lines); i++ {
+				l := lines[i]
+				if m[1] == "-" {
+					l = strings.TrimLeft(l, "\t")
+				}
+				if l == word {
+					break
+				}
+			}
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// evalSymlinks is swappable so a test can count resolutions.
+var evalSymlinks = filepath.EvalSymlinks
+
+// pathUnder reports whether path is strictly inside root, by path elements
+// (so /p2 is not under /p).
+func pathUnder(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

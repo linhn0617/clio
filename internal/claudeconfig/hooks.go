@@ -3,12 +3,23 @@ package claudeconfig
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
+
+	"github.com/linhn0617/clio/internal/shellwords"
 )
 
 // recallMatcher is every SessionStart source except `fork`: a forked session
 // already carries its parent's context, so a digest would only repeat it.
 const recallMatcher = "startup|resume|clear|compact"
+
+// fileHistoryMatcher: the file-history hook also fires on Bash, where it stays
+// silent unless the command names an existing file under cwd. Older clio wrote
+// readMatcher alone.
+const (
+	fileHistoryMatcher = "Read|Bash"
+	readMatcher        = "Read"
+)
 
 // recallTimeout (seconds) replaces Claude Code's 600 s default: a cold-cache
 // read of a large index must not hold session startup hostage.
@@ -23,20 +34,40 @@ func AddSessionStartHook(settingsPath, command string) error {
 	return mutate(settingsPath, func(root map[string]any) error { return addSessionStartHook(root, command) })
 }
 
+// FileHistoryInstall reports what installing the file-history hook actually did,
+// so callers describe the real mutation instead of guessing beforehand.
+type FileHistoryInstall struct {
+	Added     bool   // no clio file-history entry existed; a Read|Bash group was added
+	Upgraded  bool   // an older matcher:"Read" entry was retargeted or moved to Read|Bash
+	Collapsed int    // duplicate clio file-history entries removed
+	Misplaced string // matcher of a clio entry left alone because it does not cover both Read and Bash
+}
+
 // AddClioHooks registers the recall SessionStart hook and the file-history
-// PreToolUse(Read) hook in ONE mutation, so the settings file's .bak is the
+// PreToolUse(Read|Bash) hook in ONE mutation, so the settings file's .bak is the
 // pre-install content and the install is atomic. An empty fileHistoryCmd means
 // the user opted out: any existing clio file-history hook is removed instead.
 func AddClioHooks(settingsPath, recallCmd, fileHistoryCmd string) error {
-	return mutate(settingsPath, func(root map[string]any) error {
+	_, err := InstallClioHooks(settingsPath, recallCmd, fileHistoryCmd)
+	return err
+}
+
+// InstallClioHooks is AddClioHooks that also reports what happened to the
+// file-history hook (the zero value when it was opted out or already settled).
+func InstallClioHooks(settingsPath, recallCmd, fileHistoryCmd string) (FileHistoryInstall, error) {
+	var res FileHistoryInstall
+	err := mutate(settingsPath, func(root map[string]any) error {
 		if err := addSessionStartHook(root, recallCmd); err != nil {
 			return err
 		}
 		if fileHistoryCmd == "" {
 			return removeHookEntriesIn(root, "PreToolUse", isClioFileHistory)
 		}
-		return addPreToolUseReadHook(root, fileHistoryCmd)
+		var err error
+		res, err = installFileHistory(root, fileHistoryCmd)
+		return err
 	})
+	return res, err
 }
 
 // RemoveClioHooks removes both of clio's hooks in one mutation, keeping foreign
@@ -300,37 +331,215 @@ func hookIsClioRecall(h any) bool {
 }
 
 // AddPreToolUseReadHook registers clio's file-context hook: a PreToolUse group
-// with matcher "Read" and a 10-second timeout running the given command
+// with matcher "Read|Bash" and a 10-second timeout running the given command
 // (`<exe> file-history --hook`). Idempotent; other groups and keys untouched.
 func AddPreToolUseReadHook(settingsPath, command string) error {
-	return mutate(settingsPath, func(root map[string]any) error { return addPreToolUseReadHook(root, command) })
+	_, err := InstallPreToolUseReadHook(settingsPath, command)
+	return err
 }
 
-func addPreToolUseReadHook(root map[string]any, command string) error {
+// InstallPreToolUseReadHook is AddPreToolUseReadHook that reports what it did.
+func InstallPreToolUseReadHook(settingsPath, command string) (FileHistoryInstall, error) {
+	var res FileHistoryInstall
+	err := mutate(settingsPath, func(root map[string]any) error {
+		var err error
+		res, err = installFileHistory(root, command)
+		return err
+	})
+	return res, err
+}
+
+// installFileHistory makes exactly one clio file-history entry fire for both
+// Read and Bash.
+//   - A clio entry in a group whose matcher covers both counts as installed; the
+//     first one met stays and later duplicates are removed (Collapsed).
+//   - The shape an older clio wrote, matcher exactly "Read": a clio-only group is
+//     retargeted in place (position and other fields kept, current command
+//     applied, as upgradeLegacyRecall does); in a group shared with foreign hooks
+//     only clio's entry moves to a new Read|Bash group (Upgraded).
+//   - A clio entry under any other matcher is the user's placement: left alone,
+//     reported in Misplaced, and no second group is added (it would fire twice on
+//     the tool it already covers).
+//   - With no clio entry at all, a Read|Bash group is added (Added).
+func installFileHistory(root map[string]any, command string) (res FileHistoryInstall, err error) {
 	hooks, err := objKey(root, "hooks")
 	if err != nil {
-		return err
+		return res, err
 	}
 	pt, err := arrKey(hooks, "PreToolUse")
 	if err != nil {
-		return err
+		return res, err
 	}
 	repairUnquoted(pt, " file-history --hook", command)
-	// Present only counts inside a matcher:"Read" group: an entry a user moved
-	// under another matcher would never fire for Read, so we still add ours.
-	if !groupsHaveWithMatcher(pt, "Read", isClioFileHistory) {
-		pt = append(pt, map[string]any{
-			"matcher": "Read",
+	isClio := func(h any) bool { return hookCommandMatches(h, isClioFileHistory) }
+	existed := groupsHave(pt, isClioFileHistory)
+	emptied := map[int]bool{}
+	present, moved := false, false
+	// Pass 1: groups that already cover Read and Bash — first clio entry wins.
+	for i, g := range pt {
+		gm, hs, ok := groupHooks(g)
+		if !ok || !groupCoversReadAndBash(gm) {
+			continue
+		}
+		kept := make([]any, 0, len(hs))
+		for _, h := range hs {
+			if isClio(h) {
+				if present {
+					res.Collapsed++
+					continue
+				}
+				present = true
+			}
+			kept = append(kept, h)
+		}
+		gm["hooks"] = kept
+		emptied[i] = len(hs) > 0 && len(kept) == 0
+	}
+	// Pass 2: exact "Read" groups (the older shape).
+	for i, g := range pt {
+		gm, hs, ok := groupHooks(g)
+		if !ok || !isExactReadMatcher(gm["matcher"]) {
+			continue
+		}
+		var foreign, clio []any
+		for _, h := range hs {
+			if isClio(h) {
+				clio = append(clio, h)
+			} else {
+				foreign = append(foreign, h)
+			}
+		}
+		switch {
+		case len(clio) == 0:
+		case len(foreign) == 0 && !present:
+			first := clio[0].(map[string]any)
+			first["command"] = command
+			if first["timeout"] == nil {
+				first["timeout"] = 10
+			}
+			gm["matcher"] = fileHistoryMatcher
+			gm["hooks"] = []any{first}
+			present = true
+			res.Upgraded = true
+			res.Collapsed += len(clio) - 1
+		default:
+			gm["hooks"] = foreign
+			emptied[i] = len(foreign) == 0
+			if present {
+				res.Collapsed += len(clio)
+			} else {
+				res.Collapsed += len(clio) - 1
+				moved = true // the first entry moves to a new group below
+			}
+		}
+	}
+	out := make([]any, 0, len(pt)+1)
+	for i, g := range pt {
+		if !emptied[i] {
+			out = append(out, g)
+		}
+	}
+	switch {
+	case present:
+	case moved:
+		res.Upgraded = true
+	case existed:
+		for _, g := range out {
+			if gm, hs, ok := groupHooks(g); ok && groupsHave([]any{map[string]any{"hooks": hs}}, isClioFileHistory) {
+				res.Misplaced = fmt.Sprint(gm["matcher"])
+				break
+			}
+		}
+	default:
+		res.Added = true
+	}
+	if !present && (moved || !existed) {
+		out = append(out, map[string]any{
+			"matcher": fileHistoryMatcher,
 			"hooks": []any{
 				// Explicit short timeout: the reference default is 600 s and
-				// the hook runs on every Read, so a stall must fail fast.
+				// the hook runs on every Read and Bash, so a stall must fail fast.
 				map[string]any{"type": "command", "command": command, "timeout": 10},
 			},
 		})
 	}
-	hooks["PreToolUse"] = pt
+	hooks["PreToolUse"] = out
 	root["hooks"] = hooks
-	return nil
+	return res, nil
+}
+
+func groupCoversReadAndBash(gm map[string]any) bool {
+	m := gm["matcher"]
+	return matcherCoversTool(m, "Read") && matcherCoversTool(m, "Bash")
+}
+
+// exactListRe is Claude Code's "exact string / list" matcher alphabet: letters,
+// digits, `_`, `-`, spaces, `,` and `|`.
+var exactListRe = regexp.MustCompile(`^[A-Za-z0-9_\- ,|]+$`)
+
+// matcherList splits an exact-list matcher on `|` and `,`, trimming each item.
+func matcherList(m string) []string {
+	items := strings.FieldsFunc(m, func(r rune) bool { return r == '|' || r == ',' })
+	for i := range items {
+		items[i] = strings.TrimSpace(items[i])
+	}
+	return items
+}
+
+// matcherCoversTool reports whether a hook matcher fires for the named tool,
+// following Claude Code's hooks documentation (Matcher patterns): "*", "" or an
+// absent matcher match everything; a matcher made only of letters, digits, `_`,
+// `-`, spaces, `,` and `|` is a list of exact names; anything else is a
+// JavaScript regex tested unanchored. Go's regexp stands in for the JS engine
+// (equivalent on the simple patterns in real configs); a pattern that does not
+// compile, or a non-string matcher, is treated as not covering.
+func matcherCoversTool(matcher any, tool string) bool {
+	if matcher == nil {
+		return true
+	}
+	m, ok := matcher.(string)
+	if !ok {
+		return false
+	}
+	if m == "" || m == "*" {
+		return true
+	}
+	if exactListRe.MatchString(m) {
+		for _, item := range matcherList(m) {
+			if item == tool {
+				return true
+			}
+		}
+		return false
+	}
+	re, err := regexp.Compile(m)
+	return err == nil && re.MatchString(tool)
+}
+
+// isExactReadMatcher reports the shape an older clio wrote: an exact-list matcher
+// whose every item is "Read" (so `Read` and ` Read `, but not `Read|Bash`).
+func isExactReadMatcher(matcher any) bool {
+	m, ok := matcher.(string)
+	if !ok || !exactListRe.MatchString(m) {
+		return false
+	}
+	items := matcherList(m)
+	for _, it := range items {
+		if it != readMatcher {
+			return false
+		}
+	}
+	return len(items) > 0
+}
+
+// groupHooks returns a group's hooks array, or nil/false for a malformed group.
+func groupHooks(g any) (gm map[string]any, hs []any, ok bool) {
+	gm, ok = g.(map[string]any)
+	if !ok {
+		return nil, nil, false
+	}
+	hs, ok = gm["hooks"].([]any)
+	return gm, hs, ok
 }
 
 // RemovePreToolUseReadHook removes clio's file-context hook entries, keeping any
@@ -339,21 +548,37 @@ func RemovePreToolUseReadHook(settingsPath string) error {
 	return removeHookEntries(settingsPath, "PreToolUse", isClioFileHistory)
 }
 
-// HasPreToolUseReadHook reports whether clio's file-context hook is registered
-// where it can fire: inside a matcher:"Read" group.
+// HasPreToolUseReadHook reports whether clio's file-context hook is fully
+// registered: a clio entry sits in a group whose matcher covers both Read and
+// Bash. An older Read-only entry is not (install-hook upgrades it).
 func HasPreToolUseReadHook(settingsPath string) (bool, error) {
-	return hasHookEntry(settingsPath, "PreToolUse", "Read", isClioFileHistory)
+	root, err := load(settingsPath)
+	if err != nil {
+		return false, err
+	}
+	hooks, _ := root["hooks"].(map[string]any)
+	pt, _ := hooks["PreToolUse"].([]any)
+	for _, g := range pt {
+		if gm, hs, ok := groupHooks(g); ok && groupCoversReadAndBash(gm) {
+			for _, h := range hs {
+				if hookCommandMatches(h, isClioFileHistory) {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
 }
 
 // HasAnyClioHookEntries reports whether any clio hook entry exists at all,
 // regardless of matcher — what uninstall needs, since a misplaced entry still
 // deserves removal even though it would never fire.
 func HasAnyClioHookEntries(settingsPath string) (recall, fileHistory bool, err error) {
-	recall, err = hasHookEntry(settingsPath, "SessionStart", "", isClioRecall)
+	recall, err = hasHookEntry(settingsPath, "SessionStart", isClioRecall)
 	if err != nil {
 		return false, false, err
 	}
-	fileHistory, err = hasHookEntry(settingsPath, "PreToolUse", "", isClioFileHistory)
+	fileHistory, err = hasHookEntry(settingsPath, "PreToolUse", isClioFileHistory)
 	return recall, fileHistory, err
 }
 
@@ -405,9 +630,8 @@ func removeHookEntriesIn(root map[string]any, event string, match func(string) b
 	return nil
 }
 
-// hasHookEntry reports whether any entry under event has a matching command;
-// a non-empty matcher restricts the search to groups with exactly that matcher.
-func hasHookEntry(settingsPath, event, matcher string, match func(string) bool) (bool, error) {
+// hasHookEntry reports whether any entry under event has a matching command.
+func hasHookEntry(settingsPath, event string, match func(string) bool) (bool, error) {
 	root, err := load(settingsPath)
 	if err != nil {
 		return false, err
@@ -420,25 +644,7 @@ func hasHookEntry(settingsPath, event, matcher string, match func(string) bool) 
 	if !ok {
 		return false, nil
 	}
-	if matcher != "" {
-		return groupsHaveWithMatcher(groups, matcher, match), nil
-	}
 	return groupsHave(groups, match), nil
-}
-
-// groupsHaveWithMatcher is groupsHave restricted to groups whose matcher is
-// exactly matcher.
-func groupsHaveWithMatcher(groups []any, matcher string, match func(string) bool) bool {
-	for _, g := range groups {
-		gm, ok := g.(map[string]any)
-		if !ok || gm["matcher"] != matcher {
-			continue
-		}
-		if groupsHave([]any{gm}, match) {
-			return true
-		}
-	}
-	return false
 }
 
 func groupsHave(groups []any, match func(string) bool) bool {
@@ -480,65 +686,10 @@ func ShellQuote(path string) string {
 	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }
 
-// splitCommand is the minimal word splitter the recognisers need: whitespace
-// separated words, '…' literal, "…" with backslash escapes, and a bare \x
-// escape (which is what ShellQuote emits between '…' runs). ok is false for an
-// unterminated quote or trailing backslash, which no shell would accept either.
-func splitCommand(cmd string) (words []string, ok bool) {
-	var cur strings.Builder
-	inWord := false
-	rs := []rune(cmd)
-	for i := 0; i < len(rs); i++ {
-		switch c := rs[i]; {
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
-			if inWord {
-				words = append(words, cur.String())
-				cur.Reset()
-				inWord = false
-			}
-		case c == '\'':
-			inWord = true
-			i++
-			for ; i < len(rs) && rs[i] != '\''; i++ {
-				cur.WriteRune(rs[i])
-			}
-			if i == len(rs) {
-				return nil, false
-			}
-		case c == '"':
-			inWord = true
-			i++
-			for ; i < len(rs) && rs[i] != '"'; i++ {
-				if rs[i] == '\\' && i+1 < len(rs) && strings.ContainsRune("\"\\$`", rs[i+1]) {
-					i++
-				}
-				cur.WriteRune(rs[i])
-			}
-			if i == len(rs) {
-				return nil, false
-			}
-		case c == '\\':
-			if i+1 == len(rs) {
-				return nil, false
-			}
-			inWord = true
-			i++
-			cur.WriteRune(rs[i])
-		default:
-			inWord = true
-			cur.WriteRune(c)
-		}
-	}
-	if inWord {
-		words = append(words, cur.String())
-	}
-	return words, true
-}
-
 // isClioFileHistory identifies the `<…/clio> file-history --hook` command with
 // the same exact-shape rule as isClioRecall: any binary path, exact arguments.
 func isClioFileHistory(command string) bool {
-	f, ok := splitCommand(command)
+	f, ok := shellwords.Split(command)
 	if ok && len(f) == 3 && f[1] == "file-history" && f[2] == "--hook" && filepath.Base(f[0]) == "clio" {
 		return true
 	}
@@ -549,7 +700,7 @@ func isClioFileHistory(command string) bool {
 // binary's absolute path so it stays removable across reinstalls, but tightly
 // enough that unrelated commands (e.g. `clio-helper recall`) do not match.
 func isClioRecall(command string) bool {
-	f, ok := splitCommand(command)
+	f, ok := shellwords.Split(command)
 	if ok && len(f) == 2 && f[1] == "recall" && filepath.Base(f[0]) == "clio" {
 		return true
 	}
