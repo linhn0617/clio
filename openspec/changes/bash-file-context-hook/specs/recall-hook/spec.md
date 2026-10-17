@@ -21,9 +21,13 @@ upgraded the same way: a group holding only clio's entry is retargeted in place 
 `Read|Bash` (taking the current command), while from a group shared with foreign hooks
 clio's entry SHALL move to its own `Read|Bash` group and the foreign hooks SHALL stay under
 `Read`; a repeat install SHALL leave exactly one clio entry, and a file-history entry the
-user placed under any other matcher SHALL be left unchanged. A group "covers Read" when it has no matcher (or an empty one) or its matcher, anchored as
-`^(?:matcher)$`, matches `Read` (a matcher that does not compile does not cover). A clio entry in any
-group that covers Read (`Read|Bash`, `Bash|Read`, `Read|Edit`, no matcher, or the older exact
+user placed under any other matcher SHALL be left unchanged. A group "covers Read" per Claude Code's matcher rules: an absent, empty or `*`
+matcher matches every tool; a matcher made only of letters, digits, `_`, `-`, spaces, `,`
+and `|` is a list of exact tool names (items separated by `|` or `,`, surrounding whitespace
+ignored) and covers Read when an item is `Read`; any other matcher is a regular expression
+tested unanchored against `Read` (an uncompilable pattern, or a non-string matcher, does not
+cover). A clio entry in any
+group that covers Read (`Read|Bash`, `Bash, Read`, `Rea.`, `*`, no matcher, or the older exact
 `Read`) SHALL count as installed, and no second group SHALL be added for it. Within one
 install, duplicate clio file-history entries in Read-covering groups SHALL be reduced to the
 first one met (groups left empty are removed, foreign hooks stay). `install-hook` SHALL
@@ -54,8 +58,13 @@ in place SHALL get the current binary path.
 
 #### Scenario: Other Read-covering matcher counts as installed
 
-- **WHEN** clio's entry sits in a group with matcher `Bash|Read`, `Read|Edit`, or no matcher
+- **WHEN** clio's entry sits in a group with matcher `Bash|Read`, `Read, Bash`, `Rea.`, `*`, or no matcher
 - **THEN** `clio install-hook` SHALL add no second group and SHALL NOT report an upgrade
+
+#### Scenario: Non-covering matcher gets its own group
+
+- **WHEN** clio's entry sits in a group with matcher `Rea` or `^Edit$`
+- **THEN** `clio install-hook` SHALL add a `Read|Bash` group and leave the other untouched
 
 #### Scenario: Duplicate entries collapse
 

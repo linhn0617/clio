@@ -346,25 +346,63 @@ func addPreToolUseReadHook(root map[string]any, command string) error {
 	return nil
 }
 
-// coversRead reports whether a PreToolUse matcher fires for the Read tool: an
-// empty matcher matches every tool, otherwise it is an anchored regex. A matcher
-// that does not compile is treated as not covering (never guess it fires).
-func coversRead(matcher string) bool {
-	if matcher == "" {
-		return true
+// exactListRe is Claude Code's "exact string / list" matcher alphabet: letters,
+// digits, `_`, `-`, spaces, `,` and `|`.
+var exactListRe = regexp.MustCompile(`^[A-Za-z0-9_\- ,|]+$`)
+
+// matcherList splits an exact-list matcher on `|` and `,`, trimming each item.
+func matcherList(m string) []string {
+	items := strings.FieldsFunc(m, func(r rune) bool { return r == '|' || r == ',' })
+	for i := range items {
+		items[i] = strings.TrimSpace(items[i])
 	}
-	re, err := regexp.Compile("^(?:" + matcher + ")$")
-	return err == nil && re.MatchString("Read")
+	return items
 }
 
-// groupCoversRead is coversRead for a settings group (absent matcher = all tools).
-func groupCoversRead(gm map[string]any) bool {
-	m, has := gm["matcher"]
-	if !has {
+// matcherCoversTool reports whether a hook matcher fires for the named tool,
+// following Claude Code's hooks documentation (Matcher patterns): "*", "" or an
+// absent matcher match everything; a matcher made only of letters, digits, `_`,
+// `-`, spaces, `,` and `|` is a list of exact names; anything else is a
+// JavaScript regex tested unanchored. Go's regexp stands in for the JS engine
+// (equivalent on the simple patterns in real configs); a pattern that does not
+// compile, or a non-string matcher, is treated as not covering.
+func matcherCoversTool(matcher any, tool string) bool {
+	if matcher == nil {
 		return true
 	}
-	ms, ok := m.(string)
-	return ok && coversRead(ms)
+	m, ok := matcher.(string)
+	if !ok {
+		return false
+	}
+	if m == "" || m == "*" {
+		return true
+	}
+	if exactListRe.MatchString(m) {
+		for _, item := range matcherList(m) {
+			if item == tool {
+				return true
+			}
+		}
+		return false
+	}
+	re, err := regexp.Compile(m)
+	return err == nil && re.MatchString(tool)
+}
+
+// isExactReadMatcher reports the shape an older clio wrote: an exact-list matcher
+// whose every item is "Read" (so `Read` and ` Read `, but not `Read|Bash`).
+func isExactReadMatcher(matcher any) bool {
+	m, ok := matcher.(string)
+	if !ok || !exactListRe.MatchString(m) {
+		return false
+	}
+	items := matcherList(m)
+	for _, it := range items {
+		if it != readMatcher {
+			return false
+		}
+	}
+	return len(items) > 0
 }
 
 // groupHooks returns a group's hooks array, or nil/false for a malformed group.
@@ -383,7 +421,7 @@ func groupHooks(g any) (gm map[string]any, hs []any, ok bool) {
 func anyCoveringClio(pt []any, exactRead bool) bool {
 	for _, g := range pt {
 		gm, hs, ok := groupHooks(g)
-		if !ok || !groupCoversRead(gm) || (gm["matcher"] == readMatcher) != exactRead {
+		if !ok || !matcherCoversTool(gm["matcher"], "Read") || isExactReadMatcher(gm["matcher"]) != exactRead {
 			continue
 		}
 		for _, h := range hs {
@@ -403,7 +441,7 @@ func readUpgradePending(pt []any) bool {
 	}
 	for _, g := range pt {
 		gm, hs, ok := groupHooks(g)
-		if !ok || gm["matcher"] != readMatcher || len(hs) == 0 {
+		if !ok || !isExactReadMatcher(gm["matcher"]) || len(hs) == 0 {
 			continue
 		}
 		clioOnly := true
@@ -433,7 +471,7 @@ func upgradeReadFileHistory(pt []any, command string) (out []any, present bool) 
 	// Pass 1: covering groups other than exact "Read" — first clio entry wins.
 	for i, g := range pt {
 		gm, hs, ok := groupHooks(g)
-		if !ok || !groupCoversRead(gm) || gm["matcher"] == readMatcher {
+		if !ok || !matcherCoversTool(gm["matcher"], "Read") || isExactReadMatcher(gm["matcher"]) {
 			continue
 		}
 		kept := make([]any, 0, len(hs))
@@ -452,7 +490,7 @@ func upgradeReadFileHistory(pt []any, command string) (out []any, present bool) 
 	// Pass 2: exact "Read" groups (the older shape).
 	for i, g := range pt {
 		gm, hs, ok := groupHooks(g)
-		if !ok || gm["matcher"] != readMatcher {
+		if !ok || !isExactReadMatcher(gm["matcher"]) {
 			continue
 		}
 		var foreign, clio []any

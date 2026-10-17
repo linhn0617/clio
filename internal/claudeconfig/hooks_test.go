@@ -764,14 +764,54 @@ func installPT(t *testing.T, pt string) string {
 	return path
 }
 
-func TestCoversRead(t *testing.T) {
-	for m, want := range map[string]bool{
-		"Read": true, "Read|Bash": true, "Bash|Read": true, "Read|Edit": true, "": true,
-		"Bash": false, "Edit": false, "ReadX": false, "Reader": false, "Re(ad": false, // bad regex → not covering
-	} {
-		if got := coversRead(m); got != want {
-			t.Errorf("coversRead(%q) = %v, want %v", m, got, want)
+func TestMatcherCoversTool(t *testing.T) {
+	cases := []struct {
+		m    any
+		want bool
+	}{
+		{nil, true}, {"", true}, {"*", true}, // match all
+		{"Read", true}, {"Read|Bash", true}, {"Bash|Read", true}, {"Read|Edit", true},
+		{"Bash, Read", true}, {" Read , Edit ", true}, {"Bash,Read", true}, {" Read ", true},
+		{"Bash", false}, {"Edit|Write", false}, {"Rea", false}, {"ReadX", false}, {"Reader", false}, {"read", false},
+		{"^Notebook", false}, {"Rea.", true}, {"^Edit$", false}, {"mcp__.*", false}, {"Re(ad|x)", true},
+		{"^Read$", true}, {"Read.*", true}, {"Re(ad", false}, // does not compile → not covering
+		{42, false}, // not a string
+	}
+	for _, c := range cases {
+		if got := matcherCoversTool(c.m, "Read"); got != c.want {
+			t.Errorf("matcherCoversTool(%#v, Read) = %v, want %v", c.m, got, c.want)
 		}
+	}
+}
+
+func TestIsExactReadMatcher(t *testing.T) {
+	for m, want := range map[string]bool{"Read": true, " Read ": true, "Read|Read": true, "Read|Bash": false, "Bash": false, "": false, "*": false, "Rea.": false} {
+		if got := isExactReadMatcher(m); got != want {
+			t.Errorf("isExactReadMatcher(%q) = %v, want %v", m, got, want)
+		}
+	}
+}
+
+// Official matcher semantics: list items, wildcard and unanchored regex all count.
+func TestAddPreToolUseHookOfficialMatcherSemantics(t *testing.T) {
+	for matcher, wantExtra := range map[string]bool{"*": false, "Read, Bash": false, "Rea.": false, "Rea": true, "^Edit$": true, "mcp__.*": true} {
+		path := installPT(t, `[{"matcher":"`+matcher+`","hooks":[{"type":"command","command":"`+clioFH+`"}]}]`)
+		if err := AddPreToolUseReadHook(path, clioFH); err != nil {
+			t.Fatal(err)
+		}
+		n := len(preToolUseGroups(t, readSettings(t, path)))
+		if (n == 2) != wantExtra || n > 2 {
+			t.Errorf("matcher %q: %d groups after install, want extra group = %v", matcher, n, wantExtra)
+		}
+	}
+	// A lone " Read " group is still the old shape and gets retargeted in place.
+	path := installPT(t, `[{"matcher":" Read ","hooks":[{"type":"command","command":"`+clioFH+`"}]}]`)
+	if legacy, _ := HasLegacyPreToolUseReadHook(path); !legacy {
+		t.Error(`" Read " must count as the upgradable old shape`)
+	}
+	_ = AddPreToolUseReadHook(path, clioFH)
+	if pt := preToolUseGroups(t, readSettings(t, path)); len(pt) != 1 || pt[0].(map[string]any)["matcher"] != "Read|Bash" {
+		t.Errorf("want in-place retarget, got %v", pt)
 	}
 }
 
