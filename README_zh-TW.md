@@ -107,6 +107,8 @@ Claude Code 會把超過 `cleanupPeriodDays`（預設 **30** 天）的 session �
 | `activity_summary` | 依天或專案、你最常動的檔／指令／工具／pattern／URL，或各 session 的 token 用量統計（「我的 token 燒去哪了？」） |
 | `read_session` | 分頁讀取單一 session 的完整內容；回報母體的子代理（`include_subagents` 連訊息一起內嵌） |
 
+每個工具的回應都以 `max_chars` 為上限（預設 40,000 字元，低於 Claude Code 把工具輸出轉存成檔案的 50,000 字元門檻；範圍 4,000–48,000）：超出預算的列會在列邊界被截掉，回應帶 `truncated: true` 與 `next` 提示。`read_session` 另有 `last_n`（讀 session 結尾）與 `around_sequence`（以某則訊息 `seq` 為中心的視窗）；`offset`、`last_n`、`around_sequence` 三者互斥，回應會附 `total`。
+
 檢索品質（排序、FTS/LIKE 分層、`ask` 的分組與加窗）由一套涵蓋端到端的決定性
 回歸測試套件保護：以小型雙語 fixture corpus 跑在 `internal/eval`，屬於一般
 `go test ./...` 的一部分。

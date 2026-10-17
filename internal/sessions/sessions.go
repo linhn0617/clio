@@ -268,6 +268,33 @@ func GetMessages(ctx context.Context, database *db.DB, sessionUUID string, offse
 	return out, hasMore, nil
 }
 
+// CountMessages counts a session's messages under the same role filter as
+// GetMessages. With beforeSeq non-nil only messages with seq < *beforeSeq are
+// counted, which is the zero-based position GetMessages' offset would use to
+// start at that seq.
+func CountMessages(ctx context.Context, database *db.DB, sessionUUID string, includeToolOutput bool, beforeSeq *int) (int, error) {
+	q := `SELECT COUNT(*) FROM messages WHERE session_uuid = ?`
+	args := []any{sessionUUID}
+	if !includeToolOutput {
+		q += " AND role IN ('user','assistant')"
+	}
+	if beforeSeq != nil {
+		q += " AND seq < ?"
+		args = append(args, *beforeSeq)
+	}
+	var n int
+	err := database.QueryRowContext(ctx, q, args...).Scan(&n)
+	return n, err
+}
+
+// MaxSeq returns the highest message seq of a session over all roles, or -1
+// when it has no messages.
+func MaxSeq(ctx context.Context, database *db.DB, sessionUUID string) (int, error) {
+	var n int
+	err := database.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), -1) FROM messages WHERE session_uuid = ?`, sessionUUID).Scan(&n)
+	return n, err
+}
+
 // GetWindow returns a conversational window around a retrieval hit: up to `before`
 // dialogue messages preceding the hit at hitSeq, the hit itself, and up to `after`
 // following ones, ordered by seq. The window is taken in user/assistant turn space

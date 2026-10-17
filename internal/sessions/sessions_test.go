@@ -343,6 +343,26 @@ func TestGetMessagesPaginationAndHasMore(t *testing.T) {
 	}
 }
 
+func TestCountMessagesMatchesGetMessagesFilter(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p", 1)
+	addMsg(t, d, "s1", 0, "user", "u")
+	addMsg(t, d, "s1", 1, "tool_result", "t")
+	addMsg(t, d, "s1", 2, "assistant", "a")
+	ctx := context.Background()
+	seq := 2
+	for _, c := range []struct {
+		tool   bool
+		before *int
+		want   int
+	}{{false, nil, 2}, {true, nil, 3}, {false, &seq, 1}, {true, &seq, 2}} {
+		got, err := CountMessages(ctx, d, "s1", c.tool, c.before)
+		if err != nil || got != c.want {
+			t.Fatalf("tool=%v before=%v: got %d err=%v want %d", c.tool, c.before, got, err, c.want)
+		}
+	}
+}
+
 func TestGetMessagesExcludesToolOutput(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p", 1)

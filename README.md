@@ -110,6 +110,8 @@ When registered via `clio install-mcp`, Claude Code can call:
 | `activity_summary` | Counts by day or project, your most-used files / commands / tools / patterns / URLs ("what did I touch last week?"), or session token usage ("which sessions burned my tokens?") |
 | `read_session` | Read one session in full, paginated; reports a parent's subagents (`include_subagents` inlines them) |
 
+Every tool bounds its response to `max_chars` (default 40,000 characters — under Claude Code's 50,000-character spill-to-file threshold; range 4,000–48,000): rows past the budget are dropped at a row boundary and the response carries `truncated: true` plus a `next` hint. `read_session` also takes `last_n` (read the end of a session) and `around_sequence` (a window centred on a message `seq`); `offset`, `last_n` and `around_sequence` are mutually exclusive, and the response reports `total`.
+
 Retrieval quality (ranking, FTS/LIKE tiering, `ask` grouping and windowing) is protected end to end by a deterministic regression suite over a small bilingual fixture corpus (`internal/eval`, runs under plain `go test ./...`).
 
 ## Privacy

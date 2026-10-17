@@ -48,6 +48,9 @@ func sourceOptions(prefix string) []mcp.PropertyOption {
 	}
 }
 
+// maxCharsDescription is shared by all five tools' max_chars parameter.
+var maxCharsDescription = fmt.Sprintf("Max characters (Unicode code points) in the serialized response (default %d, min %d, max %d); rows beyond it are dropped, an oversized single row has its text cut, and the response carries truncated=true plus a next hint", defaultMaxChars, minMaxChars, maxMaxChars)
+
 // NewServer builds an MCP server with clio's four tools registered. beforeRead,
 // if non-nil, runs before each read tool serves (used by followers for a
 // best-effort catch-up). It must never block indefinitely or panic.
@@ -74,6 +77,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("role", mcp.Description("Filter by role"), mcp.Enum("user", "assistant")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 10, max 50)"), mcp.DefaultNumber(defaultSearchLimit), mcp.Min(1), mcp.Max(maxSearchLimit)),
 		mcp.WithBoolean("include_tool_output", mcp.Description("Include tool output in results"), mcp.DefaultBool(false)),
+		mcp.WithNumber("max_chars", mcp.Description(maxCharsDescription), mcp.DefaultNumber(defaultMaxChars), mcp.Min(minMaxChars), mcp.Max(maxMaxChars)),
 		mcp.WithString("source", sourceOptions("Which tool's history")...),
 	), handleSearch(database, beforeRead))
 
@@ -88,6 +92,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("project", mcp.Description("Limit to a project path prefix (default: all projects)")),
 		mcp.WithNumber("limit", mcp.Description(fmt.Sprintf("Max sessions in the bundle (default %d, max %d)", defaultAskSessions, maxAskSessions)), mcp.DefaultNumber(defaultAskSessions), mcp.Min(1), mcp.Max(maxAskSessions)),
 		mcp.WithNumber("max_tokens", mcp.Description(fmt.Sprintf("Max estimated tokens in the bundle's excerpt text (default %d, min %d, max %d)", defaultMaxTokens, minMaxTokens, maxMaxTokens)), mcp.DefaultNumber(defaultMaxTokens), mcp.Min(minMaxTokens), mcp.Max(maxMaxTokens)),
+		mcp.WithNumber("max_chars", mcp.Description(maxCharsDescription), mcp.DefaultNumber(defaultMaxChars), mcp.Min(minMaxChars), mcp.Max(maxMaxChars)),
 		mcp.WithString("source", sourceOptions("Which tool's history")...),
 	), handleAsk(database, beforeRead))
 
@@ -105,6 +110,7 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("tool", mcp.Description("Only sessions that used this tool, e.g. Bash or mcp__server__name")),
 		mcp.WithString("ran", mcp.Description("Only sessions that ran a command containing this substring")),
 		mcp.WithBoolean("include_subagents", mcp.Description("Include subagent child sessions (default: top-level only)"), mcp.DefaultBool(false)),
+		mcp.WithNumber("max_chars", mcp.Description(maxCharsDescription), mcp.DefaultNumber(defaultMaxChars), mcp.Min(minMaxChars), mcp.Max(maxMaxChars)),
 		mcp.WithString("source", sourceOptions("Which tool's history")...),
 	), handleListSessions(database, beforeRead))
 
@@ -118,20 +124,24 @@ func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPSe
 		mcp.WithString("group_by", mcp.Description("Grouping: day or project (counts), file/command/tool/pattern/url (activity), or usage (session token totals)"), mcp.Enum("day", "project", "file", "command", "tool", "pattern", "url", "usage"), mcp.DefaultString("day")),
 		mcp.WithString("project", mcp.Description("Filter by project path (matches it and anything beneath; group_by=usage still matches it as a raw prefix)")),
 		mcp.WithNumber("limit", mcp.Description("Max rows for file/command/tool/pattern/url grouping (default 30, max 50)"), mcp.DefaultNumber(30), mcp.Min(1), mcp.Max(maxSearchLimit)),
+		mcp.WithNumber("max_chars", mcp.Description(maxCharsDescription), mcp.DefaultNumber(defaultMaxChars), mcp.Min(minMaxChars), mcp.Max(maxMaxChars)),
 		mcp.WithString("source", sourceOptions("Which tool's history")...),
 	), handleActivitySummary(database, beforeRead))
 
 	s.AddTool(mcp.NewTool("read_session",
-		mcp.WithDescription("Read a session's messages in full, paginated. Tool output is excluded unless include_tool_output is true."),
+		mcp.WithDescription("Read a session's messages in full, paginated (from an offset, the last N, or around a seq). Tool output is excluded unless include_tool_output is true."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(false),
 		mcp.WithString("uuid", mcp.Required(), mcp.Description("Session uuid or unambiguous prefix")),
-		mcp.WithNumber("offset", mcp.Description("Message offset for pagination"), mcp.DefaultNumber(0), mcp.Min(0)),
-		mcp.WithNumber("limit", mcp.Description("Max messages per page (default 50, max 200)"), mcp.DefaultNumber(defaultReadLimit), mcp.Min(1), mcp.Max(maxReadLimit)),
+		mcp.WithNumber("offset", mcp.Description("Message offset for pagination (mutually exclusive with last_n and around_sequence)"), mcp.DefaultNumber(0), mcp.Min(0)),
+		mcp.WithNumber("limit", mcp.Description("Max messages per page (default 50, max 200); with around_sequence the window is centred on that seq (limit/2 messages before it, the rest after, slid back to a full page near the end); with last_n the page is min(last_n, limit)"), mcp.DefaultNumber(defaultReadLimit), mcp.Min(1), mcp.Max(maxReadLimit)),
+		mcp.WithNumber("last_n", mcp.Description("Read the last N messages instead of a page from the start (at most limit; mutually exclusive with offset and around_sequence)"), mcp.Min(1), mcp.Max(maxReadLimit)),
+		mcp.WithNumber("around_sequence", mcp.Description("Read a window centred on this message seq, 0 to the session's last seq (mutually exclusive with offset and last_n)"), mcp.Min(0)),
 		mcp.WithBoolean("include_tool_output", mcp.Description("Include tool output / thinking"), mcp.DefaultBool(false)),
 		mcp.WithBoolean("include_subagents", mcp.Description("Inline each subagent's messages in the result")),
+		mcp.WithNumber("max_chars", mcp.Description(maxCharsDescription), mcp.DefaultNumber(defaultMaxChars), mcp.Min(minMaxChars), mcp.Max(maxMaxChars)),
 		mcp.WithString("source", sourceOptions("Source filter for prefix resolution")...),
 	), handleReadSession(database, beforeRead))
 
