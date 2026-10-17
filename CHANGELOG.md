@@ -5,6 +5,34 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-10-17
+
+Removes the Gemini CLI source (openspec change `remove-gemini-cli-source`).
+Google retired Gemini CLI's personal tier upstream — a live request now answers
+`This client is no longer supported for Gemini Code Assist for individuals …
+migrate to the Antigravity suite` — so the adapter had no working target.
+
+### Removed
+
+- **Gemini CLI source adapter.** `~/.gemini/tmp/*/logs.json` is no longer
+  scanned; `gemini` is gone from `--source`, the MCP `source` enums, the TUI
+  source label and the `doctor` root report. `clio --source gemini` is rejected
+  as an invalid source.
+- The orphaned `errUnusableStateRecord` abort path in the ingest loop (only the
+  Gemini adapter ever raised it). The generic `WholeFileReplay()` source SPI
+  stays.
+
+### Changed
+
+- **Migration 0014 deletes previously indexed Gemini data — this is
+  irreversible.** On the next command that opens the database for writing, all
+  rows with `source = 'gemini'` are removed from `sessions`, `messages` (the FTS
+  index follows via trigger), `tool_calls`, `tool_targets`, `session_usage`,
+  `quota_snapshots`, `ingest_state` and `source_conflicts`. Back up
+  `db.sqlite` first if you want to keep those sessions.
+
+A future Antigravity CLI adapter would be a separate change.
+
 ## [0.18.0] - 2026-10-17
 
 Hardening pass from a six-way review of the shipped code (openspec change
