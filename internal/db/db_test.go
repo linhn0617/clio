@@ -219,3 +219,45 @@ func TestMigration0015DropsRedundantMessagesIndex(t *testing.T) {
 		}
 	}
 }
+
+func TestMigration0016ActivityBackfillWatermark(t *testing.T) {
+	d, err := Open(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	var n int
+	if err := d.QueryRow(`SELECT count(*) FROM activity_backfill_state`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("migration seeded %d rows", n)
+	}
+	for _, q := range []string{`DROP TABLE activity_backfill_state`, `DELETE FROM schema_migrations WHERE name='0016_activity_backfill_watermark.sql'`} {
+		if _, err := d.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO activity_backfill_state VALUES (2,0)`); err == nil {
+		t.Fatal("accepted non-singleton id")
+	}
+	if _, err := d.Exec(`INSERT INTO activity_backfill_state VALUES (1,NULL)`); err == nil {
+		t.Fatal("accepted NULL watermark")
+	}
+	if _, err := d.Exec(`INSERT INTO activity_backfill_state VALUES (1,42)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	var w int
+	if err := d.QueryRow(`SELECT checked_through FROM activity_backfill_state WHERE id=1`).Scan(&w); err != nil {
+		t.Fatal(err)
+	}
+	if w != 42 {
+		t.Fatalf("migration reset watermark to %d", w)
+	}
+}

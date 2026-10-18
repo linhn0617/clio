@@ -73,60 +73,73 @@ func capValue(s string) string {
 	return trimToValidUTF8(s[:maxTargetValueBytes])
 }
 
-// BackfillActivity fills tool_targets for tool_use messages that don't have facts
-// yet, from their stored (redacted) raw_json, without re-reading source files.
-//
-// It is order-independent and idempotent: it inserts only for messages missing
-// facts, so it works whether it runs before or after normal ingest, and re-running
-// is a no-op. raw_json holds the whole event, so an event with N non-clio tool_use
-// blocks produced N consecutive tool_use messages; we re-parse each event once and
-// align its i-th block to its i-th message (`% len(blocks)` keeps that alignment
-// even for the degenerate case of two adjacent byte-identical events). The write
-// runs in an IMMEDIATE transaction so concurrent clio processes can't double-insert.
+// activityPendingSQL deliberately uses the primary-key range rather than the role
+// or session indexes: a caught-up index must not scan its historical tool_use rows.
+const activityPendingSQL = `SELECT COALESCE(MAX(id),0),
+ EXISTS(SELECT 1 FROM messages m NOT INDEXED WHERE m.id > ? AND m.role = 'tool_use'
+ AND m.session_uuid IN (SELECT uuid FROM sessions WHERE source IS NULL OR source = 'claude-code')
+ AND NOT EXISTS(SELECT 1 FROM tool_targets tt WHERE tt.message_id = m.id)) FROM messages`
+
+const activityWatermarkSQL = `SELECT COALESCE((SELECT checked_through FROM activity_backfill_state WHERE id=1),0)`
+const advanceActivitySQL = `INSERT INTO activity_backfill_state(id,checked_through) VALUES (1,?)
+ ON CONFLICT(id) DO UPDATE SET checked_through=excluded.checked_through
+ WHERE activity_backfill_state.checked_through < excluded.checked_through`
+
+// BackfillActivity examines new Claude Code messages once, filling missing facts
+// from stored raw_json and persisting progress even for unfillable messages.
 func (ing *Ingester) BackfillActivity(ctx context.Context) error {
-	// Cheap pre-check without the write lock: is any tool_use message missing its
-	// facts? On a fully-indexed database this is the common path and returns at once.
-	// Backfill reparses raw_json as a Claude Code event, so it applies only to
-	// claude-code sessions (NULL source predates migration 0009). Other sources
-	// extract their tool_targets at ingest time and must not be reparsed here.
-	var pending int
-	if err := ing.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM messages m WHERE m.role = ?
-		   AND m.session_uuid IN (SELECT uuid FROM sessions WHERE source IS NULL OR source = 'claude-code')
-		   AND NOT EXISTS(SELECT 1 FROM tool_targets tt WHERE tt.message_id = m.id))`,
-		model.RoleToolUse).Scan(&pending); err != nil {
+	// 0001's AUTOINCREMENT survives all later migrations. Production inserts omit
+	// IDs; full re-ingest and purge never reset sqlite_sequence. Thus no future
+	// message can appear at or below an examined watermark, even after deletions.
+	var w, high int64
+	var pending bool
+	if err := ing.db.QueryRowContext(ctx, activityWatermarkSQL).Scan(&w); err != nil {
 		return err
 	}
-	if pending == 0 {
-		return nil
+	// MAX and EXISTS share one snapshot: reading MAX after the pre-check could
+	// incorrectly skip a newly committed message that still needs backfilling.
+	if err := ing.db.QueryRowContext(ctx, activityPendingSQL, w).Scan(&high, &pending); err != nil {
+		return err
 	}
-
-	tx, err := ing.db.Begin() // IMMEDIATE (DSN _txlock=immediate): serialize across processes
+	if !pending {
+		if high <= w {
+			return nil
+		}
+		// One autocommit statement needs no explicit IMMEDIATE transaction: the
+		// snapshot examined every ID through high, and this monotonic UPSERT cannot
+		// regress another process's progress, regardless of writer ordering.
+		_, err := ing.db.ExecContext(ctx, advanceActivitySQL, high)
+		return err
+	}
+	tx, err := ing.db.BeginTx(ctx, nil) // IMMEDIATE: serialize targets and progress across processes.
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-
-	type msgRow struct {
-		id, ts int64
-		sess   string
-		raw    string
-		has    bool
+	// Another process may have completed the work while we waited for the lock.
+	if err := tx.QueryRowContext(ctx, activityWatermarkSQL).Scan(&w); err != nil {
+		return err
 	}
-	rows, err := tx.QueryContext(ctx,
-		`SELECT m.id, m.session_uuid, COALESCE(m.ts,0), m.raw_json,
-		        EXISTS(SELECT 1 FROM tool_targets tt WHERE tt.message_id = m.id)
-		 FROM messages m WHERE m.role = ?
-		   AND m.session_uuid IN (SELECT uuid FROM sessions WHERE source IS NULL OR source = 'claude-code')
-		 ORDER BY m.session_uuid, m.seq`,
-		model.RoleToolUse)
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM messages`).Scan(&high); err != nil {
+		return err
+	}
+	type msgRow struct {
+		id, ts, seq int64
+		sess, raw   string
+		has         bool
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT m.id,m.session_uuid,COALESCE(m.ts,0),m.seq,m.raw_json,
+ EXISTS(SELECT 1 FROM tool_targets tt WHERE tt.message_id=m.id)
+ FROM messages m NOT INDEXED WHERE m.id > ? AND m.id <= ? AND m.role='tool_use'
+ AND m.session_uuid IN (SELECT uuid FROM sessions WHERE source IS NULL OR source='claude-code')
+ ORDER BY m.session_uuid,m.seq`, w, high)
 	if err != nil {
 		return err
 	}
 	var msgs []msgRow
 	for rows.Next() {
 		var m msgRow
-		if err := rows.Scan(&m.id, &m.sess, &m.ts, &m.raw, &m.has); err != nil {
+		if err := rows.Scan(&m.id, &m.sess, &m.ts, &m.seq, &m.raw, &m.has); err != nil {
 			rows.Close()
 			return err
 		}
@@ -136,27 +149,57 @@ func (ing *Ingester) BackfillActivity(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-
-	var curRaw string
+	var curRaw, curSess string
 	var blocks []model.ContentBlock
 	var bi int
 	for _, m := range msgs {
-		if m.raw != curRaw {
-			curRaw, blocks, bi = m.raw, toolUseBlocks(m.raw), 0
+		if m.sess != curSess || m.raw != curRaw {
+			blocks, bi = toolUseBlocks(m.raw), 0
+			if m.sess != curSess {
+				// W can split an event. Widen the alignment window backwards through the
+				// preceding equal-raw tool rows (including byte-identical adjacent events).
+				// Count them modulo the block count, but never re-examine their targets.
+				prefix, err := tx.QueryContext(ctx, `SELECT raw_json FROM messages WHERE session_uuid=? AND role='tool_use' AND seq<? ORDER BY seq DESC`, m.sess, m.seq)
+				if err != nil {
+					return err
+				}
+				for prefix.Next() {
+					var raw string
+					if err := prefix.Scan(&raw); err != nil {
+						prefix.Close()
+						return err
+					}
+					if raw != m.raw {
+						break
+					}
+					bi++
+				}
+				prefix.Close()
+				if err := prefix.Err(); err != nil {
+					return err
+				}
+			}
+			curSess, curRaw = m.sess, m.raw
 		}
 		if len(blocks) == 0 {
-			continue // unparseable raw_json; skip without losing alignment for others
+			continue
 		}
 		b := blocks[bi%len(blocks)]
 		bi++
 		if m.has {
-			continue // already backfilled or ingested; advance alignment, don't duplicate
+			continue
 		}
 		for _, tg := range extractTargets(b.Name, b.Input) {
-			if _, err := tx.Exec(`INSERT INTO tool_targets(message_id, session_uuid, ts, kind, value) VALUES (?,?,?,?,?)`,
-				m.id, m.sess, nullZero(m.ts), tg.Kind, tg.Value); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO tool_targets(message_id,session_uuid,ts,kind,value) VALUES (?,?,?,?,?)`, m.id, m.sess, nullZero(m.ts), tg.Kind, tg.Value); err != nil {
 				return err
 			}
+		}
+	}
+	// Include every examined ID, even malformed events and non-tool messages.
+	// Any error (including commit failure) rolls back both targets and progress.
+	if high > w {
+		if _, err := tx.ExecContext(ctx, advanceActivitySQL, high); err != nil {
+			return err
 		}
 	}
 	return tx.Commit()

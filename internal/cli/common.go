@@ -104,21 +104,16 @@ func openAndCatchUp() (*db.DB, error) {
 	return database, nil
 }
 
-// runCatchUp is the read-path incremental catch-up. The activity-backfill pre-check
-// scans every tool_use message (seconds on a large index and almost always a no-op),
-// so it runs only when this catch-up ingested something; `clio index` runs it
-// unconditionally as the safety net.
+// runCatchUp always checks activity progress, including upgrades with unchanged files.
 func runCatchUp(ctx context.Context, ing leaderIngester, projects string, log *slog.Logger) {
-	st, err := ing.IngestAll(ctx, projects, false)
+	_, err := ing.IngestAll(ctx, projects, false)
 	if err != nil {
 		log.Warn("incremental catch-up failed", "err", err)
 	}
 	if err := ing.PurgeMissing(ctx, projects); err != nil {
 		log.Warn("catch-up purge failed", "err", err)
 	}
-	if st.FilesIngested > 0 {
-		if err := ing.BackfillActivity(ctx); err != nil {
-			log.Warn("activity backfill failed", "err", err)
-		}
+	if err := ing.BackfillActivity(ctx); err != nil {
+		log.Warn("activity backfill failed", "err", err)
 	}
 }

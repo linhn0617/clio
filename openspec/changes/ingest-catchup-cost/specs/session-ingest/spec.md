@@ -2,29 +2,44 @@
 
 ### Requirement: One-time activity backfill
 
-The system SHALL populate `tool_targets` for already-indexed messages from their
-stored (redacted) `raw_json`, without re-reading source files. The backfill SHALL
-be idempotent and run automatically when the table is empty. The incremental catch-up
-that read-style CLI commands run before answering SHALL run the backfill only when that
-catch-up ingested at least one file; `clio index` (with or without `--full`) SHALL run it
-on every invocation.
+The system SHALL populate missing `tool_targets` for already-indexed Claude Code
+messages (including NULL-source sessions) from stored redacted `raw_json` without
+re-reading source files. Every read-style CLI catch-up and every `clio index`
+invocation SHALL call the idempotent backfill regardless of files ingested.
+An unseeded singleton state table SHALL persist the highest message ID examined;
+an absent row SHALL mean zero. The pending check SHALL use a messages primary-key
+range above that watermark. Backfill SHALL preserve per-event block alignment even
+when the watermark splits an event. Targets and progress SHALL commit together;
+errors SHALL leave progress unchanged. Examined unfillable rows SHALL advance
+progress. With no pending targets, progress SHALL advance to the snapshot maximum
+message ID if larger, using a monotonic write safe under concurrent processes.
+When the maximum ID equals the watermark, backfill SHALL perform no write.
 
-#### Scenario: Existing history is backfilled
+#### Scenario: Upgrade with unchanged files
 
-- **WHEN** the activity index is added to a database that already contains
-  tool_use messages
-- **THEN** activity queries SHALL return facts for those historical messages
-  without requiring a full re-ingest
+- **WHEN** an upgraded database has historical tool_use messages without targets and no new files
+- **THEN** the first read-path catch-up SHALL backfill those messages and persist progress
 
-#### Scenario: Read-path catch-up with nothing new skips the backfill
+#### Scenario: Unfillable message is examined once
 
-- **WHEN** a read-style CLI command's catch-up ingests no file
-- **THEN** it SHALL NOT run the activity backfill pre-check
+- **WHEN** a message produces no targets
+- **THEN** its ID SHALL still be covered by the committed watermark and subsequent calls SHALL skip it
 
-#### Scenario: Read-path catch-up with new content runs the backfill
+#### Scenario: Failure retries
 
-- **WHEN** a read-style CLI command's catch-up ingests at least one file
-- **THEN** it SHALL run the activity backfill
+- **WHEN** backfill fails after inserting some targets
+- **THEN** targets and progress SHALL roll back and the next invocation SHALL retry
+
+#### Scenario: New messages after progress
+
+- **WHEN** messages are added after a successful backfill
+- **THEN** only IDs above the watermark SHALL be examined for missing targets
+- **AND** preceding blocks needed for event alignment SHALL not receive duplicate targets
+
+#### Scenario: Caught-up read
+
+- **WHEN** the highest message ID equals the watermark
+- **THEN** backfill SHALL use a primary-key range check and SHALL perform no write
 
 #### Scenario: Index command always backfills
 

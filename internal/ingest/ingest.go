@@ -423,6 +423,7 @@ func (ing *Ingester) checkSourceConflict(tx *sql.Tx, uuid, source, sourceFile st
 
 // debt: row-at-a-time inserts inside one transaction per file, no prepared-statement reuse or
 // multi-row batching; revisit if a re-measurement after the redaction prefilter shows commit() dominating.
+
 func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Message, excludedToolUses []string, usage *usageResult, fs FileState) (int, error) {
 	tx, err := ing.db.Begin()
 	if err != nil {

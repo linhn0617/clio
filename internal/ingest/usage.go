@@ -211,7 +211,7 @@ func scanClaudeUsage(f *os.File, limit int64, path string, log *slog.Logger) *us
 
 	// debt: every tail ingest rescans [0, limit) for usage instead of resuming from the previous
 	// watermark; make it incremental if a re-measurement shows the second pass matters.
-	r := bufio.NewReaderSize(io.LimitReader(f, limit), 512<<10)
+	r := bufio.NewReaderSize(io.LimitReader(f, limit), readBufBytes)
 	for {
 		data, _, terminated, overCap, err := readCappedLine(r, maxLineBytes)
 		if err != nil && err != io.EOF {

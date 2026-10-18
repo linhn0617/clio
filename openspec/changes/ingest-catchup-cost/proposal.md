@@ -10,9 +10,11 @@ streaming readers.
 
 ## What Changes
 
-- **session-ingest (B3)**: the read-path catch-up runs the activity backfill only when that
-  catch-up ingested something (`Stats.FilesIngested > 0`); `clio index` (including `--full`)
-  keeps running it unconditionally as the safety net. MCP leader startup is unchanged.
+- **session-ingest (B3)**: migration 0016 adds an initially empty activity backfill
+  watermark. Every read-path catch-up and `clio index` checks only message IDs above
+  the watermark using a primary-key range. Examined IDs advance even when no targets
+  can be extracted; failures roll back targets and progress together. Unchanged reads
+  do no write. Upgrades backfill historical rows even with unchanged transcripts.
 - **session-ingest (B12)**: migration 0015 drops `idx_messages_session`; `session_uuid` lookups
   use `idx_messages_session_seq`.
 - Streaming readers use a 256 KB bufio buffer (no behavior change).
