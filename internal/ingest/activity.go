@@ -2,9 +2,13 @@ package ingest
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 
+	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/model"
 )
 
@@ -76,11 +80,9 @@ func capValue(s string) string {
 // activityPendingSQL deliberately uses the primary-key range rather than the role
 // or session indexes: a caught-up index must not scan its historical tool_use rows.
 const activityPendingSQL = `SELECT COALESCE(MAX(id),0),
- EXISTS(SELECT 1 FROM messages m NOT INDEXED WHERE m.id > ? AND m.role = 'tool_use'
- AND m.session_uuid IN (SELECT uuid FROM sessions WHERE source IS NULL OR source = 'claude-code')
- AND NOT EXISTS(SELECT 1 FROM tool_targets tt WHERE tt.message_id = m.id)) FROM messages`
+ EXISTS(SELECT 1 FROM messages m NOT INDEXED WHERE ` + db.PendingActivitySQL + `) FROM messages`
 
-const activityWatermarkSQL = `SELECT COALESCE((SELECT checked_through FROM activity_backfill_state WHERE id=1),0)`
+const activityWatermarkSQL = db.ActivityWatermarkSQL
 const advanceActivitySQL = `INSERT INTO activity_backfill_state(id,checked_through) VALUES (1,?)
  ON CONFLICT(id) DO UPDATE SET checked_through=excluded.checked_through
  WHERE activity_backfill_state.checked_through < excluded.checked_through`
@@ -88,37 +90,52 @@ const advanceActivitySQL = `INSERT INTO activity_backfill_state(id,checked_throu
 // BackfillActivity examines new Claude Code messages once, filling missing facts
 // from stored raw_json and persisting progress even for unfillable messages.
 func (ing *Ingester) BackfillActivity(ctx context.Context) error {
+	return ing.backfillActivity(ctx, false)
+}
+
+// RepairActivity revisits every historical message, ignoring automatic progress.
+// Both incremental and full clio index use this explicit repair safety net.
+func (ing *Ingester) RepairActivity(ctx context.Context) error {
+	return ing.backfillActivity(ctx, true)
+}
+
+func (ing *Ingester) backfillActivity(ctx context.Context, repair bool) error {
 	// 0001's AUTOINCREMENT survives all later migrations. Production inserts omit
 	// IDs; full re-ingest and purge never reset sqlite_sequence. Thus no future
 	// message can appear at or below an examined watermark, even after deletions.
 	var w, high int64
 	var pending bool
-	if err := ing.db.QueryRowContext(ctx, activityWatermarkSQL).Scan(&w); err != nil {
-		return err
+	if !repair {
+		if err := ing.db.QueryRowContext(ctx, activityWatermarkSQL).Scan(&w); err != nil {
+			return err
+		}
 	}
 	// MAX and EXISTS share one snapshot: reading MAX after the pre-check could
 	// incorrectly skip a newly committed message that still needs backfilling.
-	if err := ing.db.QueryRowContext(ctx, activityPendingSQL, w).Scan(&high, &pending); err != nil {
+	if err := ing.db.QueryRowContext(ctx, activityPendingSQL, w, model.RoleToolUse).Scan(&high, &pending); err != nil {
 		return err
 	}
 	if !pending {
 		if high <= w {
 			return nil
 		}
-		// One autocommit statement needs no explicit IMMEDIATE transaction: the
-		// snapshot examined every ID through high, and this monotonic UPSERT cannot
-		// regress another process's progress, regardless of writer ordering.
-		_, err := ing.db.ExecContext(ctx, advanceActivitySQL, high)
-		return err
+		// Progress here is only an optimization: retrying the range is safe.
+		// Never wait for a competing writer on the read path.
+		ing.advanceActivityBestEffort(ctx, high)
+		return nil
 	}
-	tx, err := ing.db.BeginTx(ctx, nil) // IMMEDIATE: serialize targets and progress across processes.
+	// IMMEDIATE serializes concurrent clio processes before checking targets,
+	// so they cannot both observe missing facts and double-insert them.
+	tx, err := ing.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	// Another process may have completed the work while we waited for the lock.
-	if err := tx.QueryRowContext(ctx, activityWatermarkSQL).Scan(&w); err != nil {
-		return err
+	if !repair {
+		if err := tx.QueryRowContext(ctx, activityWatermarkSQL).Scan(&w); err != nil {
+			return err
+		}
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM messages`).Scan(&high); err != nil {
 		return err
@@ -130,9 +147,9 @@ func (ing *Ingester) BackfillActivity(ctx context.Context) error {
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT m.id,m.session_uuid,COALESCE(m.ts,0),m.seq,m.raw_json,
  EXISTS(SELECT 1 FROM tool_targets tt WHERE tt.message_id=m.id)
- FROM messages m NOT INDEXED WHERE m.id > ? AND m.id <= ? AND m.role='tool_use'
+ FROM messages m NOT INDEXED WHERE m.id > ? AND m.id <= ? AND m.role=?
  AND m.session_uuid IN (SELECT uuid FROM sessions WHERE source IS NULL OR source='claude-code')
- ORDER BY m.session_uuid,m.seq`, w, high)
+ ORDER BY m.session_uuid,m.seq`, w, high, model.RoleToolUse)
 	if err != nil {
 		return err
 	}
@@ -156,27 +173,27 @@ func (ing *Ingester) BackfillActivity(ctx context.Context) error {
 		if m.sess != curSess || m.raw != curRaw {
 			blocks, bi = toolUseBlocks(m.raw), 0
 			if m.sess != curSess {
-				// W can split an event. Widen the alignment window backwards through the
-				// preceding equal-raw tool rows (including byte-identical adjacent events).
-				// Count them modulo the block count, but never re-examine their targets.
-				prefix, err := tx.QueryContext(ctx, `SELECT raw_json FROM messages WHERE session_uuid=? AND role='tool_use' AND seq<? ORDER BY seq DESC`, m.sess, m.seq)
-				if err != nil {
-					return err
-				}
-				for prefix.Next() {
+				// W can split an event. Check just the immediately preceding tool
+				// row first; walk further only through the equal-raw suffix. Each
+				// query is bounded, so unrelated history is never materialized.
+				seq := m.seq
+				for len(blocks) > 0 {
 					var raw string
-					if err := prefix.Scan(&raw); err != nil {
-						prefix.Close()
+					var prevSeq int64
+					err := tx.QueryRowContext(ctx, `SELECT seq,raw_json FROM messages
+ WHERE session_uuid=? AND role=? AND seq<? ORDER BY seq DESC LIMIT 1`,
+						m.sess, model.RoleToolUse, seq).Scan(&prevSeq, &raw)
+					if errors.Is(err, sql.ErrNoRows) {
+						break
+					}
+					if err != nil {
 						return err
 					}
 					if raw != m.raw {
 						break
 					}
 					bi++
-				}
-				prefix.Close()
-				if err := prefix.Err(); err != nil {
-					return err
+					seq = prevSeq
 				}
 			}
 			curSess, curRaw = m.sess, m.raw
@@ -184,6 +201,8 @@ func (ing *Ingester) BackfillActivity(ctx context.Context) error {
 		if len(blocks) == 0 {
 			continue
 		}
+		// Byte-identical adjacent events restart the same block sequence; modulo
+		// preserves alignment even when their equal-raw runs merge together.
 		b := blocks[bi%len(blocks)]
 		bi++
 		if m.has {
@@ -203,6 +222,26 @@ func (ing *Ingester) BackfillActivity(ctx context.Context) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// advanceActivityBestEffort borrows one connection so changing busy_timeout
+// cannot affect other operations. Restore its original timeout even on cancellation.
+func (ing *Ingester) advanceActivityBestEffort(ctx context.Context, high int64) {
+	conn, err := ing.db.Conn(ctx)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	var timeout int
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&timeout); err != nil {
+		return
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=0`); err != nil {
+		return
+	}
+	defer conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout=%d`, timeout))
+	// A failed advance leaves progress untouched; the next call safely retries.
+	_, _ = conn.ExecContext(ctx, advanceActivitySQL, high)
 }
 
 // toolUseBlocks returns the non-clio tool_use blocks of a stored event line, in

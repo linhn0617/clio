@@ -128,16 +128,11 @@ func optimizeFTS(ctx context.Context, d *db.DB) error {
 	return err
 }
 
-// runIndexIngest ingests and then always runs the activity backfill: `clio index` is the
-// explicit repair path, so it pays the pre-check that the read-path catch-up skips when
-// nothing new was ingested.
-func runIndexIngest(ctx context.Context, ing leaderIngester, projects string, full bool, log *slog.Logger) (ingest.Stats, error) {
-	st, err := ing.IngestAll(ctx, projects, full)
-	if err != nil {
-		return st, err
-	}
-	if err := ing.BackfillActivity(ctx); err != nil {
-		log.Warn("activity backfill failed", "err", err)
-	}
-	return st, nil
+// runIndexIngest always repairs missing targets across all history, ignoring the
+// read-path watermark, even when incremental ingestion finds no changed files.
+func runIndexIngest(ctx context.Context, ing interface {
+	leaderIngester
+	RepairActivity(context.Context) error
+}, projects string, full bool, log *slog.Logger) (ingest.Stats, error) {
+	return runIngestBackfill(ctx, ing, projects, full, false, ing.RepairActivity, log)
 }

@@ -13,6 +13,10 @@ import (
 	"github.com/linhn0617/clio/internal/model"
 )
 
+// usageReadBufBytes preserves the 512 KB buffer for the hot full-file usage
+// rescan; tail-oriented message readers use the smaller readBufBytes instead.
+const usageReadBufBytes = 512 * 1024
+
 // usageOutcome is the aggregate write a usage pass produced. Every source's
 // aggregate is a pure function of complete state (design D2), so the only
 // operations are: replace this session's rows, delete them (complete state
@@ -211,7 +215,7 @@ func scanClaudeUsage(f *os.File, limit int64, path string, log *slog.Logger) *us
 
 	// debt: every tail ingest rescans [0, limit) for usage instead of resuming from the previous
 	// watermark; make it incremental if a re-measurement shows the second pass matters.
-	r := bufio.NewReaderSize(io.LimitReader(f, limit), readBufBytes)
+	r := bufio.NewReaderSize(io.LimitReader(f, limit), usageReadBufBytes)
 	for {
 		data, _, terminated, overCap, err := readCappedLine(r, maxLineBytes)
 		if err != nil && err != io.EOF {

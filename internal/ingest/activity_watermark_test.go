@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/linhn0617/clio/internal/db"
+	"github.com/linhn0617/clio/internal/model"
 )
 
 const watermarkEvent = `{"message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/a"}},{"type":"tool_use","name":"Read","input":{"file_path":"/b"}}]}}`
@@ -191,7 +192,7 @@ func TestActivityWatermarkReplacementIDs(t *testing.T) {
 
 func TestActivityWatermarkPrimaryKeyPlan(t *testing.T) {
 	d := watermarkFixture(t)
-	rows, err := d.Query(`EXPLAIN QUERY PLAN `+activityPendingSQL, 1)
+	rows, err := d.Query(`EXPLAIN QUERY PLAN `+activityPendingSQL, 1, model.RoleToolUse)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,5 +215,44 @@ func TestActivityWatermarkPrimaryKeyPlan(t *testing.T) {
 	}
 	if strings.Contains(plan, "SCAN m") {
 		t.Fatalf("pending check scans messages:\n%s", plan)
+	}
+}
+
+func TestActivityWatermarkIdenticalEvents(t *testing.T) {
+	d := watermarkFixture(t)
+	activityExec(t, d, `UPDATE messages SET raw_json=?`, watermarkEvent)
+	activityExec(t, d, `INSERT INTO messages(session_uuid,seq,role,content,raw_json) VALUES ('wm',1,'tool_use','',?),('wm',2,'tool_use','',?)`, watermarkEvent, watermarkEvent)
+	if err := New(d, nil).BackfillActivity(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	activityExec(t, d, `INSERT INTO messages(session_uuid,seq,role,content,raw_json) VALUES ('wm',3,'tool_use','',?)`, watermarkEvent)
+	if err := New(d, nil).BackfillActivity(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := d.QueryRow(`SELECT value FROM tool_targets WHERE message_id=4 AND kind='file'`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "/b" {
+		t.Fatalf("identical adjacent event target = %q, want /b", got)
+	}
+}
+
+func TestActivityWatermarkDifferentPredecessor(t *testing.T) {
+	d := watermarkFixture(t)
+	ing := New(d, nil)
+	if err := ing.BackfillActivity(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	activityExec(t, d, `INSERT INTO messages(session_uuid,seq,role,content,raw_json) VALUES ('wm',1,'tool_use','',?)`, watermarkEvent)
+	if err := ing.BackfillActivity(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := d.QueryRow(`SELECT value FROM tool_targets WHERE message_id=2 AND kind='file'`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "/a" {
+		t.Fatalf("new event target = %q, want /a", got)
 	}
 }

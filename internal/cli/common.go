@@ -106,14 +106,26 @@ func openAndCatchUp() (*db.DB, error) {
 
 // runCatchUp always checks activity progress, including upgrades with unchanged files.
 func runCatchUp(ctx context.Context, ing leaderIngester, projects string, log *slog.Logger) {
-	_, err := ing.IngestAll(ctx, projects, false)
+	_, _ = runIngestBackfill(ctx, ing, projects, false, true, ing.BackfillActivity, log)
+}
+
+// runIngestBackfill shares ingestion and backfill reporting. Reads continue after
+// ingest errors and reconcile missing sources; explicit index returns ingest errors.
+func runIngestBackfill(ctx context.Context, ing leaderIngester, projects string, full, catchUp bool, backfill func(context.Context) error, log *slog.Logger) (ingest.Stats, error) {
+	st, err := ing.IngestAll(ctx, projects, full)
 	if err != nil {
+		if !catchUp {
+			return st, err
+		}
 		log.Warn("incremental catch-up failed", "err", err)
 	}
-	if err := ing.PurgeMissing(ctx, projects); err != nil {
-		log.Warn("catch-up purge failed", "err", err)
+	if catchUp {
+		if err := ing.PurgeMissing(ctx, projects); err != nil {
+			log.Warn("catch-up purge failed", "err", err)
+		}
 	}
-	if err := ing.BackfillActivity(ctx); err != nil {
+	if err := backfill(ctx); err != nil {
 		log.Warn("activity backfill failed", "err", err)
 	}
+	return st, nil
 }
