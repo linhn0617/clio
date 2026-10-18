@@ -131,7 +131,7 @@ var redactRules = []redactRule{
 	{re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`), repl: "[REDACTED:jwt]", needles: []string{"eyJ"}},
 	// Bearer tokens in headers.
 	// prefilter: (?i) "Bearer" is in every match; compared against lower-cased ASCII text.
-	{re: regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._\-]{12,}`), repl: "Bearer [REDACTED:token]", needles: []string{"bearer"}, foldCase: true},
+	{re: regexp.MustCompile(`(?i)\b(Bearer\s+)[A-Za-z0-9._\-]{12,}`), repl: "Bearer [REDACTED:token]", needles: []string{"bearer"}, foldCase: true, keyEndGroup: 1},
 	// Basic auth credentials, anchored on the explicit (Proxy-)Authorization header
 	// so the English word "basic" in prose is never matched (base64 of user:pass can
 	// be all letters, so a bare "Basic <word>" rule would eat phrases like "basic
@@ -251,19 +251,45 @@ func followingCoverage(s string) [][4]int {
 		// coverage streams in linear time rather than sorting all matches.
 		pending := spans
 		spans = nil
+		add := func(span [4]int) {
+			for len(pending) > 0 && pending[0][0] <= span[0] {
+				spans = append(spans, pending[0])
+				pending = pending[1:]
+			}
+			spans = append(spans, span)
+		}
 		for _, m := range rule.re.FindAllStringSubmatchIndex(s, -1) {
 			if rule.keepMatch != nil && rule.keepMatch(s[m[0]:m[1]]) {
 				continue
 			}
-			nameEnd, connection := m[1], 1
-			if rule.keyEndGroup > 0 {
-				nameEnd, connection = m[2*rule.keyEndGroup+1], 0
+			if rule.keyEndGroup == 0 {
+				add([4]int{m[0], m[1], m[1], 1})
+				continue
 			}
-			for len(pending) > 0 && pending[0][0] <= m[0] {
-				spans = append(spans, pending[0])
-				pending = pending[1:]
+			nameEnd := m[2*rule.keyEndGroup+1]
+			add([4]int{m[0], nameEnd, m[1], 0})
+			// A value can swallow a glued key of the same rule (`PASSPHRASE=x
+			// Credential='v'` stops at the quote) and FindAll never reports that
+			// overlapping match. Rescan from the separator: the byte before it is
+			// ':', '=' or a space, so \b and [^A-Z0-9_] read the slice start as
+			// they read the original text.
+			for end := m[1]; strings.ContainsAny(s[nameEnd:end], ":="); {
+				n := rule.re.FindStringSubmatchIndex(s[nameEnd:])
+				if n == nil || nameEnd+n[0] >= end {
+					break
+				}
+				for i := range n {
+					if n[i] >= 0 {
+						n[i] += nameEnd
+					}
+				}
+				if rule.keepMatch != nil && rule.keepMatch(s[n[0]:n[1]]) {
+					break
+				}
+				nameEnd = n[2*rule.keyEndGroup+1]
+				add([4]int{n[0], nameEnd, n[1], 0})
+				end = max(end, n[1])
 			}
-			spans = append(spans, [4]int{m[0], nameEnd, m[1], connection})
 		}
 		spans = append(spans, pending...)
 	}
@@ -288,7 +314,7 @@ func (r *redactRule) replace(s string) string {
 		if m[0] < pos || r.keepMatch != nil && r.keepMatch(s[m[0]:m[1]]) {
 			continue
 		}
-		end, template := m[1], r.repl
+		start, end, template := m[0], m[1], r.repl
 		for next < len(following) && following[next][0] < end {
 			f := following[next]
 			// A widened credential key may itself be a URL scheme. Keeping its
@@ -296,12 +322,18 @@ func (r *redactRule) replace(s string) string {
 			if f[3] != 0 && r.keyEndGroup == 3 && f[0] < m[7] && f[2] > m[4] {
 				template = "${1}[REDACTED:secret]"
 			}
-			if f[1] > m[0] && f[2] > end {
+			// A token that starts inside another rule's value (`Bearer abc_sk-…`)
+			// would leave that value's head too short for its rule to match
+			// afterwards. Redact the whole value under this token's marker.
+			if f[3] == 0 && r.keyEndGroup == 0 && f[1] < m[0] && m[0] < f[2] && start == m[0] && hasAlnum(s[f[1]:m[0]]) {
+				start, template = f[1], strings.TrimPrefix(template, "${1}")
+			}
+			if (f[1] > m[0] || start < m[0]) && f[2] > end {
 				end = f[2]
 			}
 			next++
 		}
-		out = append(out, s[pos:m[0]]...)
+		out = append(out, s[pos:start]...)
 		out = r.re.ExpandString(out, template, s, m)
 		pos = end
 	}
@@ -906,4 +938,13 @@ func redactWalkDepth(v any, depth int, filtered bool) any {
 	default:
 		return v // numbers (json.Number), bools, null
 	}
+}
+
+func hasAlnum(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' {
+			return true
+		}
+	}
+	return false
 }

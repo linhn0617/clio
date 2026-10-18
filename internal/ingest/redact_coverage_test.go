@@ -206,3 +206,29 @@ func TestRedactionMainCoverageGluedTokens(t *testing.T) {
 		}
 	}
 }
+
+// A key value can swallow a glued key of the same rule and stop at its quote;
+// a token can start inside a Bearer value. Neither may expose what main removed.
+func TestRedactionGluedKeyAndInnerToken(t *testing.T) {
+	outers := []string{"secret=", "Credential=", "token:", "PASSPHRASE=", "DB_PWD:", "MY_DB_PASS=", "API-KEY:", "_secret="}
+	// Glued after letters, DB_PWD has no credential-context boundary and is not a key.
+	inners := []string{"secret=", "Credential=", "token:", "PASSPHRASE=", "MY_DB_PASS=", "API-KEY:", "_secret="}
+	for _, outer := range outers {
+		for _, inner := range inners {
+			for _, q := range []string{"'", `"`} {
+				in := outer + "abcdefgh" + inner + q + "witnessVAL123" + q + " tail"
+				if got := redactString(in); strings.Contains(got, "witnessVAL") {
+					t.Errorf("glued key value leaked: %q -> %q", in, got)
+				}
+			}
+		}
+	}
+	for _, in := range []string{
+		"Bearer LaaxsYpQx_sk-" + strings.Repeat("a", 30),
+		"Authorization: Bearer yx3R8y85F-glp" + "at-" + strings.Repeat("b", 24),
+	} {
+		if got := redactString(in); strings.Contains(got, "LaaxsYpQx") || strings.Contains(got, "yx3R8y85F") {
+			t.Errorf("bearer head leaked: %q -> %q", in, got)
+		}
+	}
+}
