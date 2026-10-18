@@ -64,12 +64,9 @@ func newIndexCmd() *cobra.Command {
 			log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 			ing := ingest.NewWithBuiltinSources(database, log)
 
-			st, err := ing.IngestAll(cmd.Context(), projects, full)
+			st, err := runIndexIngest(cmd.Context(), ing, projects, full, log)
 			if err != nil {
 				return err
-			}
-			if err := ing.BackfillActivity(cmd.Context()); err != nil {
-				log.Warn("activity backfill failed", "err", err)
 			}
 			fmt.Fprintf(os.Stdout, "indexed: %d files (%d ingested, %d skipped), %d messages added\n",
 				st.FilesScanned, st.FilesIngested, st.FilesSkipped, st.MessagesAdded)
@@ -129,4 +126,13 @@ func newIndexCmd() *cobra.Command {
 func optimizeFTS(ctx context.Context, d *db.DB) error {
 	_, err := d.ExecContext(ctx, `INSERT INTO messages_fts(messages_fts) VALUES('optimize')`)
 	return err
+}
+
+// runIndexIngest always repairs missing targets across all history, ignoring the
+// read-path watermark, even when incremental ingestion finds no changed files.
+func runIndexIngest(ctx context.Context, ing interface {
+	leaderIngester
+	RepairActivity(context.Context) error
+}, projects string, full bool, log *slog.Logger) (ingest.Stats, error) {
+	return runIngestBackfill(ctx, ing, projects, full, false, ing.RepairActivity, log)
 }

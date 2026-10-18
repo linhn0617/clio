@@ -276,7 +276,7 @@ func (ing *Ingester) streamParse(f *os.File, startOffset int64, p *Parser, path 
 	if _, err := f.Seek(startOffset, io.SeekStart); err != nil {
 		return nil, sess, 0, 0, err
 	}
-	r := bufio.NewReader(f)
+	r := bufio.NewReaderSize(f, readBufBytes)
 	for {
 		data, n, terminated, overCap, err := readCappedLine(r, maxLineBytes)
 		if err != nil && err != io.EOF {
@@ -420,6 +420,9 @@ func (ing *Ingester) checkSourceConflict(tx *sql.Tx, uuid, source, sourceFile st
 	_, derr := tx.Exec(`DELETE FROM source_conflicts WHERE source_file = ?`, sourceFile)
 	return false, derr
 }
+
+// debt: row-at-a-time inserts inside one transaction per file, no prepared-statement reuse or
+// multi-row batching; revisit if a re-measurement after the redaction prefilter shows commit() dominating.
 
 func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Message, excludedToolUses []string, usage *usageResult, fs FileState) (int, error) {
 	tx, err := ing.db.Begin()

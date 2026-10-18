@@ -99,16 +99,33 @@ func openAndCatchUp() (*db.DB, error) {
 		// Run the catch-up unconditionally (not gated on the Claude dir existing): on a
 		// Codex-only machine ~/.claude/projects is absent, but the Codex source still
 		// has history to ingest. IngestAll/PurgeMissing handle missing roots per-source.
-		ing := ingest.NewWithBuiltinSources(database, discardLogger())
-		if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
-			stderrLogger().Warn("incremental catch-up failed", "err", err)
-		}
-		if err := ing.PurgeMissing(context.Background(), projects); err != nil {
-			stderrLogger().Warn("catch-up purge failed", "err", err)
-		}
-		if err := ing.BackfillActivity(context.Background()); err != nil {
-			stderrLogger().Warn("activity backfill failed", "err", err)
-		}
+		runCatchUp(context.Background(), ingest.NewWithBuiltinSources(database, discardLogger()), projects, stderrLogger())
 	}
 	return database, nil
+}
+
+// runCatchUp always checks activity progress, including upgrades with unchanged files.
+func runCatchUp(ctx context.Context, ing leaderIngester, projects string, log *slog.Logger) {
+	_, _ = runIngestBackfill(ctx, ing, projects, false, true, ing.BackfillActivity, log)
+}
+
+// runIngestBackfill shares ingestion and backfill reporting. Reads continue after
+// ingest errors and reconcile missing sources; explicit index returns ingest errors.
+func runIngestBackfill(ctx context.Context, ing leaderIngester, projects string, full, catchUp bool, backfill func(context.Context) error, log *slog.Logger) (ingest.Stats, error) {
+	st, err := ing.IngestAll(ctx, projects, full)
+	if err != nil {
+		if !catchUp {
+			return st, err
+		}
+		log.Warn("incremental catch-up failed", "err", err)
+	}
+	if catchUp {
+		if err := ing.PurgeMissing(ctx, projects); err != nil {
+			log.Warn("catch-up purge failed", "err", err)
+		}
+	}
+	if err := backfill(ctx); err != nil {
+		log.Warn("activity backfill failed", "err", err)
+	}
+	return st, nil
 }

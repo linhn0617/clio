@@ -33,6 +33,7 @@ type fakeIngester struct {
 	ignoreCtx  bool // return nil after ctx is done, like an ingest that swallows cancellation
 	backfill   atomic.Int32
 	purge      atomic.Int32
+	repair     atomic.Int32
 }
 
 func (f *fakeIngester) IngestAll(ctx context.Context, _ string, _ bool) (ingest.Stats, error) {
@@ -64,6 +65,10 @@ func (f *fakeIngester) IngestAll(ctx context.Context, _ string, _ bool) (ingest.
 }
 func (f *fakeIngester) BackfillActivity(context.Context) error {
 	f.backfill.Add(1)
+	return nil
+}
+func (f *fakeIngester) RepairActivity(context.Context) error {
+	f.repair.Add(1)
 	return nil
 }
 func (f *fakeIngester) PurgeMissing(context.Context, string) error {

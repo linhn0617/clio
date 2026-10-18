@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/linhn0617/clio/internal/db"
+	"github.com/linhn0617/clio/internal/model"
 )
 
 // PruneCandidate is a session old enough to consider pruning, with the stored
@@ -56,15 +57,15 @@ func PruneCandidates(ctx context.Context, database *db.DB, cutoff int64, source,
 	return out, rows.Err()
 }
 
-// PendingBackfillSessions returns the set of claude-code session uuids that
-// still have a tool_use message without extracted tool_targets — i.e. a pending
-// activity backfill that would need their raw_json. prune-raw excludes these
-// (read-only; it never runs the backfill itself).
+// PendingBackfillSessions protects raw_json needed by future automatic backfill.
+// Examined unfillable rows are no longer pending (see db.PendingActivitySQL).
 func PendingBackfillSessions(ctx context.Context, database *db.DB) (map[string]bool, error) {
+	var w int64
+	if err := database.QueryRowContext(ctx, db.ActivityWatermarkSQL).Scan(&w); err != nil {
+		return nil, err
+	}
 	rows, err := database.QueryContext(ctx, `SELECT DISTINCT m.session_uuid
-		FROM messages m JOIN sessions s ON s.uuid = m.session_uuid
-		WHERE m.role = 'tool_use' AND COALESCE(s.source,'claude-code') = 'claude-code'
-		  AND NOT EXISTS(SELECT 1 FROM tool_targets tt WHERE tt.message_id = m.id)`)
+		FROM messages m NOT INDEXED WHERE `+db.PendingActivitySQL, w, model.RoleToolUse)
 	if err != nil {
 		return nil, err
 	}
@@ -143,15 +144,17 @@ func PruneRawJSON(ctx context.Context, database *db.DB, cutoff int64, source, pr
 
 	// eligible: candidate rows whose (uuid, source_file) still matches sessions and
 	// which pass every DB-side predicate. This is the authoritative validated set.
+	var w int64
+	if err := tx.QueryRowContext(ctx, db.ActivityWatermarkSQL).Scan(&w); err != nil {
+		return res, err
+	}
 	elig := `SELECT c.uuid FROM _prune_cand c
 		JOIN sessions s ON s.uuid = c.uuid AND s.source_file = c.source_file
 		JOIN ingest_state i ON i.source_file = s.source_file
 		WHERE COALESCE(s.ended_at, s.started_at, 0) < ?
 		  AND i.aborted = 0 AND i.last_byte_offset = i.last_size
-		  AND NOT EXISTS(SELECT 1 FROM messages m2 WHERE m2.session_uuid = s.uuid
-		      AND m2.role = 'tool_use' AND COALESCE(s.source,'claude-code') = 'claude-code'
-		      AND NOT EXISTS(SELECT 1 FROM tool_targets tt WHERE tt.message_id = m2.id))`
-	eligArgs := []any{cutoff}
+		  AND s.uuid NOT IN (SELECT m.session_uuid FROM messages m NOT INDEXED WHERE ` + db.PendingActivitySQL + `)`
+	eligArgs := []any{cutoff, w, model.RoleToolUse}
 	if source != "" && source != "all" {
 		elig += " AND COALESCE(s.source,'claude-code') = ?"
 		eligArgs = append(eligArgs, source)
