@@ -15,13 +15,21 @@ AWS/Google/GitHub/Slack/OpenAI-style/Stripe keys, JWTs, `Bearer` tokens, `KEY=va
 lines, credentialed connection strings): GitLab `glpat-` tokens, npm `npm_` tokens,
 Hugging Face `hf_` tokens, Stripe webhook `whsec_` secrets, Slack incoming-webhook URLs,
 PGP private key blocks, and `Authorization: token <x>` headers. A connection string
-MAY have an empty user (`redis://:pass@host`). A `KEY=value` line SHALL be redacted
-when the key ends in `_PASS` (for example `DB_PASS`) or is `MYSQL_PWD`, as it already is
-for the `SECRET`/`PASSWORD`/`TOKEN`-family names; a bare `PWD` SHALL NOT be.
+MAY have an empty user (`redis://:pass@host`) and passwords containing `/`, `:` or
+`@`, ending at the last `@` before the host. Connection strings SHALL run after
+existing token/header/key rules and consume any prior redaction markers whole,
+so query tails and adjacent Authorization headers cannot expose secrets.
+A `KEY=value` line SHALL redact PASSPHRASE, suffixed `_PWD`, and `_PASS` with a
+credential-context prefix: DB, MYSQL, SMTP, REDIS, ADMIN, ROOT, USER, MAIL, FTP,
+SSH, LDAP, PG or POSTGRES. Bare PWD and computation-stage names such as first_pass,
+FIRST_PASS, RENDER_PASS, SECOND_PASS, TEST_PASS, NUM_PASS and PASS_THROUGH SHALL
+remain unchanged. BYPASS, COMPASS and ENCOMPASS SHALL remain unchanged.
 
 Four shapes are intentionally out of scope: a quoted password containing spaces (only its
 first word is redacted), `curl -u user:pass`, `.netrc` `password` lines and Docker
-`auths` blocks. They are recorded as a `debt:` in the rule table.
+`auths` blocks. They are recorded as a `debt:` in the rule table. Truncated PEM/PGP blocks without
+an END fence remain debt, to address if a truncated private key is ever found in
+the index.
 
 #### Scenario: Shape-pattern secret in free text
 
@@ -102,11 +110,37 @@ first word is redacted), `curl -u user:pass`, `.netrc` `password` lines and Dock
 #### Scenario: Embedded-JSON detection does time-bounded work
 
 - **WHEN** a text field is a flood of brackets (for example 18 KB of `[`, or of `{"a":`)
-- **THEN** the system SHALL finish in time linear in the text: it SHALL probe for embedded
-  JSON only at a `{`/`[` that sits at the start of the text or right after whitespace, `:`,
-  `,`, `=`, `(`, a quote (`"` or `'`), a backtick or a bracket, and SHALL stop probing after a
-  fixed number of failed probes per text. Output for texts below those limits whose brackets
-  all sit at such a boundary is identical to probing every bracket
+- **THEN** the system SHALL use a linear string/escape-aware pass to record balanced
+  bracket spans; mismatched closers terminate candidates. Balanced syntax SHALL
+  be checked once bottom-up, without repeated decoding of invalid nested spans.
+  Decoder probes SHALL be restricted to balanced, syntactically valid candidates,
+  with outermost candidates first and successfully decoded spans skipped.
+  There SHALL be no prefix-boundary restriction or failed-probe cap. Redacted
+  positions SHALL cover main commit 165f184, verified by an independent test-only
+  oracle over at least 10,000 generated inputs, including every ASCII punctuation
+  prefix, random bracket noise, nested secrets and rule-order regressions.
+
+#### Scenario: Embedded JSON at arbitrary positions
+
+- **WHEN** JSON follows `->`, `<pre>`, `|`, `;`, `**`, `-d`, a word, CJK, accented
+  text, 128 stray openers or 130 bracketed log lines
+- **THEN** its secret-keyed values SHALL be redacted whole as on main, including
+  a token value containing a space and a nested `secret=…` assignment
+
+#### Scenario: Token alphabets and documentation guards
+
+- **WHEN** Stripe webhook secrets contain base64 `+`, `/`, `=`, GitLab tokens end
+  in `-`, or Slack webhook hosts have uppercase letters
+- **THEN** the complete credential SHALL be redacted up to the token alphabet's
+  terminator, with prefilters remaining necessary conditions
+- **AND** obvious GitLab placeholders, Slack's official all-X webhook example,
+  `Authorization: token YOUR_PERSONAL_ACCESS_TOKEN_HERE`, dotted Hugging Face
+  identifiers and `task_sk-learn-…` SHALL remain intact
+
+#### Scenario: AWS key adjacent to a key name
+
+- **WHEN** an AWS access key id immediately precedes `secret=abcdefgh`
+- **THEN** both the id and the assigned value SHALL be redacted
 
 #### Scenario: Whole value redacted regardless of type under a secret key
 

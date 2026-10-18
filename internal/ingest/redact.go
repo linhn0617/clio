@@ -29,11 +29,12 @@ import (
 // validateRedactRules (run from init) panics on a table that breaks these
 // constraints.
 type redactRule struct {
-	re       *regexp.Regexp
-	repl     string
-	needles  []string
-	also     string
-	foldCase bool
+	re        *regexp.Regexp
+	repl      string
+	needles   []string
+	also      string
+	foldCase  bool
+	keepMatch func(string) bool // explicit false-positive guards; true preserves the match
 }
 
 // validateRedactRules enforces the prefilter table's safety constraints:
@@ -57,10 +58,9 @@ func validateRedactRules(rules []redactRule) error {
 }
 
 // redactRules is a conservative set: high-signal secret shapes only, to avoid
-// eating legitimate text (false positives destroy searchability). Order
-// matters: the connection-string rule runs before the token-shape rules so a
-// token used as a URL password collapses into one [REDACTED:connstring] marker
-// instead of being half-eaten into "[REDACTED:connstring]]".
+// eating legitimate text (false positives destroy searchability). Connection
+// strings run last, as on main: earlier key/header rules must see query keys and
+// adjacent headers before a URL replacement can consume their names.
 //
 // debt: four secret shapes are deliberately NOT matched, because any regexp for
 // them either over-redacts prose or needs a real tokenizer. Each is "add it if
@@ -70,6 +70,8 @@ func validateRedactRules(rules []redactRule) error {
 //   - `curl -u user:pass` / `--user user:pass` (a bare user:pass argument);
 //   - `.netrc` lines (`machine h login u password p`);
 //   - docker `config.json` `auths` blocks (base64 `auth` values under a registry key).
+//
+// debt: handle PEM/PGP blocks without an END line if a truncated private key is ever found in the index.
 var redactRules = []redactRule{
 	// PEM private key blocks (multi-line).
 	// prefilter: the pattern spells the literal "PRIVATE KEY" (case-sensitive) in both fences.
@@ -78,14 +80,11 @@ var redactRules = []redactRule{
 	// rule above does not match). Public keys and messages use other fences.
 	// prefilter: the pattern spells the literal "PGP PRIVATE KEY BLOCK" in both fences.
 	{re: regexp.MustCompile(`(?s)-----BEGIN PGP PRIVATE KEY BLOCK-----.*?-----END PGP PRIVATE KEY BLOCK-----`), repl: "[REDACTED:private-key]", needles: []string{"PGP PRIVATE KEY BLOCK"}},
-	// Connection strings: scheme://user:pass@host (requires :pass@; the user may be
-	// empty, as in redis://:pass@host). Stop at common delimiters so trailing
-	// punctuation like ),;> is preserved.
-	// prefilter: the match spells "://" and the :pass@ authority needs an "@".
-	{re: regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.\-]*://[^\s:/@]*:[^\s:/@]+@[^\s'")>\]},;]+`), repl: "[REDACTED:connstring]", needles: []string{"://"}, also: "@", foldCase: true},
 	// AWS access key id.
+	// A fixed-length id may be immediately followed by a secret key name;
+	// requiring a trailing word boundary would leak AKIA…secret=….
 	// prefilter: the match starts with the literal "AKIA".
-	{re: regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`), repl: "[REDACTED:aws-key]", needles: []string{"AKIA"}},
+	{re: regexp.MustCompile(`\bAKIA[0-9A-Z]{16}`), repl: "[REDACTED:aws-key]", needles: []string{"AKIA"}},
 	// Google API key.
 	// prefilter: the match starts with the literal "AIza".
 	{re: regexp.MustCompile(`\bAIza[0-9A-Za-z_\-]{35}\b`), repl: "[REDACTED:gcp-key]", needles: []string{"AIza"}},
@@ -96,7 +95,7 @@ var redactRules = []redactRule{
 	{re: regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,}\b`), repl: "[REDACTED:github-token]", needles: []string{"github_pat_"}},
 	// GitLab personal/project/group access tokens (glpat- + 20 chars).
 	// prefilter: the match starts with the literal "glpat-".
-	{re: regexp.MustCompile(`\bglpat-[A-Za-z0-9_\-]{20,}\b`), repl: "[REDACTED:gitlab-token]", needles: []string{"glpat-"}},
+	{re: regexp.MustCompile(`\bglpat-[A-Za-z0-9_\-]{20,}`), repl: "[REDACTED:gitlab-token]", needles: []string{"glpat-"}, keepMatch: tokenPlaceholder},
 	// npm automation/publish tokens (npm_ + 36 alphanumerics). Alphanumerics only, so
 	// env-var names like npm_config_registry never match.
 	// prefilter: the match starts with the literal "npm_".
@@ -104,27 +103,27 @@ var redactRules = []redactRule{
 	// Hugging Face user access tokens (hf_ + 34 alphanumerics). No underscore in the
 	// body, so identifiers such as hf_hub_download never match.
 	// prefilter: the match starts with the literal "hf_".
-	{re: regexp.MustCompile(`\bhf_[A-Za-z0-9]{34,}\b`), repl: "[REDACTED:hf-token]", needles: []string{"hf_"}},
+	{re: regexp.MustCompile(`(?:^|([^A-Za-z0-9_.]))hf_[A-Za-z0-9]{34,}\b`), repl: "${1}[REDACTED:hf-token]", needles: []string{"hf_"}},
 	// Slack tokens.
 	// prefilter: the match starts with the literal "xox" (then [baprs]-).
 	{re: regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`), repl: "[REDACTED:slack-token]", needles: []string{"xox"}},
 	// Slack incoming-webhook URLs: the T…/B…/secret path is the credential. The
-	// 16-char floor on the last segment keeps documentation placeholders
-	// (…/services/TXXX/BXXX/xxxx) intact.
+	// 16-char floor excludes short examples; the placeholder guard also excludes
+	// Slack's official 24-X example.
 	// prefilter: every match spells the literal host+path "hooks.slack.com/services/".
-	{re: regexp.MustCompile(`\b(?:https?://)?hooks\.slack\.com/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]{16,}`), repl: "[REDACTED:slack-webhook]", needles: []string{"hooks.slack.com/services/"}},
+	{re: regexp.MustCompile(`(?i)\b(?:https?://)?hooks\.slack\.com/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]{16,}`), repl: "[REDACTED:slack-webhook]", needles: []string{"hooks.slack.com/services/"}, foldCase: true, keepMatch: tokenPlaceholder},
 	// OpenAI / Anthropic style keys. An underscore directly before sk- counts as a
 	// boundary (`x_sk-…` is a prefix_secret concatenation; \b does not hold between
 	// two word characters); letters and digits before it stay word material so
 	// "risk-assessment-…" / "disk-usage-…" are not eaten. The captured underscore is kept.
 	// prefilter: the match starts with the literal "sk-".
-	{re: regexp.MustCompile(`(?:\b|(_))sk-[A-Za-z0-9_\-]{20,}\b`), repl: "${1}[REDACTED:api-key]", needles: []string{"sk-"}},
+	{re: regexp.MustCompile(`(?:\b|(_))sk-[A-Za-z0-9_\-]{20,}\b`), repl: "${1}[REDACTED:api-key]", needles: []string{"sk-"}, keepMatch: underscoreSKWord},
 	// Stripe keys (underscore form: sk_live_, pk_live_, rk_live_, _test_).
 	// prefilter: [rsp]k_(?:live|test)_ always contains k_live_ or k_test_.
 	{re: regexp.MustCompile(`\b[rsp]k_(?:live|test)_[A-Za-z0-9]{10,}\b`), repl: "[REDACTED:stripe-key]", needles: []string{"k_live_", "k_test_"}},
 	// Stripe webhook signing secrets.
 	// prefilter: the match starts with the literal "whsec_".
-	{re: regexp.MustCompile(`\bwhsec_[A-Za-z0-9]{16,}\b`), repl: "[REDACTED:stripe-webhook]", needles: []string{"whsec_"}},
+	{re: regexp.MustCompile(`\bwhsec_[A-Za-z0-9+/=]{16,}`), repl: "[REDACTED:stripe-webhook]", needles: []string{"whsec_"}},
 	// JWTs (header.payload.signature, base64url).
 	// prefilter: the match starts with the literal "eyJ".
 	{re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`), repl: "[REDACTED:jwt]", needles: []string{"eyJ"}},
@@ -143,7 +142,7 @@ var redactRules = []redactRule{
 	// such as "Authorization: token required for this endpoint" intact (real values
 	// are 40 hex chars or a prefixed token). The capture keeps the header name.
 	// prefilter: as the Basic rule, every match contains "Authorization:".
-	{re: regexp.MustCompile(`(?i)((?:Proxy-)?Authorization:\s*token\s+)[A-Za-z0-9._\-]{20,}`), repl: "${1}[REDACTED:token]", needles: []string{"authorization:"}, foldCase: true},
+	{re: regexp.MustCompile(`(?i)((?:Proxy-)?Authorization:\s*token\s+)[A-Za-z0-9._\-]{20,}`), repl: "${1}[REDACTED:token]", needles: []string{"authorization:"}, foldCase: true, keepMatch: tokenPlaceholder},
 	// Cookie / Set-Cookie header values (session ids, CSRF tokens). Anchored on the
 	// header colon form AND requiring a name=value (so prose like "cookie: enabled" is
 	// left untouched). Redact to end-of-line (HTTP-correct): security beats
@@ -152,18 +151,92 @@ var redactRules = []redactRule{
 	// prefilter: every match contains "Cookie:" contiguously; (?i), lower-cased ASCII text.
 	{re: regexp.MustCompile(`(?i)((?:Set-)?Cookie:\s*)[^\r\n]*=[^\r\n]*`), repl: "${1}[REDACTED:cookie]", needles: []string{"cookie:"}, foldCase: true},
 	// KEY=value / KEY: value where KEY names a secret. Value redacted, key kept.
-	// Besides the keyword family, a key that ENDS in _PASS (DB_PASS, REDIS_PASS) or
-	// ends in MYSQL_PWD is a secret; bare PWD (the shell's cwd) and PASS_THROUGH-style
-	// names are not.
+	// _PASS is limited to credential contexts: FIRST_PASS / RENDER_PASS are
+	// ordinary computation stages even with long values or uppercase spelling.
+	// PASSPHRASE and suffixed _PWD are credentials; bare PWD is the shell cwd.
 	// The start boundary is `\b`, or — where \b cannot hold because the key begins
 	// with U+017F LONG S / U+212A KELVIN SIGN (non-ASCII, so not a Go word char, yet
 	// (?i) folds them onto s / k) — a consumed non-word char or the text start. The
 	// consumed char is captured and re-emitted; `\b` stays first so a quote-closed
 	// value directly followed by the next key (A='x'B_TOKEN=…) still matches B_TOKEN.
 	// prefilter: the keyword group is mandatory and each alternative contains one of
-	//            these (API[_-]?KEY etc. all contain "key"; _PASS and MYSQL_PWD have
+	//            these (API[_-]?KEY etc. all contain "key"; _PASS, _PWD and PASSPHRASE have
 	//            their own), and the match needs a [:=] separator; (?i), lower-cased ASCII text.
-	{re: regexp.MustCompile(`(?i)(?:\b|(^|[^A-Z0-9_]))((?:[A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|TOKEN|CREDENTIAL)[A-Z0-9_]*)|[A-Z0-9_]*_PASS|[A-Z0-9_]*MYSQL_PWD)\s*([:=])\s*["']?[^\s"']{6,}["']?`), repl: `${1}${2}${3}[REDACTED:secret]`, needles: []string{"secret", "password", "passwd", "key", "token", "credential", "_pass", "mysql_pwd"}, also: ":=", foldCase: true},
+	{re: regexp.MustCompile(`(?i)(?:\b|(^|[^A-Z0-9_]))((?:[A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|PASSPHRASE|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|TOKEN|CREDENTIAL)[A-Z0-9_]*)|(?:DB|MYSQL|SMTP|REDIS|ADMIN|ROOT|USER|MAIL|FTP|SSH|LDAP|PG|POSTGRES)_PASS|[A-Z0-9_]+_PWD)\s*([:=])\s*["']?[^\s"']{6,}["']?`), repl: `${1}${2}${3}[REDACTED:secret]`, needles: []string{"secret", "password", "passwd", "key", "token", "credential", "_pass", "_pwd", "passphrase"}, also: ":=", foldCase: true},
+	// Connection strings run after the original token/header/key rules. Marker
+	// alternatives consume an earlier replacement whole (including its ']'),
+	// preserving coverage and producing one marker without a stray closing ']'.
+	// Passwords may contain '/' or ':' and extend to the last '@'.
+	// prefilter: every candidate contains both :// and @.
+	{re: regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.\-]*://(?:\[REDACTED:[a-z-]+\]|[^\s:/@])*:(?:\[REDACTED:[a-z-]+\]|[^\s'">])+@(?:\[REDACTED:[a-z-]+\]|[^\s'")>\]},;])+`), repl: "[REDACTED:connstring]", needles: []string{"://"}, also: "@", foldCase: true, keepMatch: connectionPortPath},
+}
+
+// connectionPortPath preserves URLs whose apparent password is a port followed
+// by a path containing '@'. Main excluded '/' from passwords and kept these
+// URLs intact. Restrict this guard to host-like users; admin:ab/cd@host remains
+// credentialed. Port-only forms are a separate main-coverage policy decision.
+func connectionPortPath(s string) bool {
+	_, authority, _ := strings.Cut(s, "://")
+	at := strings.LastIndexByte(authority, '@')
+	if at < 0 {
+		return false
+	}
+	user, password, ok := strings.Cut(authority[:at], ":")
+	if !ok || !(user == "" || strings.EqualFold(user, "localhost") || strings.Contains(user, ".")) {
+		return false
+	}
+	port, _, path := strings.Cut(password, "/")
+	if !path || port == "" || strings.Contains(password, "://") {
+		return false
+	}
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// tokenPlaceholder excludes recognizable documentation values from new rules.
+// These rules did not exist on main; existing main token coverage is retained.
+func tokenPlaceholder(s string) bool {
+	u := strings.ToUpper(s)
+	if strings.Contains(u, "YOUR_") || strings.Contains(u, "PLACEHOLDER") {
+		return true
+	}
+	body := s
+	if i := strings.LastIndexAny(body, "/-"); i >= 0 {
+		body = body[i+1:]
+	}
+	return len(body) > 0 && strings.Trim(body, "xX") == ""
+}
+
+func underscoreSKWord(s string) bool {
+	if !strings.HasPrefix(s, "_") {
+		return false
+	} // preserve main's standalone sk- coverage
+	body := strings.TrimPrefix(s, "_sk-")
+	if strings.HasPrefix(body, "proj-") || strings.HasPrefix(body, "ant-") {
+		return false
+	}
+	// A lowercase word before a separator is still prose even when a later
+	// segment contains a year or an uppercase identifier.
+	if end := strings.IndexAny(body, "-_"); end >= 0 {
+		body = body[:end]
+	}
+	return !strings.ContainsAny(body, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+}
+
+func (r *redactRule) replace(s string) string {
+	if r.keepMatch == nil {
+		return r.re.ReplaceAllString(s, r.repl)
+	}
+	return r.re.ReplaceAllStringFunc(s, func(match string) string {
+		if r.keepMatch(match) {
+			return match
+		}
+		return r.re.ReplaceAllString(match, r.repl)
+	})
 }
 
 // privateTag is one <private …> opener or </private …> closer: [start, end) in
@@ -452,7 +525,7 @@ func applyRules(rules []redactRule, s string, filtered bool, ran *[]int) string 
 		if ran != nil {
 			*ran = append(*ran, i)
 		}
-		if ns := r.re.ReplaceAllString(s, r.repl); ns != s {
+		if ns := r.replace(s); ns != s {
 			s = ns
 			haveLower = false // text changed: rebuild the folded copy on demand
 		}
@@ -464,7 +537,7 @@ func applyRules(rules []redactRule, s string, filtered bool, ran *[]int) string 
 // implementation Redact must match byte for byte.
 func redactUnfiltered(s string) string {
 	for _, r := range redactRules {
-		s = r.re.ReplaceAllString(s, r.repl)
+		s = r.replace(s)
 	}
 	return s
 }
@@ -472,7 +545,7 @@ func redactUnfiltered(s string) string {
 // secretKeyRe matches secret-named keys with word boundaries to avoid false
 // positives (e.g. "tokenizer", "author", "oauth_provider").
 // Compound terms use spaces because isSecretKey normalizes underscores to spaces.
-var secretKeyRe = regexp.MustCompile(`\b(password|passwd|secret|secrets|credential|credentials|token|apikey|api key|accesskey|access key|privatekey|private key|secret key|auth token|dsn|connection string|conn str)\b`)
+var secretKeyRe = regexp.MustCompile(`\b(password|passwd|passphrase|secret|secrets|credential|credentials|token|apikey|api key|accesskey|access key|privatekey|private key|secret key|auth token|dsn|connection string|conn str)\b`)
 
 // secretKeyExact are secret-bearing key names matched only as the WHOLE normalized
 // key (after underscore/hyphen/camelCase splitting), not as a substring — so
@@ -482,6 +555,10 @@ var secretKeyExact = map[string]bool{
 	"authorization": true, "proxy authorization": true,
 	"cookie": true, "set cookie": true,
 }
+
+// Match normalized credential suffixes in structured JSON too. A bare pwd is
+// the working directory; pass alone is ambiguous outside a credential context.
+var credentialSuffixRe = regexp.MustCompile(`^(?:(?:db|mysql|smtp|redis|admin|root|user|mail|ftp|ssh|ldap|pg|postgres) pass|.+ pwd)$`)
 
 // camelBoundaryRe matches the boundary between a lower/digit and an upper char
 // so "secretKey" → "secret Key" and "dbPassword" → "db Password".
@@ -494,46 +571,90 @@ func isSecretKey(k string) bool {
 	n := camelBoundaryRe.ReplaceAllString(k, "$1 $2")
 	n = strings.NewReplacer("_", " ", "-", " ").Replace(n)
 	n = strings.ToLower(n)
-	if secretKeyExact[n] {
+	if secretKeyExact[n] || credentialSuffixRe.MatchString(n) {
 		return true
 	}
 	return secretKeyRe.MatchString(n)
 }
 
-// maxFailedJSONProbes bounds the JSON-decoder probes redactString may waste on
-// one string. A failed probe can read to the end of the text (an unclosed "[[[…"
-// or {"a":{"a":… runs the decoder to EOF), so one failure costs O(n) and a flood
-// of brackets made the whole pass quadratic (100k '[' ≈ 10 s before the cap).
-// Probes that succeed consume their span and are not counted. 128 failures
-// cost at most 128 passes over the text — about 12 ms on 18 KB — while ordinary
-// prose, code and logs fail far fewer times than that before their real JSON.
-// debt: past the cap, later embedded JSON in the same string is only regex-
-// redacted (a generic-key secret like {"apiKey":"…"} is then not caught
-// structurally). If a real leaked case shows up, raise the cap or budget by
-// bytes read instead of probe count.
-const maxFailedJSONProbes = 128
+type jsonSpan struct {
+	end   int // exclusive end; zero means unbalanced
+	valid bool
+}
 
-// jsonProbeBoundary reports whether the '{' or '[' at s[i] is worth a decoder
-// probe: JSON that starts a value sits at the start of the text or after
-// whitespace, ':' (a value), ',' (a list element), '=' (an assignment), '('
-// (an argument), a quote or backtick (a shell `-d '{…}'` or markdown span) or
-// another bracket (nested or adjacent JSON). A bracket glued to a word or other
-// punctuation (a[i], x{, f(){) is almost always indexing, a template or noise.
-// The quote, backtick and bracket cases go beyond the minimal set (start,
-// whitespace, : , = ( ) because on the maintainer's real index the minimal set
-// left 8 of 88k messages with fewer redaction markers than probing every
-// bracket did, and 67 differing in all; with these characters none lost a
-// marker. They cost nothing the failure cap does not already bound. s[i-1] is a
-// single byte; a multi-byte rune before the bracket is never a boundary.
-func jsonProbeBoundary(s string, i int) bool {
-	if i == 0 {
-		return true
+// balancedJSONSpans records bracket spans in O(n) time and space. A mismatched
+// closer terminates all open candidates in that string context. Quotes with an
+// odd preceding backslash run do not toggle the context.
+//
+// There are two stacks, one for each quote parity. The second stack matters:
+// main probes EVERY opener, even inside quoted prose or an invalid JSON string.
+// A candidate starts outside its own strings regardless of the prose's parity.
+// Thus brackets in a candidate's strings cannot close it, but can still begin
+// independent candidates, preserving main's coverage without boundary guesses.
+//
+// Validate each balanced span's shallow syntax once: replace balanced children
+// with a spaced scalar (or an invalid sentinel). Each original byte belongs to
+// at most one shallow buffer per parity. This also makes balanced INVALID nests
+// linear: no decoder repeatedly reads their descendants. Only valid candidates
+// reach the decoder, outermost first; success skips all enclosed positions.
+func balancedJSONSpans(s string) []jsonSpan {
+	spans := make([]jsonSpan, len(s))
+	type frame struct {
+		start, depth int
+		shallow      []byte
 	}
-	switch s[i-1] {
-	case ' ', '\t', '\n', '\r', '\f', '\v', ':', ',', '=', '(', '"', '\'', '`', '[', '{', ']', '}':
-		return true
+	var stacks [2][]frame
+	parity, slashes := 0, 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		// This byte is ordinary string content in the other quote context.
+		other := &stacks[1-parity]
+		if n := len(*other); n > 0 {
+			(*other)[n-1].shallow = append((*other)[n-1].shallow, c)
+		}
+		stack := &stacks[parity]
+		switch c {
+		case '{', '[':
+			*stack = append(*stack, frame{start: i, depth: 1, shallow: []byte{c}})
+		case '}', ']':
+			n := len(*stack)
+			if n > 0 {
+				f := (*stack)[n-1]
+				if (s[f.start] == '{' && c != '}') || (s[f.start] == '[' && c != ']') {
+					*stack = (*stack)[:0]
+				} else {
+					f.shallow = append(f.shallow, c)
+					valid := json.Valid(f.shallow) && f.depth <= 10000 // encoding/json's nesting limit
+					spans[f.start] = jsonSpan{i + 1, valid}
+					*stack = (*stack)[:n-1]
+					if n > 1 {
+						parent := &(*stack)[n-2]
+						if f.depth+1 > parent.depth {
+							parent.depth = f.depth + 1
+						}
+						if valid {
+							parent.shallow = append(parent.shallow, ' ', '0', ' ')
+						} else {
+							parent.shallow = append(parent.shallow, ' ', '!', ' ')
+						}
+					}
+				}
+			}
+		default:
+			if n := len(*stack); n > 0 {
+				(*stack)[n-1].shallow = append((*stack)[n-1].shallow, c)
+			}
+		}
+		if c == '"' && slashes%2 == 0 {
+			parity = 1 - parity
+		}
+		if c == '\\' {
+			slashes++
+		} else {
+			slashes = 0
+		}
 	}
-	return false
+	return spans
 }
 
 // redactString is the single text redactor used for message content, session
@@ -557,17 +678,16 @@ func redactStringWith(s string, filtered bool) string {
 	}
 	var out strings.Builder
 	textStart := 0
-	failed := 0
+	spans := balancedJSONSpans(s)
 	for i := 0; i < len(s); {
-		if (s[i] == '{' || s[i] == '[') && failed < maxFailedJSONProbes && jsonProbeBoundary(s, i) {
-			if red, n, ok := redactJSONAt(s[i:], filtered); ok {
+		if span := spans[i]; span.valid {
+			if red, n, ok := redactJSONAt(s[i:span.end], filtered); ok {
 				out.WriteString(redactWith(s[textStart:i], filtered, nil)) // regex-redact preceding prose
 				out.WriteString(red)                                       // structurally-redacted JSON span
 				i += n
 				textStart = i
 				continue
 			}
-			failed++
 		}
 		i++
 	}

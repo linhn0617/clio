@@ -153,10 +153,7 @@ var jsonProbeFragments = []string{
 	"\n{\"secret\":\"abcdefgh\"}", "\t[]", " {}", `a[i]`, `x{`, ` {"nested":{"token":"abcdefgh"}} trailing`,
 }
 
-// Bracket handling: the probe limits (boundary char, failure cap) only skip
-// brackets that cannot start embedded JSON a person would write, so for every
-// input whose brackets sit at a boundary and fail fewer than the cap, the output
-// equals the unrestricted probe-everything version.
+// Compare every bracket position, including brackets glued to prose or punctuation.
 func TestRedactStringMatchesReferenceAtBoundaries(t *testing.T) {
 	r := rand.New(rand.NewSource(20261018))
 	for i := 0; i < 60000; i++ {
@@ -172,49 +169,19 @@ func TestRedactStringMatchesReferenceAtBoundaries(t *testing.T) {
 			}
 		}
 		in := b.String()
-		// keep the comparison inside the domain: every bracket at a boundary
-		ok := true
-		for j := 0; j < len(in); j++ {
-			if (in[j] == '{' || in[j] == '[') && !jsonProbeBoundary(in, j) {
-				ok = false
-				break
-			}
-		}
-		if !ok {
-			continue
-		}
 		if got, want := redactString(in), redactStringReference(in); got != want {
 			t.Fatalf("redactString(%q)\n got  %q\n want %q", in, got, want)
 		}
 	}
 }
 
-// jsonProbeBoundary admits exactly: text start, whitespace, : , = ( " ' ` [ { ] }.
-func TestJSONProbeBoundary(t *testing.T) {
-	for _, c := range []string{" ", "\t", "\n", "\r", ":", ",", "=", "(", `"`, "'", "`", "[", "{", "]", "}"} {
-		if !jsonProbeBoundary(c+"{", 1) {
-			t.Errorf("%q before a bracket should be a boundary", c)
-		}
-	}
-	if !jsonProbeBoundary("{", 0) {
-		t.Error("text start should be a boundary")
-	}
-	for _, c := range []string{"a", "9", "_", ".", ")", ";", "<", "!", "\u00e9", "\uff1a"} {
-		if jsonProbeBoundary(c+"{", len(c)) {
-			t.Errorf("%q before a bracket should not be a boundary", c)
-		}
-	}
-}
-
-// Embedded JSON after a realistic number of failed probes (code, prose with
-// stray brackets) must still be structurally redacted; the cap exists only for
-// floods. (What happens past the cap is the debt on maxFailedJSONProbes, not a
-// behaviour to pin.)
+// Invalid brackets never impose a probe-count limit on later embedded JSON.
 func TestRedactStringJSONAfterSomeFailedProbes(t *testing.T) {
 	const secretJSON = `{"apiKey":"abcdef123456"}`
-	in := strings.Repeat("[ ", maxFailedJSONProbes/2) + secretJSON
+	const probes = 128
+	in := strings.Repeat("[ ", probes) + secretJSON
 	if got := redactString(in); strings.Contains(got, "abcdef123456") {
-		t.Errorf("JSON after %d failed probes must still be redacted: %q", maxFailedJSONProbes/2, got)
+		t.Errorf("JSON after %d failed probes must still be redacted: %q", probes, got)
 	}
 }
 

@@ -1,47 +1,53 @@
 ## Why
 
-Two follow-ups to the redaction prefilter (#55):
-
-- **B6, secret rules.** The rule table misses several common credential shapes (GitLab, npm,
-  Hugging Face, Stripe webhook, Slack incoming webhook, PGP private keys, GitHub's legacy
-  `Authorization: token`, `redis://:pass@host`, `MYSQL_PWD`, `DB_PASS`/`*_PASS`), and the
-  verifier of #55 found four defects in the existing rules (a stray `]` after a nested token,
-  `x_sk-…` not matched, an ASCII-only `\b` that misses a key starting with U+017F LONG S, and
-  an AWS-key-inside-`secret=` report).
-- **B5, algorithmic cost.** `stripPrivate` re-searched for a closer at every nested opener
-  (2000 openers + one closer on one 18 KB line: 5.1 s here, 18.5 s on the maintainer's index),
-  and `redactString` probed a JSON decoder at every `{`/`[` (18 KB of `[`: 1.4 s). Both are
-  reachable from any transcript line, so one hostile or unlucky tool output could stall an index.
+PR #57 adds credential rules and removes superlinear scans in ingest redaction.
+The initial JSON boundary filter and failed-probe cap reduced main's coverage:
+embedded JSON after punctuation, words, or many invalid brackets could expose
+secret-keyed values. Moving connection strings before the existing rules also
+hid query-key names and Authorization headers, exposing credential tails.
 
 ## What Changes
 
-- **session-ingest (B6)**: new rules, each with prefilter needles and tests (positive, negative,
-  over-redaction guard): `glpat-`, `npm_`, `hf_`, `whsec_`, Slack incoming-webhook URL, PGP
-  private key block, `Authorization: token <x>`. Existing rules widened: connection strings with an
-  empty user, `KEY=value` where the key ends in `_PASS` or is `MYSQL_PWD`, `sk-` directly after
-  an underscore, and a `KEY=value` key that starts with U+017F/U+212A (the start boundary is now
-  `\b` or a consumed non-word character). The connection-string rule moved ahead of the token
-  rules so a token used as a URL password yields one `[REDACTED:connstring]` marker instead of
-  `[REDACTED:connstring]]`.
-- Not done on purpose (kept as a `debt:` above the rule table): quoted passwords containing
-  spaces, `curl -u user:pass`, `.netrc`, Docker `auths` blocks.
-- Reported but not reproduced: "an AWS key id inside a `secret=` value is not redacted". Every
-  wrapper tried (25 forms, plus 400k random wrappers) redacts; a guard test pins it.
-- **session-ingest (B5)**: `stripPrivate` is single-pass (tag scan, one stack pass, one
-  right-to-left table) with output byte-identical to the previous search (the old code stays in
-  the tests as an oracle, compared on hand cases, 300k random inputs and a fuzz target).
-  `redactString` probes for embedded JSON only at a bracket that follows the text start,
-  whitespace, `:`, `,`, `=`, `(`, a quote, a backtick or a bracket, and stops after 128 failed
-  probes per string (`debt:` documents the trade-off past the cap). The quote, backtick and
-  bracket characters go beyond the minimal set first proposed: on the maintainer's
-  index the minimal set left 8 of 88k messages with fewer redaction markers than probing every
-  bracket (shell `-d '{…}'`, markdown spans).
+- Replace JSON boundary heuristics and probe caps with a linear, escape-aware
+  balanced-span pre-scan. Mismatched closers terminate candidates. Two quote
+  contexts preserve main's probes even inside quoted prose. Validate shallow
+  syntax bottom-up once per balanced span so nested invalid spans cannot cause
+  repeated decoding; decode valid outermost candidates first and skip successful
+  spans. No punctuation or failed-probe-count restriction remains.
+- Retain the linear private-tag scanner and its independent reference tests.
+- Keep an independent test-only copy of commit 165f184's redactor. A generated
+  corpus of 12,000 inputs maps output markers back to original input positions
+  and checks that every byte main removed remains removed. It includes every
+  ASCII punctuation prefix, non-ASCII prefixes, bracket noise, nested secret
+  JSON, quoted brackets/escapes, query tails and adjacent Basic headers.
+- Add GitLab, npm, Hugging Face, Stripe webhook, Slack webhook, PGP private blocks
+  and legacy Authorization-token rules with necessary-condition prefilters.
+  Stripe webhook bodies accept base64 `+`, `/`, `=`; GitLab token bodies may end
+  in `-` or `_`; Slack webhook hosts match case-insensitively.
+- Restrict `_PASS` to credential contexts (DB, MYSQL, SMTP, REDIS, ADMIN, ROOT,
+  USER, MAIL, FTP, SSH, LDAP, PG, POSTGRES). Add PASSPHRASE and suffixed `_PWD`;
+  keep bare PWD and computation-stage names intact.
+- Restore connection strings after the existing token, header and KEY rules;
+  consume their markers whole to retain the single-marker / no-stray-`]` fix.
+  Passwords may contain `/`, `:` and `@` (the last `@` ends the password).
+- Redact an AWS id glued to the following key name, `AKIA…secret=…`. The earlier
+  report tested the different, already-covered `secret=AKIA…` form.
+- Preserve GitLab and Slack documentation placeholders, the Authorization-token
+  placeholder, dotted Hugging Face identifiers and lowercase `_sk-learn-…`
+  words. Existing standalone sk- coverage stays intact.
+- Keep documented debt for quoted free-text passwords with spaces, curl -u,
+  .netrc, Docker auths, and truncated PEM/PGP blocks. Address a truncated block
+  only if a truncated private key is ever found in the index.
 
 ## Impact
 
-- Stored values change only where a new or widened rule now matches (more redaction). Existing
-  indexes keep their old text until `clio index --full`.
-- Embedded JSON glued to a word or other punctuation (`x{"apiKey":"…"}`, `f(){…}`) is no longer
-  found by the JSON probe; the shape regexes still run on it. Corpus numbers are in the change
-  report.
+- Stored values retain main's redaction coverage and change only toward more
+  redaction. The independent 12,000-input main-oracle test is the regression
+  evidence: it compares original removed positions, not marker counts.
+  No real database or transcript is accessed by these checks.
+- Port-like URLs such as `http://localhost:3000@v2` stay redacted as in main: an
+  all-digit password cannot be told apart from a port, and keeping real credentials
+  redacted outweighs the searchability of these rare strings. Port-plus-path forms
+  that main already preserved remain unchanged.
+- Existing indexes retain their old text until `clio index --full`.
 - No schema, CLI or MCP change.

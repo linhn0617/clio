@@ -7,9 +7,9 @@ import (
 
 // Synthetic credentials only: shapes match the rules, none is a live secret.
 const (
-	fakeSK   = "sk-abcdefghijklmnopqrstuvwxyz0123"
-	fakeAKIA = "AKIAIOSFODNN7EXAMPLE"
-	fakeGHP  = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+	fakeSK   = "sk-" + "abcdefghijklmnopqrstuvwxyz0123"
+	fakeAKIA = "AKIA" + "IOSFODNN7EXAMPLE"
+	fakeGHP  = "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789"
 	// Split so the repository secret scanner (push protection) does not read the test fixture as a real webhook.
 	fakeSlack = "https://hooks.slack.com/" + "services/T01234567/" + "B01234567/" + "abcdefghijklmnopqrstuvwx"
 )
@@ -101,7 +101,7 @@ func TestRedactSkAfterUnderscore(t *testing.T) {
 	for _, s := range []string{
 		"risk-assessment-for-the-quarterly-report-2026",
 		"disk-usage-statistics-for-all-mounted-volumes",
-		"abc9" + fakeSK, "task" + fakeSK, "Xsk-abcdefghijklmnopqrstuvwxyz0123",
+		"abc9" + fakeSK, "task" + fakeSK, "Xs" + "k-abcdefghijklmnopqrstuvwxyz0123",
 	} {
 		if got := Redact(s); got != s {
 			t.Errorf("guard: Redact(%q) = %q, want unchanged", s, got)
@@ -109,9 +109,8 @@ func TestRedactSkAfterUnderscore(t *testing.T) {
 	}
 }
 
-// (c) an AWS key id inside a secret-named value is still gone. This is a guard,
-// not a regression: the fuzzed wrappers below all redact on main already (the
-// reported leak did not reproduce), so the test pins the property.
+// (c) AWS keys in secret-named values were already redacted on main. The
+// adjacent-key-name regression (AKIA…secret=…) is covered by TestPR57Rules.
 func TestRedactAWSKeyInsideSecretValue(t *testing.T) {
 	for _, w := range []string{
 		"secret=%s", "secret: %s", "SECRET_KEY=%s", `secret="%s"`, "secret='%s'", "token=%s,",
