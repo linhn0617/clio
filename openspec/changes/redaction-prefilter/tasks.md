@@ -5,13 +5,13 @@
       non-ASCII fold test, `k`/`s` fold pin
 - [x] 1.2 `redactRule` gains `needles` / `also` / `foldCase` (nil needles = always run; table validated at init); `Redact` skips rules whose
       needle is absent; `redactUnfiltered` is the reference path
-- [x] 1.3 Mutation check: breaking the non-ASCII fallback, a needle, or the `passwd` needle turns
+- [x] 1.3 Mutation check: breaking the U+017F fold mapping, a needle, nil-needles handling, the folded-copy refresh, or the `passwd` needle turns
       the equivalence tests red
 
 ## 2. Single pass (B2)
 
 - [x] 2.1 Inventory of every `redactString` call site; show which repeated passes change output
-      (`TestRedactNotIdempotentOnAdversarialText`, `TestRedactStringNotIdempotentOnRedactedJSONKey`)
+      (`TestToolUseContentKeepsSecondRedactionPass` pins that the second pass on tool_use content stays)
 - [x] 2.2 `redactMemo` shared by tool summary and activity target (Claude and Codex paths), with a
       test that the memoized results equal the unmemoized ones
 

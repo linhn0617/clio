@@ -228,6 +228,12 @@ func Redact(s string) string { return redactWith(s, true, nil) }
 // rule, the reference path). If ran is non-nil it receives the index of every
 // rule whose regexp was executed, so tests can observe what was skipped.
 func redactWith(s string, filtered bool, ran *[]int) string {
+	return applyRules(redactRules, s, filtered, ran)
+}
+
+// applyRules is the rule loop behind redactWith, over an explicit rule slice so
+// tests can drive it with their own tables.
+func applyRules(rules []redactRule, s string, filtered bool, ran *[]int) string {
 	var lower string
 	haveLower := false
 	getLower := func() string {
@@ -236,8 +242,8 @@ func redactWith(s string, filtered bool, ran *[]int) string {
 		}
 		return lower
 	}
-	for i := range redactRules {
-		r := &redactRules[i]
+	for i := range rules {
+		r := &rules[i]
 		if filtered && !r.mayMatch(s, getLower) {
 			continue
 		}
