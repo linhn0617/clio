@@ -19,9 +19,11 @@ MAY have an empty user (`redis://:pass@host`) and passwords containing `/`, `:` 
 `@`, ending at the last `@` before the host. Connection strings SHALL run after
 existing token/header/key rules and consume any prior redaction markers whole,
 so query tails and adjacent Authorization headers cannot expose secrets.
-A `KEY=value` line SHALL redact PASSPHRASE, suffixed `_PWD`, and `_PASS` with a
+A `KEY=value` line SHALL redact PASSPHRASE, `_PWD`, and `_PASS` with a
 credential-context prefix: DB, MYSQL, SMTP, REDIS, ADMIN, ROOT, USER, MAIL, FTP,
-SSH, LDAP, PG or POSTGRES. Bare PWD and computation-stage names such as first_pass,
+SSH, LDAP, PG or POSTGRES, optionally preceded by another underscore-separated
+prefix (MY_DB_PASS, APP_ROOT_PWD). The same restrictions SHALL apply to structured
+keys. OLD_PWD and PROJECT_PWD SHALL remain unchanged. Bare PWD and computation-stage names such as first_pass,
 FIRST_PASS, RENDER_PASS, SECOND_PASS, TEST_PASS, NUM_PASS and PASS_THROUGH SHALL
 remain unchanged. BYPASS, COMPASS and ENCOMPASS SHALL remain unchanged.
 
@@ -115,10 +117,12 @@ the index.
   be checked once bottom-up, without repeated decoding of invalid nested spans.
   Decoder probes SHALL be restricted to balanced, syntactically valid candidates,
   with outermost candidates first and successfully decoded spans skipped.
-  There SHALL be no prefix-boundary restriction or failed-probe cap. Redacted
+  There SHALL be no prefix-boundary restriction or failed-probe cap. Span storage SHALL be sparse
+  in opener offsets; non-bracket text SHALL NOT require a per-byte span table. Redacted
   positions SHALL cover main commit 165f184, verified by an independent test-only
   oracle over at least 10,000 generated inputs, including every ASCII punctuation
-  prefix, random bracket noise, nested secrets and rule-order regressions.
+  prefix, random bracket noise, nested secrets, rule-order regressions and every
+  token rule crossed with key/header rules, glued and separated.
 
 #### Scenario: Embedded JSON at arbitrary positions
 
@@ -135,12 +139,43 @@ the index.
   terminator, with prefilters remaining necessary conditions
 - **AND** obvious GitLab placeholders, Slack's official all-X webhook example,
   `Authorization: token YOUR_PERSONAL_ACCESS_TOKEN_HERE`, dotted Hugging Face
-  identifiers and `task_sk-learn-…` SHALL remain intact
+  identifiers and ordinary `task_sk-learn-…` words SHALL remain intact, provided
+  a guarded word does not contain a later standalone credential that main removed
 
 #### Scenario: AWS key adjacent to a key name
 
 - **WHEN** an AWS access key id immediately precedes `secret=abcdefgh`
 - **THEN** both the id and the assigned value SHALL be redacted
+
+#### Scenario: Glued token and following credential
+
+- **WHEN** a token or widened KEY=value match absorbs a following credential key
+  or Authorization, Proxy-Authorization, Cookie or Set-Cookie header name
+- **THEN** the original key/header removal SHALL still be evaluated and its value
+  SHALL remain removed, including when the overlapping removals are coalesced
+- **AND** original connection spans SHALL participate in that coverage merge so
+  a consumed scheme cannot expose credentials; preserved key-name captures SHALL
+  be suppressed where they overlap a connection removal
+
+#### Scenario: Original match context and whole placeholders
+
+- **WHEN** a guarded match depends on a Unicode-adjacent word boundary
+- **THEN** the guard and replacement SHALL use original-string submatch indices
+  without re-matching a slice
+- **AND** a documentation placeholder SHALL be recognized only when its whole
+  body after the fixed prefix consists of x/X, underscores and dashes, or an
+  uppercase YOUR_..._HERE word sequence; a real body ending in -x SHALL be redacted
+
+#### Scenario: AWS termination and connection port paths
+
+- **WHEN** an AWS-shaped string has more than sixteen body characters without a
+  word boundary or a following lowercase key start
+- **THEN** it SHALL remain unchanged, including extended all-X and EXAMPLE values
+- **AND** connection URLs with numeric ports and paths containing at-signs SHALL
+  remain unchanged, including single-label hosts and IPv6; empty-user passwords
+  and slash/colon passwords SHALL still be redacted when followed by a host
+- **AND** localhost:3000 followed immediately by an at-sign and host SHALL retain
+  main's redaction coverage
 
 #### Scenario: Whole value redacted regardless of type under a secret key
 

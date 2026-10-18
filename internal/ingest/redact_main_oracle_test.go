@@ -1,5 +1,9 @@
-// Test-only oracle copied from commit 165f184:internal/ingest/redact.go.
-// Only identifiers have been renamed to isolate the original rules and walk.
+// Frozen copy of 165f184:internal/ingest/redact.go, used only to prove no
+// redaction coverage regression. Only identifiers were renamed for isolation.
+// Do not update this oracle along with production fixes. When coverage policy
+// intentionally changes, explicitly review the removed-position differences,
+// then refresh from the approved baseline (renaming identifiers only), or retire
+// this oracle after equivalent independent coverage checks replace it.
 package ingest
 
 import (

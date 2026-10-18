@@ -110,7 +110,7 @@ func TestRedactSkAfterUnderscore(t *testing.T) {
 }
 
 // (c) AWS keys in secret-named values were already redacted on main. The
-// adjacent-key-name regression (AKIA…secret=…) is covered by TestPR57Rules.
+// adjacent-key-name regression (AKIA…secret=…) is covered by TestRedactionRules.
 func TestRedactAWSKeyInsideSecretValue(t *testing.T) {
 	for _, w := range []string{
 		"secret=%s", "secret: %s", "SECRET_KEY=%s", `secret="%s"`, "secret='%s'", "token=%s,",

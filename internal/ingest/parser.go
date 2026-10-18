@@ -242,7 +242,7 @@ func toolUseSummaryMemo(input json.RawMessage, rm *redactMemo) string {
 				// this result via redactMemo only when it reads the same field;
 				// Bash/Read/Edit do, a tool whose summary key differs from its target
 				// field pays a third pass). redactString itself is now linear on bracket
-				// floods (probe boundary + failure cap, see maxFailedJSONProbes).
+				// floods (balanced-span pre-scan with bottom-up syntax validation).
 				return firstLine(rm.redact(s), 200)
 			}
 		}

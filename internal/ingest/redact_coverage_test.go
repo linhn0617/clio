@@ -10,7 +10,7 @@ import (
 	"unicode"
 )
 
-func TestPR57JSONCoverage(t *testing.T) {
+func TestRedactionJSONCoverage(t *testing.T) {
 	for _, prefix := range []string{"result->", "<pre>", "resp|", strings.Repeat("[x ", 128), strings.Repeat("[INFO] request ok\n", 130), "x", ">", "=>", "->", "|", ";", "**", "-d", "中", "é", `unclosed " prose `, `\" prose `} {
 		in := prefix + `{"apiKey":"hunter2"}`
 		if got, want := redactString(in), mainOracleRedactString(in); got != want {
@@ -23,7 +23,7 @@ func TestPR57JSONCoverage(t *testing.T) {
 	}
 }
 
-func TestPR57Rules(t *testing.T) {
+func TestRedactionRules(t *testing.T) {
 	cases := []struct{ name, in, want string }{
 		{"pass-context", "first_pass = compute_all(x)", "first_pass = compute_all(x)"},
 		{"passphrase", "GPG_PASSPHRASE=hunter2hunter2", "GPG_PASSPHRASE=[REDACTED:secret]"},
@@ -48,7 +48,7 @@ func TestPR57Rules(t *testing.T) {
 	}
 }
 
-func TestPR57Guards(t *testing.T) {
+func TestRedactionGuards(t *testing.T) {
 	cases := []string{"BYPASS=some-long-value", "COMPASS=north-west", "ENCOMPASS=some-long-value", "first_pass = compute_all(x)", "RENDER_PASS: shadowmap", "SECOND_PASS=another-round", "PASS_THROUGH=some-long-value", "FIRST_PASS=some-long-value", "TEST_PASS=some-long-value", "NUM_PASS=some-long-value", "PWD=/home/x", "registry.example.com:443@scope", "glp" + "at-" + strings.Repeat("x", 20), "glp" + "at-YOUR_PERSONAL_ACCESS_TOKEN_HERE", "self.h" + "f_modelConfigurationABCDEFGHIJKLMNOPQRSTUVWXYZ", "Authorization: token YOUR_PERSONAL_ACCESS_TOKEN_HERE", "task_s" + "k-learn-model-configuration-example", "task_s" + "k-learn-model-configuration-2026", "https://hooks.slack.com/" + "services/T00000000/B00000000/" + strings.Repeat("X", 24)}
 	for i, in := range cases {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
@@ -63,7 +63,7 @@ func TestPR57Guards(t *testing.T) {
 // uses stable JSON key order; whitespace may normalize when JSON is re-encoded.
 // Comparing covered input positions catches partial tails and replacements at
 // the wrong location, unlike marker counts or whole-substring-only checks.
-func pr57RemovedPositions(t *testing.T, original, output string) []bool {
+func removedPositions(t *testing.T, original, output string) []bool {
 	t.Helper()
 	// Main can append stray closing brackets from an intermediate marker (the
 	// connstring regression). Treat those artifacts as part of its replacement.
@@ -102,7 +102,7 @@ func pr57RemovedPositions(t *testing.T, original, output string) []bool {
 	return covered
 }
 
-func TestPR57MainCoverageCorpus(t *testing.T) {
+func TestRedactionMainCoverageCorpus(t *testing.T) {
 	r := rand.New(rand.NewSource(57))
 	prefixes := []string{"result->", "<pre>", "resp|", strings.Repeat("[x ", 128), strings.Repeat("[INFO] request ok\n", 130), "中", "é", `unclosed " `}
 	for c := byte(33); c < 127; c++ {
@@ -138,8 +138,8 @@ func TestPR57MainCoverageCorpus(t *testing.T) {
 		}
 		old := mainOracleRedactString(in)
 		got := redactString(in)
-		oldPositions := pr57RemovedPositions(t, in, old)
-		newPositions := pr57RemovedPositions(t, in, got)
+		oldPositions := removedPositions(t, in, old)
+		newPositions := removedPositions(t, in, got)
 		for pos, removed := range oldPositions {
 			if removed && !newPositions[pos] {
 				t.Fatalf("main coverage lost at case %d byte %d: original replaced substring survives", i, pos)
@@ -148,7 +148,7 @@ func TestPR57MainCoverageCorpus(t *testing.T) {
 	}
 }
 
-func TestPR57BalancedInvalidNesting(t *testing.T) {
+func TestRedactionBalancedInvalidNesting(t *testing.T) {
 	// A balanced but invalid outer candidate must not repeatedly decode its
 	// nested invalid children, or hide a valid JSON sibling/descendant.
 	in := strings.Repeat("[", 9000) + `{"token":"hunter2"},broken` + strings.Repeat("]", 9000)
@@ -162,7 +162,7 @@ func TestPR57BalancedInvalidNesting(t *testing.T) {
 	}
 }
 
-func TestPR57CredentialKeys(t *testing.T) {
+func TestRedactionCredentialKeys(t *testing.T) {
 	for _, context := range []string{"DB", "MYSQL", "SMTP", "REDIS", "ADMIN", "ROOT", "USER", "MAIL", "FTP", "SSH", "LDAP", "PG", "POSTGRES"} {
 		in := context + "_PASS=hunter2hunter2"
 		if got, want := Redact(in), context+"_PASS=[REDACTED:secret]"; got != want {
@@ -179,6 +179,30 @@ func TestPR57CredentialKeys(t *testing.T) {
 		in := `{"` + key + `":"/home/x"}`
 		if got := redactString(in); got != in {
 			t.Errorf("structured key guard: got %q want %q", got, in)
+		}
+	}
+}
+
+func TestRedactionMainCoverageGluedTokens(t *testing.T) {
+	tokens := []string{"AKIA" + "ABCDEFGHIJKLMNOP", fakeAKIA, fakeGHP, fakeSK, "github_" + "pat_" + strings.Repeat("a", 30), "glp" + "at-" + strings.Repeat("a", 24), "np" + "m_" + strings.Repeat("a", 36), "h" + "f_" + strings.Repeat("a", 34), fakeSlack, "whs" + "ec_" + strings.Repeat("a", 24), "Authorization: token " + strings.Repeat("a", 24), "x_" + fakeSK, "-----BEGIN PGP PRIVATE KEY BLOCK-----\nabc\n-----END PGP PRIVATE KEY BLOCK-----", "password=abcdefgh", "Bearer " + strings.Repeat("a", 24), "xox" + "b-" + strings.Repeat("a", 24), "sk_" + "live_" + strings.Repeat("a", 24), "AIza" + strings.Repeat("a", 35), "eyJ" + strings.Repeat("a", 10) + "." + strings.Repeat("a", 10) + "." + strings.Repeat("a", 10), "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"}
+	for _, n := range []int{20, 34, 36, 64, 128} {
+		for _, prefix := range []string{"glp" + "at-", "np" + "m_", "h" + "f_", "whs" + "ec_", "Authorization: token ", "x_s" + "k-"} {
+			tokens = append(tokens, prefix+strings.Repeat("A", n))
+		}
+	}
+	keys := []string{"secret=abcdefgh", "API_KEY=abcdefgh", "password: abcdefgh", "DB_PASS=abcdefgh", "DB_PWD=abcdefgh", "MY_DB_PASS=abcdefgh", "APP_ROOT_PWD=abcdefgh", "PASSPHRASE=abcdefgh", "Authorization: Bearer " + strings.Repeat("b", 24), "Proxy-Authorization: token " + strings.Repeat("b", 24), "Authorization: Basic dXNlcjpwYXNz", "Proxy-Authorization: Basic dXNlcjpwYXNz", "Cookie: session=abcdefgh", "Set-Cookie: session=abcdefgh", "Authorization: token " + strings.Repeat("b", 24)}
+	for _, token := range tokens {
+		for _, key := range keys {
+			for _, sep := range []string{"", " ", ";", "\n"} {
+				in := token + sep + key
+				old, got := removedPositions(t, in, mainOracleRedactString(in)), removedPositions(t, in, redactString(in))
+				for i, removed := range old {
+					if removed && !got[i] {
+						t.Errorf("glued coverage lost at byte %d: %q -> %q", i, in, redactString(in))
+						break
+					}
+				}
+			}
 		}
 	}
 }
