@@ -33,6 +33,7 @@ type fakeIngester struct {
 	ignoreCtx  bool // return nil after ctx is done, like an ingest that swallows cancellation
 	backfill   atomic.Int32
 	purge      atomic.Int32
+	stats      ingest.Stats // returned by a completed IngestAll
 }
 
 func (f *fakeIngester) IngestAll(ctx context.Context, _ string, _ bool) (ingest.Stats, error) {
@@ -53,7 +54,7 @@ func (f *fakeIngester) IngestAll(ctx context.Context, _ string, _ bool) (ingest.
 	}
 	select {
 	case <-time.After(f.slow):
-		return ingest.Stats{}, nil
+		return f.stats, nil
 	case <-ctx.Done():
 		f.ctxErr.Store(ctx.Err())
 		if f.ignoreCtx {

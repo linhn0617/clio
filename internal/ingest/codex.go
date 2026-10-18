@@ -126,7 +126,7 @@ func (s codexSource) ParseFile(ing *Ingester, f *os.File, startOffset int64, sta
 		seq++
 	}
 
-	r := bufio.NewReader(f)
+	r := bufio.NewReaderSize(f, readBufBytes)
 	for {
 		data, n, terminated, overCap, err := readCappedLine(r, maxLineBytes)
 		if err != nil && err != io.EOF {

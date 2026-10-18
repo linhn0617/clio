@@ -64,12 +64,9 @@ func newIndexCmd() *cobra.Command {
 			log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 			ing := ingest.NewWithBuiltinSources(database, log)
 
-			st, err := ing.IngestAll(cmd.Context(), projects, full)
+			st, err := runIndexIngest(cmd.Context(), ing, projects, full, log)
 			if err != nil {
 				return err
-			}
-			if err := ing.BackfillActivity(cmd.Context()); err != nil {
-				log.Warn("activity backfill failed", "err", err)
 			}
 			fmt.Fprintf(os.Stdout, "indexed: %d files (%d ingested, %d skipped), %d messages added\n",
 				st.FilesScanned, st.FilesIngested, st.FilesSkipped, st.MessagesAdded)
@@ -129,4 +126,18 @@ func newIndexCmd() *cobra.Command {
 func optimizeFTS(ctx context.Context, d *db.DB) error {
 	_, err := d.ExecContext(ctx, `INSERT INTO messages_fts(messages_fts) VALUES('optimize')`)
 	return err
+}
+
+// runIndexIngest ingests and then always runs the activity backfill: `clio index` is the
+// explicit repair path, so it pays the pre-check that the read-path catch-up skips when
+// nothing new was ingested.
+func runIndexIngest(ctx context.Context, ing leaderIngester, projects string, full bool, log *slog.Logger) (ingest.Stats, error) {
+	st, err := ing.IngestAll(ctx, projects, full)
+	if err != nil {
+		return st, err
+	}
+	if err := ing.BackfillActivity(ctx); err != nil {
+		log.Warn("activity backfill failed", "err", err)
+	}
+	return st, nil
 }

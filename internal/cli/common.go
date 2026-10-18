@@ -99,16 +99,26 @@ func openAndCatchUp() (*db.DB, error) {
 		// Run the catch-up unconditionally (not gated on the Claude dir existing): on a
 		// Codex-only machine ~/.claude/projects is absent, but the Codex source still
 		// has history to ingest. IngestAll/PurgeMissing handle missing roots per-source.
-		ing := ingest.NewWithBuiltinSources(database, discardLogger())
-		if _, err := ing.IngestAll(context.Background(), projects, false); err != nil {
-			stderrLogger().Warn("incremental catch-up failed", "err", err)
-		}
-		if err := ing.PurgeMissing(context.Background(), projects); err != nil {
-			stderrLogger().Warn("catch-up purge failed", "err", err)
-		}
-		if err := ing.BackfillActivity(context.Background()); err != nil {
-			stderrLogger().Warn("activity backfill failed", "err", err)
-		}
+		runCatchUp(context.Background(), ingest.NewWithBuiltinSources(database, discardLogger()), projects, stderrLogger())
 	}
 	return database, nil
+}
+
+// runCatchUp is the read-path incremental catch-up. The activity-backfill pre-check
+// scans every tool_use message (seconds on a large index and almost always a no-op),
+// so it runs only when this catch-up ingested something; `clio index` runs it
+// unconditionally as the safety net.
+func runCatchUp(ctx context.Context, ing leaderIngester, projects string, log *slog.Logger) {
+	st, err := ing.IngestAll(ctx, projects, false)
+	if err != nil {
+		log.Warn("incremental catch-up failed", "err", err)
+	}
+	if err := ing.PurgeMissing(ctx, projects); err != nil {
+		log.Warn("catch-up purge failed", "err", err)
+	}
+	if st.FilesIngested > 0 {
+		if err := ing.BackfillActivity(ctx); err != nil {
+			log.Warn("activity backfill failed", "err", err)
+		}
+	}
 }
