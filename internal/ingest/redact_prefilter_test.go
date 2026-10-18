@@ -219,6 +219,7 @@ func TestToolUseContentKeepsSecondRedactionPass(t *testing.T) {
 
 var fuzzFragments = []string{
 	"AKIA", "AIza", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxs-", "sk-", "sk_live_", "pk_test_", "eyJ", ".", "-", "_",
+	"glpat-", "npm_", "hf_", "whsec_", "hooks.slack.com/services/", "T0123", "/B0123", "token ", "_PASS", "MYSQL_PWD", "-----BEGIN PGP PRIVATE KEY BLOCK-----", "-----END PGP PRIVATE KEY BLOCK-----", "x_sk-", "://:",
 	"Bearer ", "bearer\t", "BEARER ", "Authorization: ", "Proxy-Authorization:", " Basic ", "Cookie: ", "Set-Cookie:", "cookie:",
 	"API_KEY", "api-key", "ACCESS_KEY", "private_key", "SECRET", "password", "PASSWD", "token", "Credential", "key",
 	"=", ":", " ", "\n", "\t", "\"", "'", "://", "@", "user:pass", "http", "postgres",

@@ -237,13 +237,12 @@ func toolUseSummaryMemo(input json.RawMessage, rm *redactMemo) string {
 				// Redact (and strip <private>) before truncating, as codex.go does:
 				// cutting first can drop a closing tag or split a secret so neither
 				// pattern matches on the remainder.
-				// debt: redactString probes a JSON decoder at every '{'/'[' and is
-				// near-quadratic on bracket floods (100k '[' ≈ 10 s). The same string goes
-				// through redactString up to three times: the raw_json walk, this summary,
-				// and the activity target (the target reuses this result via redactMemo
-				// only when it reads the same field; Bash/Read/Edit do, a tool whose
-				// summary key differs from its target field pays a third pass). If
-				// ingest stalls on such a transcript, cap the probes per string.
+				// debt: the same string goes through redactString up to three times: the
+				// raw_json walk, this summary, and the activity target (the target reuses
+				// this result via redactMemo only when it reads the same field;
+				// Bash/Read/Edit do, a tool whose summary key differs from its target
+				// field pays a third pass). redactString itself is now linear on bracket
+				// floods (probe boundary + failure cap, see maxFailedJSONProbes).
 				return firstLine(rm.redact(s), 200)
 			}
 		}
