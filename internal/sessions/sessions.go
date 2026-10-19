@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/linhn0617/clio/internal/db"
+	"github.com/linhn0617/clio/internal/termsafe"
 )
 
 // Session is a row of the sessions table.
@@ -192,11 +194,13 @@ func ResolvePrefix(ctx context.Context, database *db.DB, prefix, source string) 
 	case !errors.Is(err, sql.ErrNoRows):
 		return Session{}, err
 	}
-	// No exact match: resolve by unique prefix (escaped, cap 2 to detect ambiguity),
-	// scoped to the requested source.
+	// No exact match: resolve by unique prefix (escaped), scoped to the requested
+	// source. One row past the candidate cap tells whether more exist.
 	srcClause, srcArgs := db.SourceFilter("source", source)
 	args := append([]any{db.EscapeLike(prefix) + "%"}, srcArgs...)
-	rows, err := database.QueryContext(ctx, `SELECT `+cols+` FROM sessions WHERE uuid LIKE ? ESCAPE '\'`+srcClause+` LIMIT 2`, args...)
+	args = append(args, maxAmbiguousCandidates+1)
+	rows, err := database.QueryContext(ctx, `SELECT `+cols+` FROM sessions WHERE uuid LIKE ? ESCAPE '\'`+srcClause+
+		` ORDER BY COALESCE(started_at,0) DESC, uuid LIMIT ?`, args...)
 	if err != nil {
 		return Session{}, err
 	}
@@ -218,8 +222,81 @@ func ResolvePrefix(ctx context.Context, database *db.DB, prefix, source string) 
 	case 1:
 		return matches[0], nil
 	default:
-		return Session{}, ErrAmbiguous
+		amb := &AmbiguousError{Prefix: prefix, Candidates: matches}
+		if len(matches) > maxAmbiguousCandidates {
+			amb.Candidates, amb.More = matches[:maxAmbiguousCandidates], true
+		}
+		return Session{}, amb
 	}
+}
+
+// maxAmbiguousCandidates caps how many sessions an ambiguous prefix lists.
+const maxAmbiguousCandidates = 10
+
+// AmbiguousError is returned for a prefix that matches several sessions. It
+// matches ErrAmbiguous under errors.Is, and its message lists the candidates
+// (newest first) so the caller can retry with a longer id.
+type AmbiguousError struct {
+	Prefix     string
+	Candidates []Session
+	More       bool // more sessions match than Candidates holds
+}
+
+func (e *AmbiguousError) Is(target error) bool { return target == ErrAmbiguous }
+
+func (e *AmbiguousError) Error() string {
+	n := distinctIDLen(e.Candidates)
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %q matches several sessions; use a longer id:", ErrAmbiguous, termsafe.Strip(e.Prefix))
+	for _, c := range e.Candidates {
+		id := termsafe.Strip(c.UUID)
+		if len(id) > n {
+			id = id[:n]
+		}
+		ts := "                "
+		if c.StartedAt != 0 {
+			ts = time.Unix(c.StartedAt, 0).Format("2006-01-02 15:04")
+		}
+		fmt.Fprintf(&b, "\n  %s  %s  %s", id, ts, candidateTitle(c.Title))
+	}
+	if e.More {
+		fmt.Fprintf(&b, "\n  (more than %d match)", maxAmbiguousCandidates)
+	}
+	return b.String()
+}
+
+// distinctIDLen is the shortest id length (at least 8) at which the candidates'
+// ids are pairwise distinct.
+func distinctIDLen(cs []Session) int {
+	longest := 0
+	for _, c := range cs {
+		longest = max(longest, len(c.UUID))
+	}
+	for n := 8; n < longest; n++ {
+		seen := make(map[string]bool, len(cs))
+		unique := true
+		for _, c := range cs {
+			k := c.UUID[:min(n, len(c.UUID))]
+			if seen[k] {
+				unique = false
+				break
+			}
+			seen[k] = true
+		}
+		if unique {
+			return n
+		}
+	}
+	return longest
+}
+
+// candidateTitle renders an indexed title on one line without terminal escapes.
+func candidateTitle(t string) string {
+	t = strings.Join(strings.Fields(termsafe.Strip(t)), " ")
+	if r := []rune(t); len(r) > 60 {
+		t = string(r[:60]) + "…"
+	}
+	return t
 }
 
 // rawColumn selects raw_json only when the caller needs it; otherwise an empty

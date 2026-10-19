@@ -3,9 +3,11 @@ package sessions
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -242,8 +244,65 @@ func TestResolvePrefixAmbiguous(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "abc111", "/p", 1)
 	addSession(t, d, "abc222", "/p", 1)
-	if _, err := ResolvePrefix(context.Background(), d, "abc", ""); err != ErrAmbiguous {
+	if _, err := ResolvePrefix(context.Background(), d, "abc", ""); !errors.Is(err, ErrAmbiguous) {
 		t.Fatalf("expected ErrAmbiguous, got %v", err)
+	}
+}
+
+// An ambiguous prefix lists its candidates (newest first, at most
+// maxAmbiguousCandidates) with an id long enough to pick one, title and time,
+// so the user can retry without a separate `clio list`.
+func TestResolvePrefixAmbiguousListsCandidates(t *testing.T) {
+	d := testDB(t)
+	base := time.Date(2026, 10, 1, 9, 0, 0, 0, time.Local).Unix()
+	for i := 0; i < 12; i++ {
+		uuid := fmt.Sprintf("abcdef12-%04d", i)
+		if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title) VALUES (?,?,?,?,?,?,?)`,
+			uuid, "/p", uuid+".jsonl", base+int64(i)*3600, base+int64(i)*3600, 1, fmt.Sprintf("title %d\nsecond line\x1b[31m", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := ResolvePrefix(context.Background(), d, "abc", "")
+	var amb *AmbiguousError
+	if !errors.As(err, &amb) || !errors.Is(err, ErrAmbiguous) {
+		t.Fatalf("want *AmbiguousError wrapping ErrAmbiguous, got %T %v", err, err)
+	}
+	if len(amb.Candidates) != maxAmbiguousCandidates || !amb.More {
+		t.Fatalf("want %d candidates and More, got %d more=%v", maxAmbiguousCandidates, len(amb.Candidates), amb.More)
+	}
+	if amb.Candidates[0].UUID != "abcdef12-0011" || amb.Candidates[maxAmbiguousCandidates-1].UUID != "abcdef12-0002" {
+		t.Fatalf("candidates not newest first: first %s last %s", amb.Candidates[0].UUID, amb.Candidates[len(amb.Candidates)-1].UUID)
+	}
+	msg := err.Error()
+	for _, want := range []string{`"abc"`, "abcdef12-0011", "title 11 second line", time.Unix(base+11*3600, 0).Format("2006-01-02 15:04"), "more"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message lacks %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "abcdef12-0001") || strings.Contains(msg, "\x1b") {
+		t.Errorf("message lists an 11th candidate or keeps a terminal escape:\n%s", msg)
+	}
+	if got := strings.Count(msg, "\n"); got != maxAmbiguousCandidates+1 {
+		t.Errorf("want header + %d candidate lines + more line, got %d newlines:\n%s", maxAmbiguousCandidates, got, msg)
+	}
+}
+
+// Two candidates sharing their first 8 characters are shown with enough of the
+// id to tell them apart; distinct 8-character prefixes stay 8 characters.
+func TestResolvePrefixAmbiguousIDLength(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "abcdef12-aaaa-1", "/p", 1)
+	addSession(t, d, "abcdef12-aaab-2", "/p", 1)
+	_, err := ResolvePrefix(context.Background(), d, "abc", "")
+	if msg := err.Error(); !strings.Contains(msg, "\n  abcdef12-aaaa  ") || !strings.Contains(msg, "\n  abcdef12-aaab  ") {
+		t.Fatalf("ids not lengthened to a distinguishing prefix:\n%s", msg)
+	}
+	d2 := testDB(t)
+	addSession(t, d2, "abc11111-x", "/p", 1)
+	addSession(t, d2, "abc22222-y", "/p", 1)
+	_, err = ResolvePrefix(context.Background(), d2, "abc", "")
+	if msg := err.Error(); !strings.Contains(msg, "\n  abc11111  ") || !strings.Contains(msg, "\n  abc22222  ") {
+		t.Fatalf("distinct 8-char ids should print as 8 characters:\n%s", msg)
 	}
 }
 

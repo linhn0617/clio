@@ -25,15 +25,6 @@ const (
 // read of a large index must not hold session startup hostage.
 const recallTimeout = 10
 
-// AddSessionStartHook registers a Claude Code SessionStart hook that runs the
-// given command (matcher recallMatcher, timeout recallTimeout), preserving every
-// existing hook and config key. Idempotent: if clio's recall hook is already
-// present it is a no-op, except that an entry in the pre-matcher shape an older
-// clio wrote is upgraded in place rather than duplicated.
-func AddSessionStartHook(settingsPath, command string) error {
-	return mutate(settingsPath, func(root map[string]any) error { return addSessionStartHook(root, command) })
-}
-
 // FileHistoryInstall reports what installing the file-history hook actually did,
 // so callers describe the real mutation instead of guessing beforehand.
 type FileHistoryInstall struct {
@@ -158,53 +149,6 @@ func upgradeLegacyRecall(ss []any, command string) {
 			gm["hooks"] = foreign
 		}
 	}
-}
-
-// RemoveSessionStartHook removes clio's recall SessionStart hook, leaving any
-// other SessionStart hooks (and the rest of the config) intact.
-func RemoveSessionStartHook(settingsPath string) error {
-	return mutate(settingsPath, func(root map[string]any) error {
-		hooks, err := objKey(root, "hooks")
-		if err != nil {
-			return err
-		}
-		ss, err := arrKey(hooks, "SessionStart")
-		if err != nil {
-			return err
-		}
-		kept := make([]any, 0, len(ss))
-		for _, g := range ss {
-			gm, ok := g.(map[string]any)
-			if !ok {
-				kept = append(kept, g)
-				continue
-			}
-			hs, ok := gm["hooks"].([]any)
-			if !ok {
-				kept = append(kept, g)
-				continue
-			}
-			// Remove only clio's hook entries, preserving any co-grouped hooks.
-			keptHooks := make([]any, 0, len(hs))
-			for _, h := range hs {
-				if !hookIsClioRecall(h) {
-					keptHooks = append(keptHooks, h)
-				}
-			}
-			if len(keptHooks) == 0 {
-				continue // the group held only clio's hook(s); drop the now-empty group
-			}
-			gm["hooks"] = keptHooks
-			kept = append(kept, gm)
-		}
-		if len(kept) == 0 {
-			delete(hooks, "SessionStart")
-		} else {
-			hooks["SessionStart"] = kept
-		}
-		root["hooks"] = hooks
-		return nil
-	})
 }
 
 // HasSessionStartHook reports whether clio's recall hook is registered.

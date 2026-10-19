@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Ambiguous session ids list their candidates** (openspec change
+  `list-ambiguous-candidates`). `clio show <prefix>` and MCP `read_session` with a
+  prefix matching several sessions now list up to 10 of them, newest first, with an
+  id long enough to pick one, the start time and the title, instead of only
+  "ambiguous session id prefix".
+- Removed the test-only `AddSessionStartHook` / `RemoveSessionStartHook`; the
+  Traditional Chinese README gains the `usage` and `prune-raw` lines.
+
 ### Fixed
 
 - **Harness text no longer indexed as user text** (openspec change

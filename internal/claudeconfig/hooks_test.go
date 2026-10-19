@@ -29,7 +29,7 @@ func sessionStartGroups(t *testing.T, root map[string]any) []any {
 	return ss
 }
 
-func TestAddSessionStartHookPreservesExisting(t *testing.T) {
+func TestInstallRecallHookPreservesExisting(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{
 		"theme":"dark",
@@ -38,7 +38,7 @@ func TestAddSessionStartHookPreservesExisting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := AddSessionStartHook(path, "/Users/lin/go/bin/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/Users/lin/go/bin/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
 	if has, _ := HasSessionStartHook(path); !has {
@@ -65,12 +65,12 @@ func TestAddSessionStartHookPreservesExisting(t *testing.T) {
 	}
 }
 
-func TestAddSessionStartHookIdempotent(t *testing.T) {
+func TestInstallRecallHookIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	if err := AddSessionStartHook(path, "/x/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/x/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddSessionStartHook(path, "/x/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/x/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
 	if ss := sessionStartGroups(t, readSettings(t, path)); len(ss) != 1 {
@@ -78,7 +78,7 @@ func TestAddSessionStartHookIdempotent(t *testing.T) {
 	}
 }
 
-func TestRemoveSessionStartHookKeepsCoGroupedHook(t *testing.T) {
+func TestUninstallRecallHookKeepsCoGroupedHook(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	// clio's hook shares a single group with an unrelated hook.
 	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[
@@ -89,7 +89,7 @@ func TestRemoveSessionStartHookKeepsCoGroupedHook(t *testing.T) {
 	]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := RemoveSessionStartHook(path); err != nil {
+	if err := RemoveClioHooks(path); err != nil {
 		t.Fatal(err)
 	}
 	root := readSettings(t, path)
@@ -117,7 +117,7 @@ func TestIsClioRecallDoesNotFalseMatch(t *testing.T) {
 	}
 }
 
-func TestRemoveSessionStartHookKeepsOthers(t *testing.T) {
+func TestUninstallRecallHookKeepsOthers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[
 		{"hooks":[{"type":"command","command":"/opt/security-scan.sh"}]},
@@ -125,7 +125,7 @@ func TestRemoveSessionStartHookKeepsOthers(t *testing.T) {
 	]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := RemoveSessionStartHook(path); err != nil {
+	if err := RemoveClioHooks(path); err != nil {
 		t.Fatal(err)
 	}
 	if has, _ := HasSessionStartHook(path); has {
@@ -417,9 +417,9 @@ func clioRecallEntry(t *testing.T, g map[string]any) map[string]any {
 
 // The recall hook skips `fork` (it inherits the parent's context) and carries a
 // short timeout so a cold-cache index can never stall startup for 600 s.
-func TestAddSessionStartHookWritesMatcherAndTimeout(t *testing.T) {
+func TestInstallRecallHookWritesMatcherAndTimeout(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	if err := AddSessionStartHook(path, "/x/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/x/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
 	gs := recallGroups(t, readSettings(t, path))
@@ -436,7 +436,7 @@ func TestAddSessionStartHookWritesMatcherAndTimeout(t *testing.T) {
 
 // An entry written by an older clio (no matcher, no timeout) is upgraded where
 // it sits, not duplicated.
-func TestAddSessionStartHookUpgradesLegacyInPlace(t *testing.T) {
+func TestInstallRecallHookUpgradesLegacyInPlace(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[
 		{"hooks":[{"type":"command","command":"/opt/scan.sh"}]},
@@ -447,7 +447,7 @@ func TestAddSessionStartHookUpgradesLegacyInPlace(t *testing.T) {
 	if legacy, _ := HasLegacySessionStartHook(path); !legacy {
 		t.Fatal("legacy shape should be detected before upgrade")
 	}
-	if err := AddSessionStartHook(path, "/new/bin/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/new/bin/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
 	root := readSettings(t, path)
@@ -469,7 +469,7 @@ func TestAddSessionStartHookUpgradesLegacyInPlace(t *testing.T) {
 		t.Error("no legacy entry should remain")
 	}
 	// A second run is a no-op.
-	if err := AddSessionStartHook(path, "/new/bin/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/new/bin/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(sessionStartGroups(t, readSettings(t, path))); n != 2 {
@@ -479,14 +479,14 @@ func TestAddSessionStartHookUpgradesLegacyInPlace(t *testing.T) {
 
 // A legacy clio entry co-grouped with a foreign hook moves to its own matched
 // group; the foreign hook keeps firing on every event as before.
-func TestAddSessionStartHookUpgradesCoGroupedLegacy(t *testing.T) {
+func TestInstallRecallHookUpgradesCoGroupedLegacy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[
 		{"hooks":[{"type":"command","command":"/opt/scan.sh"},{"type":"command","command":"/x/clio recall"}]}
 	]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddSessionStartHook(path, "/x/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/x/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
 	root := readSettings(t, path)
@@ -505,13 +505,13 @@ func TestAddSessionStartHookUpgradesCoGroupedLegacy(t *testing.T) {
 }
 
 // A recall entry the user placed under their own matcher is theirs: left as is.
-func TestAddSessionStartHookKeepsCustomMatcher(t *testing.T) {
+func TestInstallRecallHookKeepsCustomMatcher(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	orig := `{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"/x/clio recall"}]}]}}`
 	if err := os.WriteFile(path, []byte(orig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddSessionStartHook(path, "/x/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/x/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
 	gs := recallGroups(t, readSettings(t, path))
