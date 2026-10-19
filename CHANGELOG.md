@@ -5,6 +5,24 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Harness text no longer indexed as user text** (openspec change
+  `strip-harness-tags`). Claude Code writes `<system-reminder>`,
+  `<task-notification>` and relayed `<agent-message>` elements into user-role
+  messages; `search`, `ask` and `recall` matched them as things the user said (on
+  a live index, 468 of 3,839 user messages carried a task notification, 299 a
+  system reminder, 187 an agent message). Ingest now removes each complete
+  element, plus an agent message's fixed preamble and trailer lines, from user
+  text; a message that was nothing else is not stored, and a prompt with an
+  appended reminder keeps the prompt as its text and title. Only line-anchored,
+  properly closed elements are removed, so a tag mentioned in prose or left
+  unclosed stays. `raw_json`, assistant text, tool results and Codex sessions are
+  unchanged. Run `clio index --full` after upgrading to strip them from sessions
+  already indexed.
+
 ## [0.21.0] - 2026-10-19
 
 Bounded MCP responses, a faster and wider secret redaction, cheaper read-path

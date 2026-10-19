@@ -119,6 +119,7 @@ Claude Code 會把超過 `cleanupPeriodDays`（預設 **30** 天）的 session �
 - 對 `~/.claude/projects/` 唯讀；絕不修改你的原始檔。
 - secret redaction 是 pattern 比對、盡力而為：ingest 時會遮蔽高信號形狀（API key、token、private key、`.env` 行），可搜尋文字與儲存的原始事件都會處理；不符合已知 pattern 的自由文字密碼不會被攔到。
 - **`<private>…</private>` 排除標記**：把 prompt（或 Claude 讀到的檔案）裡的任一段用字面的 `<private>` … `</private>` 包起來，clio 會把整個元素連內容一起從可搜尋文字、儲存的原始事件與 session 標題中拿掉。Claude Code 本身還是看過那段；受影響的只有 clio 的索引，原始逐字稿檔永遠不會被改。支援的形式：同一則訊息內的字面開閉標籤，可巢狀（跨兩個訊息區塊、HTML 轉義過的標籤、或 `<private/>` 都會原樣保留）。舊版 clio 索引過的 session 要 `clio index --full` 才會套用。
+- **Claude Code 注入的 harness 文字不算你說的話**：Claude Code 寫進使用者訊息的 `<system-reminder>`、`<task-notification>` 與轉送的 `<agent-message>` 元素，會從可搜尋文字與 session 標題中拿掉（儲存的原始事件仍保留）。只移除開標籤在行首、閉標籤在行尾的完整元素，所以你在句子裡提到的標籤會留著。舊版 clio 索引過的 session 要 `clio index --full` 才會套用。
 - `recall` hook 注入的是上一個 session 收尾訊息的原文，`file-history` hook 注入的是 session 標題；兩者都只讀你自己的索引。
 - 把 clio 註冊為 MCP server 是全有或全無的授權：任何註冊了它的 client 都能透過工具讀到你完整的已索引歷史。
 - 所有資料留在本機；無遙測、無雲端同步。資料庫位於 `~/Library/Application Support/clio/db.sqlite`（macOS）或 `~/.local/share/clio/db.sqlite`（Linux），權限 `0600`。
