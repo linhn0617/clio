@@ -229,12 +229,14 @@ func stripHarnessBoilerplate(s string) (rest string, matched bool) {
 
 // harnessElementTags are Claude Code harness elements that arrive as (or are
 // appended to) user-role text but were never typed by the user: background
-// task and queued-notification reports, system reminders, and messages relayed
-// from another agent. stripHarnessWrappers removes them from indexed user text.
+// task and queued-notification reports, system reminders, messages relayed
+// from another agent, and the one-line caveat written before a local command.
+// stripHarnessWrappers removes them from indexed user text.
 var harnessElementTags = []string{
 	"system-reminder",
 	"task-notification",
 	"agent-message",
+	"local-command-caveat",
 }
 
 // agentMessagePreamble and agentMessageTrailer are the fixed lines Claude Code

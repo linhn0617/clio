@@ -2,8 +2,9 @@
 
 ### Requirement: Claude Code harness elements are not indexed as user text
 
-The ingester SHALL remove every complete `<system-reminder>`, `<task-notification>` and
-`<agent-message …>` element, content included, from Claude Code user-role text before
+The ingester SHALL remove every complete `<system-reminder>`, `<task-notification>`,
+`<agent-message …>` and `<local-command-caveat>` element, content included, from Claude
+Code user-role text before
 storing `content` and deriving the session title. A user message or text block that is
 empty after removal SHALL NOT be stored. `raw_json` SHALL NOT change. Assistant text,
 tool inputs, tool results and Codex transcripts SHALL NOT be affected.
@@ -21,6 +22,20 @@ tool inputs, tool results and Codex transcripts SHALL NOT be affected.
   `<system-reminder>` or relayed `<agent-message>`
 - **THEN** no message row SHALL be stored for it, it SHALL NOT become the session title,
   and its text SHALL NOT be searchable
+
+#### Scenario: Caveat before a local command
+
+- **WHEN** a user message is the one-line `<local-command-caveat>…</local-command-caveat>`
+  element, alone or followed by the user's text
+- **THEN** no message row SHALL be stored for the caveat alone, the text after it SHALL be
+  stored as the message, the caveat wording SHALL NOT be searchable, and `raw_json` SHALL
+  still contain it
+
+#### Scenario: Records of local commands are kept
+
+- **WHEN** a user message is `<command-name>…</command-name>`, `<local-command-stdout>…`,
+  `<bash-input>…` or `<bash-stdout>…`
+- **THEN** the message SHALL be stored unchanged apart from redaction
 
 #### Scenario: Previously indexed sessions
 

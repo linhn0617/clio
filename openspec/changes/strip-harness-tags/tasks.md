@@ -26,3 +26,13 @@
 - [x] 4.2 Run gofmt, go vet, all tests and the ingest race tests.
 - [x] 4.3 Document `clio index --full` in the CHANGELOG and README.
 - [x] 4.4 Run openspec validate strip-harness-tags --strict with telemetry disabled.
+
+## 5. Local-command caveat (follow-up decision)
+
+- [x] 5.1 Re-check the real caveat shape (one line, opener and closer together).
+- [x] 5.2 Red-first tests: caveat-only message not stored, caveat plus text keeps the
+      text, raw_json unchanged, caveat wording not searchable, inline and unclosed
+      caveat tags and command records unchanged; existing caveat title tests kept.
+- [x] 5.3 Add `local-command-caveat` to the stripped elements; run a negative control
+      (no same-line closing) and revert it.
+- [x] 5.4 Update proposal, spec, CHANGELOG and READMEs; rerun the full checks.

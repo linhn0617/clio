@@ -10,7 +10,8 @@ prompt with an appended reminder put the reminder into the 100-rune title.
 ## What Changes
 
 - **session-ingest**: user-role text has every complete `<system-reminder>`,
-  `<task-notification>` and `<agent-message …>` element removed, content included,
+  `<task-notification>`, `<agent-message …>` and `<local-command-caveat>` element
+  removed, content included,
   after redaction and before the emptiness check. A relayed agent message also loses
   the fixed `Another Claude session sent a message:` line before it and the fixed
   `That "other Claude session" is an agent …` paragraph after it, on an exact match only.
@@ -19,7 +20,9 @@ prompt with an appended reminder put the reminder into the 100-rune title.
   closes the innermost open element). Unclosed, mismatched or inline tags stay as
   literal text and never swallow what follows them. Linear time.
 - A user message, or a user text block, that is nothing but harness elements is not
-  stored, as a `<private>`-only message already is. The session title skips it too and
+  stored, as a `<private>`-only message already is. This includes the one-line
+  `<local-command-caveat>` Claude Code writes before a local command, which until now
+  was skipped for the title but stored as a message (decided after review). The session title skips it too and
   is taken from the prompt alone.
 - `raw_json` is untouched (it is still the redacted event). Assistant text, tool
   results and Codex transcripts are unchanged.
@@ -32,9 +35,8 @@ reasons:
   inside one of the three elements.
 - A `[Subagent hand-back]` frame: only seen as the first line inside an
   `<agent-message>`, so it goes with that element.
-- `<local-command-stdout>`, `<bash-input>`, `<bash-stdout>`, `<command-name>` and
-  `<local-command-caveat>`: they record commands the user ran, and the existing
-  handling (title only) is kept.
+- `<local-command-stdout>`, `<bash-input>`, `<bash-stdout>` and `<command-name>`: they
+  record commands the user ran and their output, and stay as they are.
 
 ## Impact
 
