@@ -75,10 +75,10 @@ func clampRange(v, def, min, max int) int {
 	return v
 }
 
-func handleSearch(database *db.DB, beforeRead func()) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func handleSearch(database *db.DB, beforeRead func(context.Context)) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if beforeRead != nil {
-			beforeRead()
+			beforeRead(ctx)
 		}
 		query, err := req.RequireString("query")
 		if err != nil {
@@ -117,10 +117,10 @@ func handleSearch(database *db.DB, beforeRead func()) func(context.Context, mcp.
 	}
 }
 
-func handleListSessions(database *db.DB, beforeRead func()) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func handleListSessions(database *db.DB, beforeRead func(context.Context)) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if beforeRead != nil {
-			beforeRead()
+			beforeRead(ctx)
 		}
 		rows, err := sessions.ListSessions(ctx, database, sessions.ListFilter{
 			Since:            parseSince(req.GetString("since", "")),
@@ -159,10 +159,10 @@ func handleListSessions(database *db.DB, beforeRead func()) func(context.Context
 	}
 }
 
-func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func handleActivitySummary(database *db.DB, beforeRead func(context.Context)) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if beforeRead != nil {
-			beforeRead()
+			beforeRead(ctx)
 		}
 		since := parseSince(req.GetString("since", "7d"))
 		if since == 0 {
@@ -233,10 +233,10 @@ func handleActivitySummary(database *db.DB, beforeRead func()) func(context.Cont
 	}
 }
 
-func handleReadSession(database *db.DB, beforeRead func()) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if beforeRead != nil {
-			beforeRead()
+			beforeRead(ctx)
 		}
 		uuid, err := req.RequireString("uuid")
 		if err != nil {
@@ -464,10 +464,10 @@ func handleReadSession(database *db.DB, beforeRead func()) func(context.Context,
 	}
 }
 
-func handleAsk(database *db.DB, beforeRead func()) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func handleAsk(database *db.DB, beforeRead func(context.Context)) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if beforeRead != nil {
-			beforeRead()
+			beforeRead(ctx)
 		}
 		question, err := req.RequireString("question")
 		if err != nil || strings.TrimSpace(question) == "" {

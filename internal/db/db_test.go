@@ -2,6 +2,7 @@ package db
 
 import (
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -159,5 +160,104 @@ func TestMigration0014DropsGeminiRows(t *testing.T) {
 	}
 	if _, err := d.Exec(`INSERT INTO messages_fts(messages_fts) VALUES('integrity-check')`); err != nil {
 		t.Errorf("fts integrity-check: %v", err)
+	}
+}
+
+// TestMigration0015DropsRedundantMessagesIndex rebuilds the pre-0015 state (the 0001
+// single-column index present, 0015 un-recorded), re-runs migrate, and checks the
+// redundant index is gone while every session_uuid lookup still plans onto the
+// (session_uuid, seq) unique index that covers it.
+func TestMigration0015DropsRedundantMessagesIndex(t *testing.T) {
+	d, err := Open(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer d.Close()
+	mustExec := func(q string) {
+		t.Helper()
+		if _, err := d.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	mustExec(`CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_uuid)`)
+	mustExec(`DELETE FROM schema_migrations WHERE name = '0015_drop_redundant_messages_index.sql'`)
+
+	if err := d.migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var n int
+	if err := d.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_messages_session'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("idx_messages_session still present after 0015")
+	}
+
+	for _, q := range []string{
+		`SELECT seq FROM messages WHERE session_uuid = 'x' AND seq <= 5 ORDER BY seq DESC LIMIT 3`,
+		`SELECT MAX(seq) FROM messages WHERE session_uuid = 'x'`,
+		`SELECT id FROM messages WHERE session_uuid = 'x'`,
+		`SELECT id FROM messages WHERE session_uuid IN ('x','y')`,
+	} {
+		rows, err := d.Query(`EXPLAIN QUERY PLAN ` + q)
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		var plan string
+		for rows.Next() {
+			var id, parent, notused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan += detail + "\n"
+		}
+		rows.Close()
+		if !strings.Contains(plan, "idx_messages_session_seq") {
+			t.Errorf("%s\n plan does not use idx_messages_session_seq:\n%s", q, plan)
+		}
+	}
+}
+
+func TestMigration0016ActivityBackfillWatermark(t *testing.T) {
+	d, err := Open(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	var n int
+	if err := d.QueryRow(`SELECT count(*) FROM activity_backfill_state`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("migration seeded %d rows", n)
+	}
+	for _, q := range []string{`DROP TABLE activity_backfill_state`, `DELETE FROM schema_migrations WHERE name='0016_activity_backfill_watermark.sql'`} {
+		if _, err := d.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO activity_backfill_state VALUES (2,0)`); err == nil {
+		t.Fatal("accepted non-singleton id")
+	}
+	if _, err := d.Exec(`INSERT INTO activity_backfill_state VALUES (1,NULL)`); err == nil {
+		t.Fatal("accepted NULL watermark")
+	}
+	if _, err := d.Exec(`INSERT INTO activity_backfill_state VALUES (1,42)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	var w int
+	if err := d.QueryRow(`SELECT checked_through FROM activity_backfill_state WHERE id=1`).Scan(&w); err != nil {
+		t.Fatal(err)
+	}
+	if w != 42 {
+		t.Fatalf("migration reset watermark to %d", w)
 	}
 }

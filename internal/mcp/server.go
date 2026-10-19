@@ -2,6 +2,7 @@
 package mcp
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -53,8 +54,9 @@ var maxCharsDescription = fmt.Sprintf("Max characters (Unicode code points) in t
 
 // NewServer builds an MCP server with clio's four tools registered. beforeRead,
 // if non-nil, runs before each read tool serves (used by followers for a
-// best-effort catch-up). It must never block indefinitely or panic.
-func NewServer(database *db.DB, version string, beforeRead func()) *server.MCPServer {
+// best-effort catch-up; it receives the request ctx and must return promptly
+// once it is cancelled). It must never block indefinitely or panic.
+func NewServer(database *db.DB, version string, beforeRead func(context.Context)) *server.MCPServer {
 	s := server.NewMCPServer(
 		"clio", version,
 		server.WithToolCapabilities(false),

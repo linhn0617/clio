@@ -31,6 +31,11 @@ type Watcher struct {
 	ing         *ingest.Ingester
 	projectsDir string
 	log         *slog.Logger
+	// BackstopGuard, if set, is consulted before each backstop walk. It returns a
+	// release func to run when the walk is done, or nil to skip this round (another
+	// full walk is in flight). Lets the caller keep the walk off an Ingester that a
+	// startup or read catch-up is already using.
+	BackstopGuard func() (release func())
 }
 
 // New creates a Watcher.
@@ -88,13 +93,24 @@ func (w *Watcher) Run(ctx context.Context) error {
 		case <-backstop.C:
 			// Recover any events fsnotify dropped, and pick up new dirs.
 			w.watchAllRoots(fsw)
-			if _, err := w.ing.IngestAll(ctx, w.projectsDir, false); err != nil {
-				w.log.Warn("backstop ingest failed", "err", err)
-			}
-			if err := w.ing.PurgeMissing(ctx, w.projectsDir); err != nil {
-				w.log.Warn("backstop purge failed", "err", err)
-			}
+			w.backstop(ctx)
 		}
+	}
+}
+
+func (w *Watcher) backstop(ctx context.Context) {
+	if w.BackstopGuard != nil {
+		release := w.BackstopGuard()
+		if release == nil {
+			return // another walk is running; the next tick retries
+		}
+		defer release()
+	}
+	if _, err := w.ing.IngestAll(ctx, w.projectsDir, false); err != nil && ctx.Err() == nil {
+		w.log.Warn("backstop ingest failed", "err", err)
+	}
+	if err := w.ing.PurgeMissing(ctx, w.projectsDir); err != nil && ctx.Err() == nil {
+		w.log.Warn("backstop purge failed", "err", err)
 	}
 }
 
