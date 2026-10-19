@@ -1,8 +1,12 @@
 package lock
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -55,19 +59,63 @@ func TestInspectDeadPidIsNotAliveEvenWithFreshHeartbeat(t *testing.T) {
 	}
 }
 
-func TestInspectDoesNotModifyLeaseFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mcp.lock")
+// Inspect must not create, rewrite or remove anything next to the lease (no mutex
+// sidecar, no temp file), whatever state the lease is in.
+func TestInspectDoesNotModifyLeaseDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mcp.lock")
+	check := func(state string) {
+		t.Helper()
+		before := snapshot(t, dir)
+		if _, err := Inspect(path); err != nil {
+			t.Fatalf("%s: %v", state, err)
+		}
+		if after := snapshot(t, dir); !reflect.DeepEqual(before, after) {
+			t.Fatalf("%s: Inspect changed the directory:\nbefore %v\nafter  %v", state, before, after)
+		}
+	}
+	check("absent")
+	if err := os.WriteFile(path, []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check("malformed")
 	if err := writeRecordAtomic(path, os.Getpid(), 7, time.Now().Unix()); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := os.ReadFile(path)
-	if _, err := Inspect(path); err != nil {
+	check("fresh")
+	if err := writeRecordAtomic(path, 2147483646, 7, time.Now().Unix()-300); err != nil {
 		t.Fatal(err)
 	}
-	after, _ := os.ReadFile(path)
-	if string(before) != string(after) {
-		t.Fatalf("Inspect rewrote the lease: %q -> %q", before, after)
+	check("stale")
+}
+
+// snapshot records name, mode, size, mtime and sha256 of everything under root.
+func snapshot(t *testing.T, root string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	err := filepath.WalkDir(root, func(p string, de fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		fi, err := de.Info()
+		if err != nil {
+			return err
+		}
+		sum := ""
+		if fi.Mode().IsRegular() {
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			sum = fmt.Sprintf("%x", sha256.Sum256(b))
+		}
+		out[p] = fmt.Sprintf("%v|%d|%d|%s", fi.Mode(), fi.Size(), fi.ModTime().UnixNano(), sum)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
+	return out
 }
 
 // IsHeld is defined as Inspect().Fresh so the two can never disagree.

@@ -6,11 +6,22 @@ import "fmt"
 // recognisers install/uninstall use, so doctor and install agree on what counts
 // as "a clio hook".
 
-// ClioHookCommands returns, for every clio recall hook (SessionStart) and
-// file-history hook (PreToolUse) in settingsPath regardless of matcher, the binary
+// HookEntry is one clio hook entry in settings.json, as diagnostics see it.
+type HookEntry struct {
+	Binary string // the binary path the recogniser resolved
+	// Unquoted marks the legacy shape: an absolute path with whitespace, unquoted,
+	// which the shell splits, so the hook cannot run.
+	Unquoted bool
+	// OldMatcher marks a file-history entry under the matcher an older clio wrote
+	// ("Read"), which install-hook upgrades to Read|Bash.
+	OldMatcher bool
+}
+
+// ClioHookCommands returns every clio recall hook (SessionStart) and file-history
+// hook (PreToolUse) in settingsPath regardless of matcher, each with the binary
 // path the recogniser resolved (so a legacy unquoted path containing spaces comes
 // back whole). A missing file yields empty results; a malformed one an error.
-func ClioHookCommands(settingsPath string) (recall, fileHistory []string, err error) {
+func ClioHookCommands(settingsPath string) (recall, fileHistory []HookEntry, err error) {
 	root, err := load(settingsPath)
 	if err != nil {
 		return nil, nil, err
@@ -18,24 +29,27 @@ func ClioHookCommands(settingsPath string) (recall, fileHistory []string, err er
 	hooks, _ := root["hooks"].(map[string]any)
 	ss, _ := hooks["SessionStart"].([]any)
 	pt, _ := hooks["PreToolUse"].([]any)
-	return binariesMatching(ss, recallBinary), binariesMatching(pt, fileHistoryBinary), nil
+	return entriesMatching(ss, recallBinary, nil), entriesMatching(pt, fileHistoryBinary, isExactReadMatcher), nil
 }
 
-func binariesMatching(groups []any, resolve func(string) (string, bool)) []string {
-	var out []string
+// entriesMatching collects the hook entries resolve recognises; oldMatcher, when
+// set, flags groups in a shape install-hook would upgrade.
+func entriesMatching(groups []any, resolve func(string) (string, bool, bool), oldMatcher func(any) bool) []HookEntry {
+	var out []HookEntry
 	for _, g := range groups {
-		_, hs, ok := groupHooks(g)
+		gm, hs, ok := groupHooks(g)
 		if !ok {
 			continue
 		}
+		old := oldMatcher != nil && oldMatcher(gm["matcher"])
 		for _, h := range hs {
 			hm, ok := h.(map[string]any)
 			if !ok {
 				continue
 			}
 			if cmd, ok := hm["command"].(string); ok {
-				if bin, ok := resolve(cmd); ok {
-					out = append(out, bin)
+				if bin, unquoted, ok := resolve(cmd); ok {
+					out = append(out, HookEntry{Binary: bin, Unquoted: unquoted, OldMatcher: old})
 				}
 			}
 		}

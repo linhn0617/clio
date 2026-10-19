@@ -694,38 +694,40 @@ func isClioName(path string) bool {
 
 // clioBinaryOf returns the binary path of a `<…/clio> args…` command: the exact
 // argument shape is required, the binary may live anywhere. The legacy unquoted
-// shape (a path with spaces) is resolved to the whole path.
-func clioBinaryOf(command, suffix string, args ...string) (string, bool) {
-	f, ok := shellwords.Split(command)
-	if ok && len(f) == 1+len(args) && isClioName(f[0]) {
+// shape (a path with spaces) is resolved to the whole path and reported as
+// unquoted, since the shell splits it and that hook never runs.
+func clioBinaryOf(command, suffix string, args ...string) (bin string, unquoted, ok bool) {
+	f, split := shellwords.Split(command)
+	if split && len(f) == 1+len(args) && isClioName(f[0]) {
 		match := true
 		for i, a := range args {
 			if f[1+i] != a {
 				match = false
+				break
 			}
 		}
 		if match {
-			return f[0], true
+			return f[0], false, true
 		}
 	}
 	if isUnquotedClio(command, suffix) {
-		return strings.TrimRight(strings.TrimSuffix(command, suffix), " \t"), true
+		return strings.TrimRight(strings.TrimSuffix(command, suffix), " \t"), true, true
 	}
-	return "", false
+	return "", false, false
 }
 
-func fileHistoryBinary(command string) (string, bool) {
+func fileHistoryBinary(command string) (string, bool, bool) {
 	return clioBinaryOf(command, " file-history --hook", "file-history", "--hook")
 }
 
-func recallBinary(command string) (string, bool) {
+func recallBinary(command string) (string, bool, bool) {
 	return clioBinaryOf(command, " recall", "recall")
 }
 
 // isClioFileHistory identifies the `<…/clio> file-history --hook` command with
 // the same exact-shape rule as isClioRecall: any binary path, exact arguments.
 func isClioFileHistory(command string) bool {
-	_, ok := fileHistoryBinary(command)
+	_, _, ok := fileHistoryBinary(command)
 	return ok
 }
 
@@ -733,7 +735,7 @@ func isClioFileHistory(command string) bool {
 // binary's absolute path so it stays removable across reinstalls, but tightly
 // enough that unrelated commands (e.g. `clio-helper recall`) do not match.
 func isClioRecall(command string) bool {
-	_, ok := recallBinary(command)
+	_, _, ok := recallBinary(command)
 	return ok
 }
 

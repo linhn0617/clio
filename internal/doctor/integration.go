@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,19 +20,14 @@ import (
 // source changes means nothing is feeding it.
 const staleIndexAge = 24 * time.Hour
 
-// binaryProblem returns "" when path names an existing executable, otherwise a short
-// reason. A bare name (no separator) is looked up on PATH the way a shell would.
+// binaryProblem returns "" when the absolute path names an existing executable,
+// otherwise a short reason. Callers handle non-absolute commands themselves: a hook
+// or MCP command is resolved by Claude Code, not by doctor.
 func binaryProblem(path string) string { return binaryProblemOS(path, runtime.GOOS) }
 
 // binaryProblemOS is binaryProblem for a given GOOS: Windows has no exec bit, so
 // there an existing regular file is enough.
 func binaryProblemOS(path, goos string) string {
-	if !strings.ContainsRune(path, os.PathSeparator) {
-		if _, err := exec.LookPath(path); err != nil {
-			return "missing binary " + path
-		}
-		return ""
-	}
 	fi, err := os.Stat(path)
 	if err != nil {
 		return "missing binary " + path
@@ -42,48 +38,69 @@ func binaryProblemOS(path, goos string) string {
 	return ""
 }
 
-// checkHookBinary verifies the binaries clio's recall and file-history hooks point
-// at. A reinstall that moves or deletes the binary leaves settings.json pointing at
-// nothing, and the hook then fails silently on every session. Binary paths come
-// from claudeconfig's recogniser; a relative one is flagged rather than resolved,
-// because Claude Code runs hooks from the session's cwd, not from anywhere doctor
-// could guess.
+// checkHookBinary verifies clio's recall and file-history hooks, each on its own.
+// A reinstall that moves or deletes the binary leaves settings.json pointing at
+// nothing, and the hook then fails silently on every session; an upgrade without
+// rerunning install-hook leaves one hook missing or file-history under the older
+// "Read" matcher. Binary paths come from claudeconfig's recogniser; a relative one
+// is flagged rather than resolved, because Claude Code runs hooks from the
+// session's cwd, not from anywhere doctor could guess.
 func checkHookBinary(settingsPath string) Result {
 	const name = "hook binary"
 	recall, fh, err := claudeconfig.ClioHookCommands(settingsPath)
 	if err != nil {
 		return Result{Name: name, OK: false, Detail: "cannot read " + settingsPath + ": " + err.Error()}
 	}
-	bins := append(append([]string{}, recall...), fh...)
-	if len(bins) == 0 {
+	if len(recall) == 0 && len(fh) == 0 {
 		return Result{Name: name, OK: true, Detail: "not installed (clio install-hook)"}
 	}
 	var problems, good []string
 	seen := map[string]bool{}
-	add := func(list *[]string, s string) {
+	problem := func(s string) {
 		if !seen[s] {
 			seen[s] = true
-			*list = append(*list, s)
+			problems = append(problems, s)
 		}
 	}
-	for _, bin := range bins {
-		switch {
-		case !filepath.IsAbs(bin):
-			add(&problems, "hook command is not an absolute path")
-		case binaryProblem(bin) != "":
-			add(&problems, "hook points to "+binaryProblem(bin))
-		default:
-			add(&good, bin)
+	for _, hook := range []struct {
+		kind    string
+		entries []claudeconfig.HookEntry
+	}{{"recall", recall}, {"file-history", fh}} {
+		if len(hook.entries) == 0 {
+			problem(hook.kind + " hook not installed")
+			continue
 		}
+		var bins []string
+		for _, e := range hook.entries {
+			switch {
+			case e.Unquoted:
+				problem(hook.kind + " hook has an unquoted path with whitespace")
+			case !filepath.IsAbs(e.Binary):
+				problem(hook.kind + " hook command is not an absolute path")
+			default:
+				if p := binaryProblem(e.Binary); p != "" {
+					problem(hook.kind + " hook points to " + p)
+				} else if !slices.Contains(bins, e.Binary) {
+					bins = append(bins, e.Binary)
+				}
+			}
+			if e.OldMatcher {
+				problem(hook.kind + " hook matcher is Read, needs upgrade")
+			}
+		}
+		good = append(good, hook.kind+": "+strings.Join(bins, ", "))
 	}
 	if len(problems) > 0 {
 		return Result{Name: name, OK: false, Detail: strings.Join(problems, "; ") + "; rerun clio install-hook"}
 	}
-	return Result{Name: name, OK: true, Detail: strings.Join(good, ", ")}
+	return Result{Name: name, OK: true, Detail: strings.Join(good, "; ")}
 }
 
 // checkMCPRegistration reports whether clio is registered as an MCP server and, if
 // so, whether its command still exists. Not registered is fine: MCP is optional.
+// install-mcp falls back to a bare `clio` when it cannot resolve its own path, and
+// Claude Code then looks that up on its own PATH, which doctor cannot see; so a
+// non-absolute command passes with a note instead of being judged on doctor's PATH.
 func checkMCPRegistration(configPath string) Result {
 	const name = "mcp registration"
 	cmd, kind, err := claudeconfig.LookupServer(configPath, "clio")
@@ -97,6 +114,13 @@ func checkMCPRegistration(configPath string) Result {
 		return Result{Name: name, OK: true, Detail: "registered (url-based, no local binary to check)"}
 	case claudeconfig.ServerMalformed:
 		return Result{Name: name, OK: false, Detail: "malformed mcpServers.clio entry; rerun clio install-mcp"}
+	}
+	if !filepath.IsAbs(cmd) {
+		const note = "resolved on doctor's PATH, not Claude Code's; prefer an absolute path"
+		if found, lerr := exec.LookPath(cmd); lerr == nil {
+			return Result{Name: name, OK: true, Detail: "registered: " + cmd + " -> " + found + " (" + note + ")"}
+		}
+		return Result{Name: name, OK: true, Detail: "registered: " + cmd + " (not found on doctor's PATH, which is not Claude Code's; prefer an absolute path)"}
 	}
 	if p := binaryProblem(cmd); p != "" {
 		return Result{Name: name, OK: false, Detail: "registered command: " + p + "; rerun clio install-mcp"}

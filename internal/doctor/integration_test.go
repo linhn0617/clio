@@ -106,15 +106,53 @@ func TestHookBinaryCheck(t *testing.T) {
 			t.Fatalf("got %+v", r)
 		}
 	})
-	t.Run("legacy unquoted path with spaces resolves to the whole path", func(t *testing.T) {
+	// The shell splits an unquoted path at the space and exits 127, so the hook
+	// cannot run even though the binary exists.
+	t.Run("legacy unquoted path with spaces warns even though the binary exists", func(t *testing.T) {
 		sp := filepath.Join(dir, "c d")
 		if err := os.MkdirAll(sp, 0o755); err != nil {
 			t.Fatal(err)
 		}
 		bin := fakeBin(t, sp, "clio", 0o755)
-		writeJSON(t, settings, settingsWith(bin+" recall", bin+" file-history --hook"))
-		if r := checkHookBinary(settings); !r.OK || !strings.Contains(r.Detail, bin) {
+		writeJSON(t, settings, settingsWith(bin+" recall", "'"+bin+"' file-history --hook"))
+		r := checkHookBinary(settings)
+		if r.OK || !strings.Contains(r.Detail, "recall hook has an unquoted path with whitespace; rerun clio install-hook") {
+			t.Fatalf("want WARN for the unquoted recall hook, got %+v", r)
+		}
+		writeJSON(t, settings, settingsWith("'"+bin+"' recall", bin+" file-history --hook"))
+		r = checkHookBinary(settings)
+		if r.OK || !strings.Contains(r.Detail, "file-history hook has an unquoted path with whitespace; rerun clio install-hook") {
+			t.Fatalf("want WARN for the unquoted file-history hook, got %+v", r)
+		}
+	})
+	// Upgrading the binary without rerunning install-hook leaves the older shape
+	// behind: one of the two hooks missing, or file-history under matcher "Read".
+	t.Run("half install warns naming the missing hook", func(t *testing.T) {
+		writeJSON(t, settings, `{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"`+good+` recall"}]}]}}`)
+		r := checkHookBinary(settings)
+		if r.OK || !strings.Contains(r.Detail, "file-history hook not installed; rerun clio install-hook") {
+			t.Fatalf("recall only: got %+v", r)
+		}
+		writeJSON(t, settings, `{"hooks":{"PreToolUse":[{"matcher":"Read|Bash","hooks":[{"type":"command","command":"`+good+` file-history --hook"}]}]}}`)
+		r = checkHookBinary(settings)
+		if r.OK || !strings.Contains(r.Detail, "recall hook not installed; rerun clio install-hook") {
+			t.Fatalf("file-history only: got %+v", r)
+		}
+	})
+	t.Run("old Read matcher needs upgrade", func(t *testing.T) {
+		writeJSON(t, settings, `{"hooks":{
+		  "SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"`+good+` recall"}]}],
+		  "PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"`+good+` file-history --hook"}]}]}}`)
+		r := checkHookBinary(settings)
+		if r.OK || !strings.Contains(r.Detail, "file-history hook matcher is Read, needs upgrade; rerun clio install-hook") {
 			t.Fatalf("got %+v", r)
+		}
+	})
+	t.Run("ok detail reports each hook separately", func(t *testing.T) {
+		writeJSON(t, settings, settingsWith(good+" recall", good+" file-history --hook"))
+		r := checkHookBinary(settings)
+		if want := "recall: " + good + "; file-history: " + good; !r.OK || r.Detail != want {
+			t.Fatalf("want ok %q, got %+v", want, r)
 		}
 	})
 	t.Run("non-absolute commands warn without PATH or cwd lookup", func(t *testing.T) {
@@ -181,6 +219,25 @@ func TestMCPRegistrationCheck(t *testing.T) {
 		r := checkMCPRegistration(cfg)
 		if r.OK || !strings.Contains(r.Detail, "missing binary "+gone) {
 			t.Fatalf("got %+v", r)
+		}
+	})
+	// install-mcp falls back to a bare `clio`; Claude Code resolves it on its own
+	// PATH, which doctor cannot see, so it is a note, never a WARN.
+	t.Run("non-absolute command is ok with a PATH note", func(t *testing.T) {
+		const note = "resolved on doctor's PATH, not Claude Code's; prefer an absolute path"
+		t.Setenv("PATH", "")
+		for _, c := range []string{"clio", "bin/clio"} {
+			writeJSON(t, cfg, fmt.Sprintf(`{"mcpServers":{"clio":{"command":%q}}}`, c))
+			r := checkMCPRegistration(cfg)
+			if !r.OK || !strings.Contains(r.Detail, "registered: "+c) || !strings.Contains(r.Detail, "not found on doctor's PATH, which is not Claude Code's; prefer an absolute path") {
+				t.Errorf("%q not on PATH: want ok with note, got %+v", c, r)
+			}
+		}
+		t.Setenv("PATH", dir)
+		writeJSON(t, cfg, `{"mcpServers":{"clio":{"command":"clio"}}}`)
+		r := checkMCPRegistration(cfg)
+		if !r.OK || !strings.Contains(r.Detail, "-> "+good) || !strings.Contains(r.Detail, note) {
+			t.Fatalf("clio on PATH: want ok naming %s with note, got %+v", good, r)
 		}
 	})
 	t.Run("url-based entry has no local binary to check", func(t *testing.T) {
