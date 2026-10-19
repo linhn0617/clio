@@ -4,9 +4,11 @@
 package doctor
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -184,22 +186,23 @@ func RunWith(database *db.DB, projectsDir, dbPath string, opts Options) []Result
 	// under a currently-unavailable source root are "preserved" (kept by design),
 	// reported separately from genuinely missing files so a stale index isn't read
 	// as healthy and an unmounted root isn't read as deletions.
-	missing, preserved, retainedFiles, truncated, rewritten, lag, rerr := reconcile(database, availRoots)
+	now := time.Now()
+	rec, rerr := reconcile(database, availRoots, now)
 	if rerr != nil {
 		add("source reconciliation", false, rerr.Error())
 	} else {
 		detail := fmt.Sprintf("%d missing/unreadable files, %d truncated, %d same-size rewrite(s) needing re-ingest, %d with new unindexed bytes",
-			missing, truncated, rewritten, lag)
-		if preserved > 0 {
-			detail += fmt.Sprintf(", %d preserved (source root unavailable)", preserved)
+			rec.missing, rec.truncated, rec.rewritten, rec.lag)
+		if rec.preserved > 0 {
+			detail += fmt.Sprintf(", %d preserved (source root unavailable)", rec.preserved)
 		}
-		if retainedFiles > 0 {
-			detail += fmt.Sprintf(", %d retained (transcript deleted, index kept)", retainedFiles)
+		if rec.retained > 0 {
+			detail += fmt.Sprintf(", %d retained (transcript deleted, index kept)", rec.retained)
 		}
 		// Every category above is a real discrepancy between the index and its source
 		// files: none of them may be silently treated as healthy, or doctor would
 		// report OK/exit 0 while the detail text itself lists live problems.
-		add("source reconciliation", missing == 0 && truncated == 0 && rewritten == 0 && lag == 0, detail)
+		add("source reconciliation", rec.missing == 0 && rec.truncated == 0 && rec.rewritten == 0 && rec.lag == 0, detail)
 	}
 
 	// Retained sessions: kept after their transcript was deleted (Claude Code's
@@ -375,7 +378,7 @@ func RunWith(database *db.DB, projectsDir, dbPath string, opts Options) []Result
 			pick(opts.SettingsPath, "hook binary", "~/.claude/settings.json", checkHookBinary),
 			pick(opts.ClaudeConfigPath, "mcp registration", "~/.claude.json", checkMCPRegistration),
 			pick(opts.LockPath, "mcp lease", "the mcp lock path", checkLease),
-			checkIndexFreshness(database, time.Now()),
+			checkIndexFreshness(rec, rerr),
 		} {
 			r.Integration = true
 			out = append(out, r)
@@ -491,10 +494,23 @@ func missingMarkExpr(database *db.DB) string {
 	return "NULL"
 }
 
-func reconcile(database *db.DB, availRoots []string) (missing, preserved, retained, truncated, rewritten, lag int, err error) {
+// reconcileStats is what reconcile found. Every count is a number of tracked files.
+type reconcileStats struct {
+	tracked                                            int // rows in ingest_state
+	missing, preserved, retained, truncated, rewritten int
+	lag                                                int // files with new unindexed bytes
+	// partial counts the lag files whose new bytes hold no newline: a session that
+	// stopped mid-write. Ingest absorbs only complete lines, so no re-index clears it.
+	partial int
+	// oldestChange is the age (by mtime) of the least recently written file holding
+	// a truncation, a rewrite or at least one unindexed complete line; 0 when none.
+	oldestChange time.Duration
+}
+
+func reconcile(database *db.DB, availRoots []string, now time.Time) (st reconcileStats, err error) {
 	rows, qerr := database.Query(`SELECT source_file, last_size, last_mtime, last_byte_offset, ` + missingMarkExpr(database) + ` FROM ingest_state`)
 	if qerr != nil {
-		return 0, 0, 0, 0, 0, 0, qerr
+		return st, qerr
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -502,8 +518,9 @@ func reconcile(database *db.DB, availRoots []string) (missing, preserved, retain
 		var lastSize, lastMtime, offset int64
 		var missingAt sql.NullInt64
 		if serr := rows.Scan(&path, &lastSize, &lastMtime, &offset, &missingAt); serr != nil {
-			return 0, 0, 0, 0, 0, 0, serr
+			return reconcileStats{}, serr
 		}
+		st.tracked++
 		fi, statErr := os.Stat(path)
 		if statErr != nil {
 			// A file marked missing was deleted at the source and its index kept on
@@ -513,27 +530,63 @@ func reconcile(database *db.DB, availRoots []string) (missing, preserved, retain
 			// silently skipping, so the check does not false-green.
 			switch {
 			case missingAt.Valid:
-				retained++
+				st.retained++
 			case !underAnyDir(path, availRoots):
-				preserved++
+				st.preserved++
 			default:
-				missing++
+				st.missing++
 			}
 			continue
 		}
+		changed := true
 		switch {
 		case fi.Size() < lastSize:
-			truncated++
+			st.truncated++
 		case fi.Size() == lastSize && fi.ModTime().UnixNano() != lastMtime:
 			// Same size, different mtime: ingest's own classifyChange
 			// (internal/ingest/incremental.go) treats this as a full rewrite, never
 			// an append — a same-size content swap that a size-only check can't see.
-			rewritten++
+			st.rewritten++
 		case fi.Size() > offset:
-			lag++
+			st.lag++
+			if !hasNewlineAfter(path, offset) {
+				st.partial++
+				changed = false
+			}
+		default:
+			changed = false
+		}
+		if age := now.Sub(fi.ModTime()); changed && age > st.oldestChange {
+			st.oldestChange = age
 		}
 	}
-	return missing, preserved, retained, truncated, rewritten, lag, rows.Err()
+	if rerr := rows.Err(); rerr != nil {
+		return reconcileStats{}, rerr
+	}
+	return st, nil
+}
+
+// hasNewlineAfter reports whether the file holds a '\n' at or after offset, i.e.
+// whether its unindexed bytes include a complete line. It stops at the first one,
+// so a large backlog costs one read. An unreadable file counts as having one, so
+// the change is not hidden.
+func hasNewlineAfter(path string, offset int64) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	buf := make([]byte, 64<<10)
+	for {
+		n, rerr := f.ReadAt(buf, offset)
+		if bytes.IndexByte(buf[:n], '\n') >= 0 {
+			return true
+		}
+		if rerr != nil {
+			return !errors.Is(rerr, io.EOF)
+		}
+		offset += int64(n)
+	}
 }
 
 // coverageBySource compares on-disk session files to tracked ingest_state rows,

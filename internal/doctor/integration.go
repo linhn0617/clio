@@ -11,11 +11,10 @@ import (
 	"time"
 
 	"github.com/linhn0617/clio/internal/claudeconfig"
-	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/lock"
 )
 
-// staleIndexAge is how far behind its source files the index may be before doctor
+// staleIndexAge is how old the oldest unindexed source change may be before doctor
 // warns. The MCP server normally keeps the index within minutes; a day of unabsorbed
 // source changes means nothing is feeding it.
 const staleIndexAge = 24 * time.Hour
@@ -152,55 +151,31 @@ func checkLease(lockPath string) Result {
 	}
 }
 
-// checkIndexFreshness measures whether the index is keeping up with its sources, not
-// when it last ingested: last_ingested_at only moves when something is actually
-// re-ingested, so a day without using Claude Code would warn forever and
-// `clio index` could never clear it. A tracked file counts as behind when it holds
-// bytes (or a rewrite) the index has not absorbed — the same conditions reconcile
-// uses — and the worst such file's age is compared with staleIndexAge.
-func checkIndexFreshness(database *db.DB, now time.Time) Result {
+// checkIndexFreshness judges whether the index keeps up with its sources, from the
+// numbers source reconciliation already gathered: it walks nothing itself, so the two
+// lines cannot disagree. It warns when the oldest unindexed change (a truncation, a
+// rewrite, or a complete unindexed line) is older than staleIndexAge. Last ingest
+// time says nothing here: a day without using Claude Code is not a fault. A partial
+// last line (a session that stopped mid-write) is not a change, since ingest only
+// absorbs complete lines and `clio index` could never clear it.
+func checkIndexFreshness(rec reconcileStats, rerr error) Result {
 	const name = "index freshness"
-	rows, err := database.Query(`SELECT source_file, last_size, last_mtime, last_byte_offset, ` + missingMarkExpr(database) + ` FROM ingest_state`)
-	if err != nil {
-		return Result{Name: name, OK: false, Detail: err.Error()}
-	}
-	defer rows.Close()
-	var tracked int
-	var worst time.Duration
-	for rows.Next() {
-		var path string
-		var lastSize, lastMtime, offset int64
-		var missingAt *int64
-		if err := rows.Scan(&path, &lastSize, &lastMtime, &offset, &missingAt); err != nil {
-			return Result{Name: name, OK: false, Detail: err.Error()}
-		}
-		tracked++
-		fi, serr := os.Stat(path)
-		if serr != nil || missingAt != nil {
-			continue // reconciliation owns missing and retained files
-		}
-		unabsorbed := fi.Size() > offset || fi.Size() < lastSize ||
-			(fi.Size() == lastSize && fi.ModTime().UnixNano() != lastMtime)
-		if unabsorbed {
-			if age := now.Sub(fi.ModTime()); age > worst {
-				worst = age
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return Result{Name: name, OK: false, Detail: err.Error()}
-	}
-	if tracked == 0 {
+	switch {
+	case rerr != nil:
+		return Result{Name: name, OK: false, Detail: "unavailable (source reconciliation failed): " + rerr.Error()}
+	case rec.tracked == 0:
 		return Result{Name: name, OK: false, Detail: "never indexed; run clio index"}
+	case rec.oldestChange > staleIndexAge:
+		return Result{Name: name, OK: false, Detail: fmt.Sprintf("oldest unindexed change %s old; run clio index", humanAge(rec.oldestChange))}
 	}
-	if worst > staleIndexAge {
-		return Result{Name: name, OK: false, Detail: fmt.Sprintf("index behind source by %s; run clio index", humanAge(worst))}
+	detail := "no unindexed changes"
+	if rec.oldestChange > 0 {
+		detail = fmt.Sprintf("oldest unindexed change %s old (warns after %s)", humanAge(rec.oldestChange), humanAge(staleIndexAge))
 	}
-	var last int64
-	if err := database.QueryRow(`SELECT COALESCE(MAX(last_ingested_at),0) FROM ingest_state`).Scan(&last); err != nil {
-		return Result{Name: name, OK: false, Detail: err.Error()}
+	if rec.partial > 0 {
+		detail += fmt.Sprintf(" (%d file(s) end in a partial line, indexed once complete)", rec.partial)
 	}
-	return Result{Name: name, OK: true, Detail: fmt.Sprintf("up to date (last change %s ago)", humanAge(now.Sub(time.Unix(last, 0))))}
+	return Result{Name: name, OK: true, Detail: detail}
 }
 
 func humanAge(d time.Duration) string {

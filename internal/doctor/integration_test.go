@@ -319,7 +319,15 @@ func ingestRow(t *testing.T, d *db.DB, path string, lastSize, offset, lastMtime,
 	}
 }
 
-func TestIndexFreshnessMeasuresPipelineNotLastIngest(t *testing.T) {
+// freshness judges reconcile's numbers instead of walking the files again, so the
+// two can never disagree.
+func freshnessAt(t *testing.T, d *db.DB, root string, now time.Time) Result {
+	t.Helper()
+	st, err := reconcile(d, []string{root}, now)
+	return checkIndexFreshness(st, err)
+}
+
+func TestIndexFreshnessJudgesReconcileAge(t *testing.T) {
 	dir := t.TempDir()
 	d, err := db.Open(filepath.Join(dir, "x.sqlite"))
 	if err != nil {
@@ -328,7 +336,7 @@ func TestIndexFreshnessMeasuresPipelineNotLastIngest(t *testing.T) {
 	defer d.Close()
 	now := time.Now()
 
-	if r := checkIndexFreshness(d, now); r.OK || !strings.Contains(r.Detail, "never indexed") {
+	if r := freshnessAt(t, d, dir, now); r.OK || !strings.Contains(r.Detail, "never indexed; run clio index") {
 		t.Fatalf("empty ingest_state: %+v", r)
 	}
 
@@ -344,45 +352,104 @@ func TestIndexFreshnessMeasuresPipelineNotLastIngest(t *testing.T) {
 		fi, _ := os.Stat(p)
 		return p, fi
 	}
+	drop := func(paths ...string) {
+		for _, p := range paths {
+			if _, err := d.Exec(`DELETE FROM ingest_state WHERE source_file = ?`, p); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 
 	// 1. A fully absorbed file whose last ingest was 3 days ago: the user simply did
 	// not use clio. Must be ok — `clio index` cannot (and need not) refresh this.
-	p1, fi1 := mk("absorbed.jsonl", "0123456789", 72*time.Hour)
+	p1, fi1 := mk("absorbed.jsonl", "0123456789\n", 72*time.Hour)
 	ingestRow(t, d, p1, fi1.Size(), fi1.Size(), fi1.ModTime().UnixNano(), now.Add(-72*time.Hour).Unix())
-	r := checkIndexFreshness(d, now)
-	if !r.OK || !strings.Contains(r.Detail, "up to date (last change 3d ago)") {
+	if r := freshnessAt(t, d, dir, now); !r.OK || r.Detail != "no unindexed changes" {
 		t.Fatalf("quiet-but-complete index must be ok: %+v", r)
 	}
 
-	// 2. New bytes appended 1h ago and not yet absorbed: within the grace window.
-	p2, fi2 := mk("recent.jsonl", "0123456789ABCDEF", 1*time.Hour)
-	ingestRow(t, d, p2, 10, 10, fi2.ModTime().UnixNano()-1, now.Add(-2*time.Hour).Unix())
-	if r := checkIndexFreshness(d, now); !r.OK {
-		t.Fatalf("unabsorbed bytes under 24h old must still be ok: %+v", r)
+	// 2. New lines appended 1h ago and not yet absorbed: within the grace window.
+	p2, fi2 := mk("recent.jsonl", "0123456789\nABCDEF\n", 1*time.Hour)
+	ingestRow(t, d, p2, 11, 11, fi2.ModTime().UnixNano()-1, now.Add(-2*time.Hour).Unix())
+	if r := freshnessAt(t, d, dir, now); !r.OK || !strings.Contains(r.Detail, "oldest unindexed change 1h old") {
+		t.Fatalf("unabsorbed lines under 24h old must still be ok: %+v", r)
 	}
 
-	// 3. A file with new bytes whose mtime is 30h old and which was never absorbed.
-	p3, fi3 := mk("behind.jsonl", "0123456789ABCDEF", 30*time.Hour)
-	ingestRow(t, d, p3, 10, 10, fi3.ModTime().UnixNano()-1, now.Add(-72*time.Hour).Unix())
-	r = checkIndexFreshness(d, now)
-	if r.OK || !strings.Contains(r.Detail, "index behind source by 30h; run clio index") {
-		t.Fatalf("index behind source by 30h must warn: %+v", r)
+	// 3. New lines whose file was last written 30h ago.
+	p3, fi3 := mk("behind.jsonl", "0123456789\nABCDEF\n", 30*time.Hour)
+	ingestRow(t, d, p3, 11, 11, fi3.ModTime().UnixNano()-1, now.Add(-72*time.Hour).Unix())
+	if r := freshnessAt(t, d, dir, now); r.OK || !strings.Contains(r.Detail, "oldest unindexed change 30h old; run clio index") {
+		t.Fatalf("unindexed lines 30h old must warn: %+v", r)
 	}
-	_ = fi3
 
-	// 4. A same-size rewrite (mtime moved, size equal) 40h ago also counts as behind.
-	p4, fi4 := mk("rewritten.jsonl", "0123456789", 40*time.Hour)
+	// 4. A same-size rewrite (mtime moved, size equal) 40h ago also counts, and the
+	// oldest change is the one reported.
+	p4, fi4 := mk("rewritten.jsonl", "0123456789\n", 40*time.Hour)
 	ingestRow(t, d, p4, fi4.Size(), fi4.Size(), fi4.ModTime().UnixNano()-5, now.Add(-72*time.Hour).Unix())
-	r = checkIndexFreshness(d, now)
-	if r.OK || !strings.Contains(r.Detail, "behind source by 40h") {
-		t.Fatalf("worst lag (40h) must be reported: %+v", r)
+	if r := freshnessAt(t, d, dir, now); r.OK || !strings.Contains(r.Detail, "oldest unindexed change 40h old") {
+		t.Fatalf("oldest change (40h) must be reported: %+v", r)
+	}
+	drop(p3, p4)
+
+	// 5. A truncated file is a change too.
+	p5, fi5 := mk("truncated.jsonl", "01\n", 45*time.Hour)
+	ingestRow(t, d, p5, 100, 100, fi5.ModTime().UnixNano(), now.Add(-72*time.Hour).Unix())
+	if r := freshnessAt(t, d, dir, now); r.OK || !strings.Contains(r.Detail, "oldest unindexed change 45h old") {
+		t.Fatalf("truncation must count: %+v", r)
+	}
+	drop(p5)
+
+	// 6. A tracked file that no longer exists is not a change (reconciliation owns that).
+	ingestRow(t, d, filepath.Join(dir, "gone.jsonl"), 10, 10, 1, now.Add(-72*time.Hour).Unix())
+	if r := freshnessAt(t, d, dir, now); !r.OK {
+		t.Fatalf("missing tracked file must not trip freshness: %+v", r)
+	}
+}
+
+// A session that stopped mid-write leaves a last line without its newline. Ingest
+// only absorbs complete lines, so `clio index` can never clear those bytes; they
+// must not make freshness warn, but the detail still says why reconciliation
+// counts them.
+func TestIndexFreshnessIgnoresPartialLastLine(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "x.sqlite")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	now := time.Now()
+	p := filepath.Join(dir, "s.jsonl")
+	body := "{\"a\":1}\n{\"b\":"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mt := now.Add(-30 * time.Hour)
+	if err := os.Chtimes(p, mt, mt); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(p)
+	// What ingest records: size and mtime seen, offset just past the last newline.
+	ingestRow(t, d, p, fi.Size(), int64(strings.IndexByte(body, '\n')+1), fi.ModTime().UnixNano(), mt.Unix())
+
+	r := freshnessAt(t, d, dir, now)
+	if !r.OK || !strings.Contains(r.Detail, "no unindexed changes (1 file(s) end in a partial line") {
+		t.Fatalf("partial last line must not warn: %+v", r)
+	}
+	res := Run(d, dir, dbPath)
+	if rec := findResult(t, res, "source reconciliation"); !strings.Contains(rec.Detail, "1 with new unindexed bytes") {
+		t.Fatalf("reconciliation still counts the bytes: %+v", rec)
 	}
 
-	// 5. A tracked file that no longer exists is not "behind" (reconciliation owns that).
-	d.Exec(`DELETE FROM ingest_state WHERE source_file IN (?,?)`, p3, p4)
-	ingestRow(t, d, filepath.Join(dir, "gone.jsonl"), 10, 10, 1, now.Add(-72*time.Hour).Unix())
-	if r := checkIndexFreshness(d, now); !r.OK {
-		t.Fatalf("missing tracked file must not trip freshness: %+v", r)
+	// Once the line is completed it is a real change again.
+	if err := os.WriteFile(p, []byte(body+"2}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p, mt, mt); err != nil {
+		t.Fatal(err)
+	}
+	if r := freshnessAt(t, d, dir, now); r.OK || !strings.Contains(r.Detail, "oldest unindexed change 30h old; run clio index") {
+		t.Fatalf("completed line must count: %+v", r)
 	}
 }
 
@@ -554,5 +621,30 @@ func TestIntegrationChecksAreReadOnly(t *testing.T) {
 		if after[k] != v {
 			t.Fatalf("%s changed: %q -> %q", k, v, after[k])
 		}
+	}
+}
+
+// The newline probe reads in chunks; a newline past the first chunk still counts,
+// and bytes before offset never do.
+func TestHasNewlineAfter(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.jsonl")
+	body := "x\n" + strings.Repeat("y", 200<<10)
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if hasNewlineAfter(p, 2) {
+		t.Fatal("no newline after offset 2")
+	}
+	if !hasNewlineAfter(p, 0) {
+		t.Fatal("newline at 1 must be found from offset 0")
+	}
+	if err := os.WriteFile(p, []byte(body+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !hasNewlineAfter(p, 2) {
+		t.Fatal("newline past the first chunk must be found")
+	}
+	if !hasNewlineAfter(filepath.Join(filepath.Dir(p), "gone"), 0) {
+		t.Fatal("an unreadable file must not hide its change")
 	}
 }
