@@ -23,7 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stay. Only line-anchored, properly closed elements are removed, so a tag
   mentioned in prose or left unclosed stays. `raw_json`, assistant text, tool
   results and Codex sessions are unchanged. Run `clio index --full` after upgrading
-  to strip them from sessions already indexed.
+  to strip them from sessions already indexed; the dropped harness-only turns then
+  no longer count toward a session's turn count, so `clio list --min-turns` results
+  can shift.
 
 ## [0.21.0] - 2026-10-19
 

@@ -47,13 +47,19 @@ tool inputs, tool results and Codex transcripts SHALL NOT be affected.
 For an `<agent-message>` element, the ingester SHALL also remove the line
 `Another Claude session sent a message:` directly before it and the paragraph beginning
 `That "other Claude session" is an agent working inside this same session` after it
-(blank lines between allowed), each only on an exact match of Claude Code's fixed text.
+(blank lines between allowed on either side, trailing spaces, tabs or a CR ignored), each
+only on an exact match of Claude Code's fixed text.
 
 #### Scenario: Relayed subagent report
 
 - **WHEN** a user message is the preamble line, an `<agent-message from="…">` element and
   the fixed trailer paragraph
 - **THEN** nothing of it SHALL be stored
+
+#### Scenario: CRLF frame with a blank line after the preamble
+
+- **WHEN** the preamble line ends in `\r\n` and a blank line separates it from the element
+- **THEN** the preamble SHALL still be removed with the element
 
 #### Scenario: Frame line on its own
 
@@ -81,6 +87,14 @@ shield a later complete element. Removal SHALL run in linear time.
   `<system-reminder>` element
 - **THEN** the complete element SHALL be removed and the unclosed opener and the user text
   SHALL be kept
+
+#### Scenario: Element between two paragraphs
+
+- **WHEN** a user message is `para one`, a blank line, an element, a blank line and
+  `para two` (with `\n` or `\r\n` line ends)
+- **THEN** the stored `content` and title SHALL keep exactly one blank line between the
+  paragraphs; a removed span SHALL leave no more blank-line separation than either side
+  had, and all other text, blank lines included, SHALL be kept byte for byte
 
 #### Scenario: Thousands of unclosed openers
 

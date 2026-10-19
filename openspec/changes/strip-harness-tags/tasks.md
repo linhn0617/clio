@@ -36,3 +36,13 @@
 - [x] 5.3 Add `local-command-caveat` to the stripped elements; run a negative control
       (no same-line closing) and revert it.
 - [x] 5.4 Update proposal, spec, CHANGELOG and READMEs; rerun the full checks.
+
+## 6. Verifier follow-ups
+
+- [x] 6.1 Red-first tests: CRLF and trailing-space preamble, blank lines between the
+      preamble and the element, blank-line separation at start/middle/end and with CRLF.
+- [x] 6.2 Trim the preamble like the trailer, allow blank lines before the element, and
+      skip a blank run after a removed span when the line before it is blank.
+- [x] 6.3 Negative control: disable the blank-run skip, confirm red, revert.
+- [x] 6.4 CHANGELOG: harness-only turns no longer count toward turn_count after
+      `clio index --full`, so `--min-turns` results can shift.

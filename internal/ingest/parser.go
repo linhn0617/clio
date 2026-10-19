@@ -289,7 +289,8 @@ func harnessCloses(text string, tag int) bool {
 //     literal text and a later complete element is still removed; an unclosed
 //     opener inside an element leaves that whole element in place (harness
 //     text may then stay indexed, but nothing outside it is eaten);
-//   - an <agent-message> also takes its fixed preamble and trailer lines.
+//   - an <agent-message> also takes its fixed preamble and trailer lines;
+//   - a removed span leaves no more blank-line separation than either side had.
 //
 // Callers run it after redactString, so it only ever deletes already-redacted
 // text and <private> elements are gone before it looks for tags. Linear time:
@@ -309,6 +310,9 @@ func stripHarnessWrappers(s string) string {
 		rest = rest[i+1:]
 	}
 	text := func(k int) string { return strings.TrimSuffix(lines[k], "\n") }
+	blank := func(k int) bool { return strings.TrimSpace(lines[k]) == "" }
+	// frameLine: line k is the fixed frame text, ignoring trailing spaces, tabs or a CR.
+	frameLine := func(k int, want string) bool { return strings.TrimRight(text(k), " \t\r") == want }
 
 	// endOf[k] is the last line of the complete element opened on line k, or -1.
 	endOf := make([]int, len(lines))
@@ -342,14 +346,20 @@ func stripHarnessWrappers(s string) string {
 		dropped = true
 		first := k
 		if harnessElementTags[tagOf[k]] == "agent-message" {
-			if k > 0 && !drop[k-1] && text(k-1) == agentMessagePreamble {
-				first = k - 1
+			// Each gap is walked once: by the element right after it (here) or
+			// right before it (the trailer loop), never past a dropped line.
+			p := k - 1
+			for p >= 0 && !drop[p] && blank(p) {
+				p--
+			}
+			if p >= 0 && !drop[p] && frameLine(p, agentMessagePreamble) {
+				first = p
 			}
 			j := last + 1
-			for j < len(lines) && strings.TrimSpace(lines[j]) == "" {
+			for j < len(lines) && blank(j) {
 				j++
 			}
-			if j < len(lines) && strings.TrimRight(text(j), " \t\r") == agentMessageTrailer {
+			if j < len(lines) && frameLine(j, agentMessageTrailer) {
 				last = j
 			}
 		}
@@ -361,11 +371,20 @@ func stripHarnessWrappers(s string) string {
 	if !dropped {
 		return s
 	}
+	// Kept lines are copied byte for byte, except that a blank line right after
+	// a removed span is skipped while the last line written is blank too, so
+	// "para\n\n<element>\n\npara" keeps one separation, not both.
 	var out strings.Builder
 	out.Grow(len(s))
+	lastBlank, skipped := false, false
 	for k, ln := range lines {
-		if !drop[k] {
+		switch {
+		case drop[k]:
+			skipped = true
+		case skipped && lastBlank && blank(k):
+		default:
 			out.WriteString(ln)
+			lastBlank, skipped = blank(k), false
 		}
 	}
 	return out.String()

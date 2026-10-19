@@ -41,6 +41,7 @@ reasons:
 ## Impact
 
 - Search, ask and recall stop returning harness text as user text; turn counts drop by
-  the harness-only turns.
+  the harness-only turns, so `clio list --min-turns` results can shift after a full
+  re-index. A span removed between two paragraphs leaves a single blank-line separation.
 - Existing indexes keep the old text until `clio index --full`.
 - No schema, CLI or MCP change.

@@ -170,6 +170,7 @@ func TestStripHarnessWrappersStaysLinear(t *testing.T) {
 		{"mixed tags, never closed", strings.Repeat("<system-reminder>\n<task-notification>\n<agent-message from=\"x\">\n", 7000)},
 		{"one 360 KB opener line", "<system-reminder>" + strings.Repeat("<system-reminder>", 20000)},
 		{"20000 attribute openers without '>'", strings.Repeat("<agent-message from=\"x\n", 20000) + "</agent-message>"},
+		{"10000 agent messages between blank runs", strings.Repeat("\n\n\n<agent-message from=\"x\">x</agent-message>\n\n\n", 10000)},
 	}
 	for _, c := range cases {
 		start := time.Now()
@@ -334,5 +335,60 @@ func TestIngestHarnessTextNotSearchable(t *testing.T) {
 	database.QueryRow(`SELECT COALESCE(title,'') FROM sessions WHERE uuid='harn-1'`).Scan(&title)
 	if n != 1 || title != "please fix the walrus bug" {
 		t.Errorf("messages=%d title=%q, want 1 and the prompt", n, title)
+	}
+}
+
+// The agent-message preamble is matched like the trailer: trailing spaces,
+// tabs or a CR are ignored, and blank lines may separate it from the element.
+func TestStripHarnessWrappersAgentPreambleVariants(t *testing.T) {
+	body := "<agent-message from=\"a1\">\n  zebrafish\n</agent-message>\n\n" + fixtureAgentTrailer
+	crlf := strings.ReplaceAll(body, "\n", "\r\n")
+	for name, c := range map[string]struct{ in, want string }{
+		"CRLF":                     {agentMessagePreamble + "\r\n" + crlf, ""},
+		"trailing space":           {agentMessagePreamble + " \t\n" + body, ""},
+		"blank line before":        {agentMessagePreamble + "\n\n" + body, ""},
+		"CRLF blank lines before":  {agentMessagePreamble + "\r\n\r\n\r\n" + crlf, ""},
+		"user text before":         {"walrus\n" + agentMessagePreamble + "\n\n" + body, "walrus"},
+		"preamble text not exact":  {agentMessagePreamble + " walrus\n" + body, agentMessagePreamble + " walrus"},
+		"preamble after text line": {"walrus " + agentMessagePreamble + "\n" + body, "walrus " + agentMessagePreamble},
+	} {
+		if got := strings.TrimSpace(stripHarnessWrappers(c.in)); got != c.want {
+			t.Errorf("%s: got %q, want %q", name, got, c.want)
+		}
+	}
+}
+
+// Removing an element leaves no more blank-line separation than was there on
+// either side of it; all other text, blank lines included, is byte-exact.
+func TestStripHarnessWrappersBlankLineSeparation(t *testing.T) {
+	sr := fixtureSystemReminder
+	srCRLF := strings.ReplaceAll(sr, "\n", "\r\n")
+	for name, c := range map[string]struct{ in, want string }{
+		"middle, blank both sides":    {"para one\n\n" + sr + "\n\npara two", "para one\n\npara two"},
+		"middle, CRLF":                {"para one\r\n\r\n" + srCRLF + "\r\n\r\npara two", "para one\r\n\r\npara two"},
+		"middle, blank before only":   {"para one\n\n" + sr + "\npara two", "para one\n\npara two"},
+		"middle, blank after only":    {"para one\n" + sr + "\n\npara two", "para one\n\npara two"},
+		"middle, no blank":            {"para one\n" + sr + "\npara two", "para one\npara two"},
+		"middle, longer run before":   {"para one\n\n\n" + sr + "\n\npara two", "para one\n\n\npara two"},
+		"middle, longer run after":    {"para one\n\n" + sr + "\n\n\npara two", "para one\n\npara two"},
+		"two elements in a row":       {"para one\n\n" + sr + "\n\n" + fixtureTaskNotification + "\n\npara two", "para one\n\npara two"},
+		"agent message with frame":    {"para one\n\n" + fixtureAgentMessage + "\n\npara two", "para one\n\npara two"},
+		"start":                       {sr + "\n\npara two", "\npara two"},
+		"start, CRLF":                 {srCRLF + "\r\n\r\npara two", "\r\npara two"},
+		"end":                         {"para one\n\n" + sr, "para one\n\n"},
+		"end, CRLF":                   {"para one\r\n\r\n" + srCRLF + "\r\n", "para one\r\n\r\n"},
+		"other blank lines untouched": {"a\n\n\nb\n" + sr + "\nc\n\n\nd", "a\n\n\nb\nc\n\n\nd"},
+	} {
+		if got := stripHarnessWrappers(c.in); got != c.want {
+			t.Errorf("%s:\n got %q\nwant %q", name, got, c.want)
+		}
+	}
+}
+
+// The same separation reaches the stored content and the title.
+func TestParseHarnessMidMessageSeparation(t *testing.T) {
+	msgs, info := parseOne(t, NewParser(0), userEventLine(t, "para one\n\n"+fixtureSystemReminder+"\n\npara two"))
+	if len(msgs) != 1 || msgs[0].Content != "para one\n\npara two" || info.TitleHint != "para one\n\npara two" {
+		t.Fatalf("content/title keep an extra blank line: %+v title=%q", msgs, info.TitleHint)
 	}
 }
