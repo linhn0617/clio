@@ -49,7 +49,7 @@ func newDoctorCmd() *cobra.Command {
 		Use:   "doctor",
 		Short: "Diagnose paths, DB integrity, and ingest health",
 		Long: "Diagnose paths, DB integrity, ingest health, and the Claude Code integration (hooks, MCP registration, lease, index freshness).\n\n" +
-			"--quick skips all integrity pragmas and FTS checks (db integrity, FTS content check, FTS bloat), which scan the whole database and take about a minute on a large index; use plain doctor for a deep check.",
+			"--quick skips the whole-database scans (db integrity, the FTS content check, FTS bloat), which take about a minute on a large index; the FTS row-count comparison and every other check still run. Use plain doctor for a deep check.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			projects, _ := config.ClaudeProjectsDir()
 			dbPath, err := config.DBPath()
@@ -75,6 +75,6 @@ func newDoctorCmd() *cobra.Command {
 			return reportDoctor(os.Stdout, doctor.RunWith(database, projects, dbPath, opts))
 		},
 	}
-	cmd.Flags().BoolVar(&quick, "quick", false, "skip all integrity pragmas and FTS checks (the whole-database scans); use plain doctor for a deep check")
+	cmd.Flags().BoolVar(&quick, "quick", false, "skip the whole-database scans (db integrity, FTS content check, FTS bloat); FTS row counts are still compared")
 	return cmd
 }

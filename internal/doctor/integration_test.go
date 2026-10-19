@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -465,49 +464,64 @@ func newQuickDB(t *testing.T) (*db.DB, string, string) {
 	return d, dir, dbPath
 }
 
-// The heavy scans are recorded as they are started, so a regression that runs one in
-// --quick (for example restoring integrity_check) turns this red.
+// Asserted at the SQL level: every statement on both connections doctor uses goes
+// through the trace driver, so any integrity_check, quick_check, FTS5
+// integrity-check or dbstat in --quick turns this red, however it is issued.
 func TestQuickModeRunsNoIntegrityScan(t *testing.T) {
-	d, dir, dbPath := newQuickDB(t)
+	_, dir, dbPath := newQuickDB(t)
 
-	var full []string
-	RunWith(d, dir, dbPath, Options{onHeavy: func(n string) { full = append(full, n) }})
-	sort.Strings(full)
-	if strings.Join(full, ",") != "dbstat,fts-integrity-check,integrity_check" {
-		t.Fatalf("full run must start all three heavy scans, got %v", full)
-	}
-
-	var quick []string
-	res := RunWith(d, dir, dbPath, Options{Quick: true, onHeavy: func(n string) { quick = append(quick, n) }})
-	if len(quick) != 0 {
-		t.Fatalf("--quick must not start any heavy scan, started %v", quick)
-	}
-	for _, name := range []string{"db integrity", "fts content check", "fts bloat"} {
-		r := findResult(t, res, name)
-		if !r.Skipped || !r.OK || !strings.Contains(r.Detail, "--quick") {
-			t.Fatalf("%q must be a skip mentioning --quick, got %+v", name, r)
+	_, full := tracedRun(t, dir, dbPath, Options{})
+	joined := strings.Join(full, "\n")
+	for _, want := range []string{"integrity_check", "integrity-check", "dbstat"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("full run must run %s, heavy statements were:\n%s", want, joined)
 		}
 	}
-	// The cheap row-count comparison still runs.
-	if r := findResult(t, res, "fts index"); !r.OK || strings.Contains(r.Detail, "content verified") {
+
+	res, quick := tracedRun(t, dir, dbPath, Options{Quick: true})
+	if len(quick) != 0 {
+		t.Fatalf("--quick must not run any whole-database scan, ran:\n%s", strings.Join(quick, "\n"))
+	}
+	for _, name := range []string{"db integrity", "fts bloat"} {
+		r := findResult(t, res, name)
+		if !r.Skipped || !r.OK || r.Detail != "skipped (--quick)" {
+			t.Fatalf("%q must be a skip reading 'skipped (--quick)', got %+v", name, r)
+		}
+	}
+	// The cheap row-count comparison still runs; only its content check is skipped.
+	if r := findResult(t, res, "fts index"); !r.OK || r.Skipped || r.Detail != "0 messages / 0 fts rows, content check skipped (--quick)" {
 		t.Fatalf("fts index in quick mode: %+v", r)
 	}
 }
 
-// Even when the row-count comparison errors, the content check was not run and must
-// still be listed as skipped. (External-content FTS counts read the content table,
-// so a plain count mismatch is unreachable; the query error is the live path.)
+// Quick and full runs list the same checks under the same names, so a quick report
+// lines up with a full one; only the verdicts of the skipped scans differ.
+func TestQuickModeUsesFullModeRowNames(t *testing.T) {
+	d, dir, dbPath := newQuickDB(t)
+	names := func(res []Result) string {
+		var out []string
+		for _, r := range res {
+			out = append(out, r.Name)
+		}
+		return strings.Join(out, ", ")
+	}
+	full := names(RunWith(d, dir, dbPath, Options{}))
+	if quick := names(RunWith(d, dir, dbPath, Options{Quick: true})); quick != full {
+		t.Fatalf("row names differ:\nfull:  %s\nquick: %s", full, quick)
+	}
+}
+
+// Even when the row-count comparison errors, the content check was not run and the
+// fts index line must still say so. (External-content FTS counts read the content
+// table, so a plain count mismatch is unreachable; the query error is the live path.)
 func TestQuickModeStillListsFTSContentSkipWhenCountsFail(t *testing.T) {
 	d, dir, dbPath := newQuickDB(t)
 	if _, err := d.Exec("DROP TABLE messages"); err != nil {
 		t.Fatal(err)
 	}
 	res := RunWith(d, dir, dbPath, Options{Quick: true})
-	if r := findResult(t, res, "fts index"); r.OK {
-		t.Fatalf("fixture: query should error, got %+v", r)
-	}
-	if r := findResult(t, res, "fts content check"); !r.Skipped {
-		t.Fatalf("content check skip row missing on query error: %+v", r)
+	if r := findResult(t, res, "fts index"); r.OK || !strings.HasSuffix(r.Detail, ", content check skipped (--quick)") {
+		t.Fatalf("fts index must fail and still note the skipped content check: %+v", r)
 	}
 }
 
@@ -528,10 +542,12 @@ func TestIntegrationChecksRunInBothModes(t *testing.T) {
 			}
 		}
 	}
-	// Plain Run (legacy callers/tests) stays hermetic: no HOME-dependent checks.
+	// Plain Run (legacy callers/tests) skips the Claude Code integration checks, so
+	// it never reads ~/.claude. It is not hermetic: the registry still probes source
+	// roots such as ~/.codex.
 	for _, r := range Run(d, dir, dbPath) {
-		if r.Name == "hook binary" || r.Name == "mcp registration" {
-			t.Fatalf("Run must not read the real HOME, got %q", r.Name)
+		if r.Integration || r.Name == "hook binary" || r.Name == "mcp registration" {
+			t.Fatalf("Run must not run integration checks, got %q", r.Name)
 		}
 	}
 }

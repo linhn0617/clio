@@ -35,27 +35,30 @@ type Result struct {
 	Integration bool
 }
 
-// Options tunes RunWith. The zero value is the full, HOME-independent run.
+// Options tunes RunWith. The zero value is the full run without the Claude Code
+// integration checks.
 type Options struct {
 	// Quick skips every check that scans the whole database — PRAGMA integrity_check,
 	// the FTS content integrity-check and the dbstat bloat measurement — which made
 	// doctor take over a minute on a ~1 GB index. quick_check is not a substitute: it
 	// still walks every page and took about half of the remaining time, so a quick run
-	// reports db integrity as skipped and the plain run is the deep check.
+	// reports db integrity as skipped and the plain run is the deep check. The cheap
+	// FTS row-count comparison still runs.
 	Quick bool
 	// Integration enables the checks that look outside the index (hooks, MCP
-	// registration, lease, freshness). Off by default so Run stays independent of the
-	// caller's HOME; the CLI turns it on and supplies the paths.
+	// registration, lease, freshness). Off by default so Run never reads
+	// ~/.claude; the CLI turns it on and supplies the paths. (Run still probes the
+	// registry's source roots, e.g. ~/.codex, as it always has.)
 	Integration                              bool
 	SettingsPath, ClaudeConfigPath, LockPath string
-
-	// onHeavy, when set, is told the name of each whole-database scan as it starts, so
-	// tests can prove --quick starts none. Unexported: not part of the CLI contract.
-	onHeavy func(scan string)
 }
 
 // quickSuffix is the detail of every check --quick skips.
 const quickSuffix = "skipped (--quick)"
+
+// sqliteDriverName is the driver ftsContentIntegrityOK opens its writable
+// connection with; a seam so tests can trace that connection's SQL as well.
+var sqliteDriverName = "sqlite"
 
 // Run executes all checks and returns their results.
 func Run(database *db.DB, projectsDir, dbPath string) []Result {
@@ -67,11 +70,6 @@ func RunWith(database *db.DB, projectsDir, dbPath string, opts Options) []Result
 	var out []Result
 	add := func(name string, ok bool, detail string) {
 		out = append(out, Result{Name: name, OK: ok, Detail: detail})
-	}
-	heavy := func(scan string) {
-		if opts.onHeavy != nil {
-			opts.onHeavy(scan)
-		}
 	}
 	skip := func(name string) {
 		out = append(out, Result{Name: name, OK: true, Detail: quickSuffix, Skipped: true})
@@ -130,7 +128,6 @@ func RunWith(database *db.DB, projectsDir, dbPath string, opts Options) []Result
 	if opts.Quick {
 		skip("db integrity")
 	} else {
-		heavy("integrity_check")
 		var integ string
 		if err := database.QueryRow(`PRAGMA integrity_check`).Scan(&integ); err != nil {
 			add("db integrity", false, err.Error())
@@ -143,23 +140,27 @@ func RunWith(database *db.DB, projectsDir, dbPath string, opts Options) []Result
 	// content-level integrity check. Row counts alone can't see the index
 	// desynced from message content while row bookkeeping stays consistent
 	// (see ftsContentIntegrityOK) — a real defect a row-count-only check
-	// cannot distinguish from a healthy index.
+	// cannot distinguish from a healthy index. --quick runs the counts only and
+	// says so on the same line, on every path, so its rows match a full run's.
 	var msgCount, ftsCount int
 	msgErr := database.QueryRow(`SELECT count(*) FROM messages`).Scan(&msgCount)
 	ftsErr := database.QueryRow(`SELECT count(*) FROM messages_fts`).Scan(&ftsCount)
+	quickNote := ""
+	if opts.Quick {
+		quickNote = ", content check " + quickSuffix
+	}
 	switch {
 	case msgErr != nil || ftsErr != nil:
 		e := msgErr
 		if e == nil {
 			e = ftsErr
 		}
-		add("fts index", false, e.Error())
+		add("fts index", false, e.Error()+quickNote)
 	case msgCount != ftsCount:
-		add("fts index", false, fmt.Sprintf("%d messages / %d fts rows", msgCount, ftsCount))
+		add("fts index", false, fmt.Sprintf("%d messages / %d fts rows%s", msgCount, ftsCount, quickNote))
 	case opts.Quick:
-		add("fts index", true, fmt.Sprintf("%d messages / %d fts rows", msgCount, ftsCount))
+		add("fts index", true, fmt.Sprintf("%d messages / %d fts rows%s", msgCount, ftsCount, quickNote))
 	default:
-		heavy("fts-integrity-check")
 		if ok, detail, ierr := ftsContentIntegrityOK(dbPath); ierr != nil {
 			add("fts index", false, fmt.Sprintf("%d messages / %d fts rows, content check failed: %s", msgCount, ftsCount, ierr.Error()))
 		} else if !ok {
@@ -167,11 +168,6 @@ func RunWith(database *db.DB, projectsDir, dbPath string, opts Options) []Result
 		} else {
 			add("fts index", true, fmt.Sprintf("%d messages / %d fts rows, content verified", msgCount, ftsCount))
 		}
-	}
-	// Listed on every quick path (also when the count comparison above failed or
-	// errored): the content check did not run either way.
-	if opts.Quick {
-		skip("fts content check")
 	}
 
 	// Orphan sessions (no messages).
@@ -306,7 +302,6 @@ func RunWith(database *db.DB, projectsDir, dbPath string, opts Options) []Result
 	if opts.Quick {
 		skip("fts bloat")
 	} else {
-		heavy("dbstat")
 		ftsOK, ftsDetail := ftsBloat(database)
 		add("fts bloat", ftsOK, ftsDetail)
 	}
@@ -455,7 +450,7 @@ func ftsBloatVerdict(fts, msg int64) (bool, string) {
 // integrity failure.
 func ftsContentIntegrityOK(dbPath string) (ok bool, detail string, err error) {
 	dsn := "file:" + dbPath + "?_pragma=busy_timeout(3000)&mode=rw"
-	conn, oerr := sql.Open("sqlite", dsn)
+	conn, oerr := sql.Open(sqliteDriverName, dsn)
 	if oerr != nil {
 		return false, "", fmt.Errorf("open writable connection for fts integrity-check: %w", oerr)
 	}
