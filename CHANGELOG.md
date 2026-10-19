@@ -5,6 +5,59 @@ All notable changes to clio are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-10-19
+
+Bounded MCP responses, a faster and wider secret redaction, cheaper read-path
+catch-up, and `clio doctor --quick` with Claude Code integration checks (openspec
+changes `mcp-response-budget`, `redaction-prefilter`, `redaction-rules-linear`,
+`ingest-catchup-cost`, `mcp-startup-lease`, `doctor-quick-integration`).
+
+### Added
+
+- **MCP response budget.** Every tool takes `max_chars` (default 40,000, range
+  4,000–48,000, counted in UTF-16 code units) so a result stays under Claude Code's
+  50,000-character spill-to-file threshold. Rows past the budget are dropped at a
+  row boundary, a single oversized row has its text cut with a
+  `… [truncated N chars]` marker, and the response carries `truncated: true` and a
+  `next` hint. `ask` keeps hit passages first; `read_session` shrinks its parent page
+  before shedding inlined subagent messages. Results are sent as text only.
+- **`read_session` `last_n` and `around_sequence`** read the end of a session or a
+  window centred on a message `seq`, in one read snapshot; the response reports
+  `total`.
+- **`clio doctor --quick`** skips the whole-database scans (db integrity, the FTS
+  content check, FTS bloat); FTS row counts and every other check still run.
+- **Claude Code integration checks in `clio doctor`:** recall and file-history hooks
+  each installed and pointing at a real binary (an unquoted path with whitespace or
+  the old `Read` matcher says to rerun `clio install-hook`), MCP registration, the
+  MCP lease, and index freshness judged from source reconciliation (a session that
+  stopped mid-line is not drift).
+- **New secret rules:** GitLab `glpat-`, npm `npm_`, Hugging Face `hf_`, Stripe
+  `whsec_`, Slack incoming-webhook URLs, PGP private key blocks,
+  `Authorization: token <x>`, empty-user connection strings (`redis://:pass@host`),
+  `PASSPHRASE` and credential-context `*_PASS` / `*_PWD` keys (`DB_PASS`,
+  `MY_DB_PASS`; not `FIRST_PASS` or the shell's `OLD_PWD`).
+
+### Changed
+
+- **Redaction is faster with identical output.** Each rule carries a literal
+  prefilter and is skipped when its feature is absent (about 2× on a full index,
+  ~5× on CJK-heavy text); a tool call's summary and activity target share one pass.
+- **Linear-time `<private>` stripping and JSON probing:** pathological nesting and
+  bracket floods no longer stall ingest.
+- **Cheaper read-path catch-up.** Migration 0016 adds an activity-backfill watermark,
+  so `list`/`search`/`ask` check only messages newer than it; `clio index` still
+  repairs the full history. Migration 0015 drops the redundant `messages(session_uuid)`
+  index.
+- **`clio mcp` leader startup** answers immediately, runs one catch-up, and renews its
+  lease throughout, so a long rebuild no longer lets another process take over.
+
+### Fixed
+
+- Redaction gaps: a connection string containing `sk-` left a stray `]`; `x_sk-…`
+  keys; keys after a non-ASCII fold (`ſecret=`); a key value that swallowed a glued
+  second key no longer exposes the second value; a token inside a `Bearer` value no
+  longer leaves the bearer head visible.
+
 ## [0.20.0] - 2026-10-17
 
 The file-context hook now also fires on Bash (openspec change

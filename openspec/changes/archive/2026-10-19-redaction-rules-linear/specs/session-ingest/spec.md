@@ -196,6 +196,28 @@ the index.
   integers, while object key order and insignificant whitespace MAY be normalized
   (raw_json is for display via `clio show --format raw`, not byte-exact replay)
 
+#### Scenario: Prefiltering never changes the output
+
+- **WHEN** a string is redacted with the per-rule necessary-condition prefilter
+- **THEN** the result SHALL be byte-for-byte identical to running every redaction rule on it,
+  for every input including text with markers from an earlier redaction, word-boundary edges,
+  and rules that have no literal feature (which always run)
+
+#### Scenario: Case folding keeps case-insensitive rules exact
+
+- **WHEN** text spells a secret keyword with a rune Go's `(?i)` folds onto an ASCII letter
+  (U+212A for `k`, U+017F for `s`, e.g. `API_\u212aEY=supersecretvalue123`), or contains other
+  non-ASCII text such as Chinese
+- **THEN** the secret SHALL be redacted exactly as without a prefilter, and text with no secret
+  feature SHALL still skip the rules that cannot match
+
+#### Scenario: A tool call's input is redacted once for its summary and target
+
+- **WHEN** one tool call's input string feeds both its parameter summary and its activity target
+- **THEN** the system SHALL redact that string once and use the same result for both, with
+  output identical to redacting twice; passes that would otherwise change output (redaction is
+  not idempotent on every input) SHALL NOT be dropped
+
 ### Requirement: User-marked private content is not indexed
 
 The ingester SHALL remove every `<private>…</private>` element, including its
