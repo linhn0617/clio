@@ -4,13 +4,16 @@
 package doctor
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
@@ -23,13 +26,53 @@ type Result struct {
 	Name   string
 	OK     bool
 	Detail string
+	// Skipped marks a check that was deliberately not run (--quick). It is OK=true
+	// so it never fails the run, but the report shows [skip] instead of ok.
+	Skipped bool
+	// Integration marks the checks that look outside the index (hooks, MCP, lease,
+	// freshness). Their failures carry their own remedy in Detail, so the CLI does not
+	// append the index-rebuild hint for them.
+	Integration bool
 }
+
+// Options tunes RunWith. The zero value is the full run without the Claude Code
+// integration checks.
+type Options struct {
+	// Quick skips every check that scans the whole database — PRAGMA integrity_check,
+	// the FTS content integrity-check and the dbstat bloat measurement — which made
+	// doctor take over a minute on a ~1 GB index. quick_check is not a substitute: it
+	// still walks every page and took about half of the remaining time, so a quick run
+	// reports db integrity as skipped and the plain run is the deep check. The cheap
+	// FTS row-count comparison still runs.
+	Quick bool
+	// Integration enables the checks that look outside the index (hooks, MCP
+	// registration, lease, freshness). Off by default so Run never reads
+	// ~/.claude; the CLI turns it on and supplies the paths. (Run still probes the
+	// registry's source roots, e.g. ~/.codex, as it always has.)
+	Integration                              bool
+	SettingsPath, ClaudeConfigPath, LockPath string
+}
+
+// quickSuffix is the detail of every check --quick skips.
+const quickSuffix = "skipped (--quick)"
+
+// sqliteDriverName is the driver ftsContentIntegrityOK opens its writable
+// connection with; a seam so tests can trace that connection's SQL as well.
+var sqliteDriverName = "sqlite"
 
 // Run executes all checks and returns their results.
 func Run(database *db.DB, projectsDir, dbPath string) []Result {
+	return RunWith(database, projectsDir, dbPath, Options{})
+}
+
+// RunWith is Run with options.
+func RunWith(database *db.DB, projectsDir, dbPath string, opts Options) []Result {
 	var out []Result
 	add := func(name string, ok bool, detail string) {
-		out = append(out, Result{name, ok, detail})
+		out = append(out, Result{Name: name, OK: ok, Detail: detail})
+	}
+	skip := func(name string) {
+		out = append(out, Result{Name: name, OK: true, Detail: quickSuffix, Skipped: true})
 	}
 
 	var availRoots []string
@@ -81,31 +124,42 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 		}
 	}
 
-	// DB integrity.
-	var integ string
-	if err := database.QueryRow(`PRAGMA integrity_check`).Scan(&integ); err != nil {
-		add("db integrity", false, err.Error())
+	// DB integrity: a whole-file scan, so --quick skips it.
+	if opts.Quick {
+		skip("db integrity")
 	} else {
-		add("db integrity", integ == "ok", integ)
+		var integ string
+		if err := database.QueryRow(`PRAGMA integrity_check`).Scan(&integ); err != nil {
+			add("db integrity", false, err.Error())
+		} else {
+			add("db integrity", integ == "ok", integ)
+		}
 	}
 
 	// FTS sync: messages vs fts row counts, then (only when counts match) a
 	// content-level integrity check. Row counts alone can't see the index
 	// desynced from message content while row bookkeeping stays consistent
 	// (see ftsContentIntegrityOK) — a real defect a row-count-only check
-	// cannot distinguish from a healthy index.
+	// cannot distinguish from a healthy index. --quick runs the counts only and
+	// says so on the same line, on every path, so its rows match a full run's.
 	var msgCount, ftsCount int
 	msgErr := database.QueryRow(`SELECT count(*) FROM messages`).Scan(&msgCount)
 	ftsErr := database.QueryRow(`SELECT count(*) FROM messages_fts`).Scan(&ftsCount)
+	quickNote := ""
+	if opts.Quick {
+		quickNote = ", content check " + quickSuffix
+	}
 	switch {
 	case msgErr != nil || ftsErr != nil:
 		e := msgErr
 		if e == nil {
 			e = ftsErr
 		}
-		add("fts index", false, e.Error())
+		add("fts index", false, e.Error()+quickNote)
 	case msgCount != ftsCount:
-		add("fts index", false, fmt.Sprintf("%d messages / %d fts rows", msgCount, ftsCount))
+		add("fts index", false, fmt.Sprintf("%d messages / %d fts rows%s", msgCount, ftsCount, quickNote))
+	case opts.Quick:
+		add("fts index", true, fmt.Sprintf("%d messages / %d fts rows%s", msgCount, ftsCount, quickNote))
 	default:
 		if ok, detail, ierr := ftsContentIntegrityOK(dbPath); ierr != nil {
 			add("fts index", false, fmt.Sprintf("%d messages / %d fts rows, content check failed: %s", msgCount, ftsCount, ierr.Error()))
@@ -128,22 +182,27 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 	// under a currently-unavailable source root are "preserved" (kept by design),
 	// reported separately from genuinely missing files so a stale index isn't read
 	// as healthy and an unmounted root isn't read as deletions.
-	missing, preserved, retainedFiles, truncated, rewritten, lag, rerr := reconcile(database, availRoots)
+	now := time.Now()
+	rec, rerr := reconcile(database, availRoots, now)
 	if rerr != nil {
 		add("source reconciliation", false, rerr.Error())
 	} else {
 		detail := fmt.Sprintf("%d missing/unreadable files, %d truncated, %d same-size rewrite(s) needing re-ingest, %d with new unindexed bytes",
-			missing, truncated, rewritten, lag)
-		if preserved > 0 {
-			detail += fmt.Sprintf(", %d preserved (source root unavailable)", preserved)
+			rec.missing, rec.truncated, rec.rewritten, rec.lag)
+		if rec.partial > 0 {
+			detail += fmt.Sprintf(", %d ending in a partial line (indexed once complete)", rec.partial)
 		}
-		if retainedFiles > 0 {
-			detail += fmt.Sprintf(", %d retained (transcript deleted, index kept)", retainedFiles)
+		if rec.preserved > 0 {
+			detail += fmt.Sprintf(", %d preserved (source root unavailable)", rec.preserved)
+		}
+		if rec.retained > 0 {
+			detail += fmt.Sprintf(", %d retained (transcript deleted, index kept)", rec.retained)
 		}
 		// Every category above is a real discrepancy between the index and its source
 		// files: none of them may be silently treated as healthy, or doctor would
-		// report OK/exit 0 while the detail text itself lists live problems.
-		add("source reconciliation", missing == 0 && truncated == 0 && rewritten == 0 && lag == 0, detail)
+		// report OK/exit 0 while the detail text itself lists live problems. A partial
+		// last line is not one: nothing can index it until its writer finishes it.
+		add("source reconciliation", rec.missing == 0 && rec.truncated == 0 && rec.rewritten == 0 && rec.lag == 0, detail)
 	}
 
 	// Retained sessions: kept after their transcript was deleted (Claude Code's
@@ -244,8 +303,12 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 			prunedMsgs, float64(freelist*pageSize)/1e6))
 	}
 
-	ftsOK, ftsDetail := ftsBloat(database)
-	add("fts bloat", ftsOK, ftsDetail)
+	if opts.Quick {
+		skip("fts bloat")
+	} else {
+		ftsOK, ftsDetail := ftsBloat(database)
+		add("fts bloat", ftsOK, ftsDetail)
+	}
 
 	// File permissions: the DB and its WAL/SHM sidecars hold indexed content and must
 	// be private (0600). Absent sidecars (no writes yet) are skipped.
@@ -292,6 +355,32 @@ func Run(database *db.DB, projectsDir, dbPath string) []Result {
 			}
 			ok := ratio < 3.0 || srcBytes == 0
 			add("db size", ok, fmt.Sprintf("db %.1f MB, ~%.1fx source", float64(fi.Size())/1e6, ratio))
+		}
+	}
+
+	if opts.Integration {
+		// debt: no check that the running MCP server's version matches this binary;
+		// it needs the lease file to carry a version. Add once a stale-binary MCP
+		// (reinstall without restarting Claude Code) shows up as a real complaint.
+		// Each check needs its own path; one that could not be resolved reports that
+		// itself and leaves the other three running.
+		unresolved := func(name, what string) Result {
+			return Result{Name: name, OK: false, Detail: "cannot resolve " + what + " (no home directory?)"}
+		}
+		pick := func(path, name, what string, check func(string) Result) Result {
+			if path == "" {
+				return unresolved(name, what)
+			}
+			return check(path)
+		}
+		for _, r := range []Result{
+			pick(opts.SettingsPath, "hook binary", "~/.claude/settings.json", checkHookBinary),
+			pick(opts.ClaudeConfigPath, "mcp registration", "~/.claude.json", checkMCPRegistration),
+			pick(opts.LockPath, "mcp lease", "the mcp lock path", checkLease),
+			checkIndexFreshness(rec, rerr),
+		} {
+			r.Integration = true
+			out = append(out, r)
 		}
 	}
 
@@ -365,7 +454,7 @@ func ftsBloatVerdict(fts, msg int64) (bool, string) {
 // integrity failure.
 func ftsContentIntegrityOK(dbPath string) (ok bool, detail string, err error) {
 	dsn := "file:" + dbPath + "?_pragma=busy_timeout(3000)&mode=rw"
-	conn, oerr := sql.Open("sqlite", dsn)
+	conn, oerr := sql.Open(sqliteDriverName, dsn)
 	if oerr != nil {
 		return false, "", fmt.Errorf("open writable connection for fts integrity-check: %w", oerr)
 	}
@@ -404,10 +493,24 @@ func missingMarkExpr(database *db.DB) string {
 	return "NULL"
 }
 
-func reconcile(database *db.DB, availRoots []string) (missing, preserved, retained, truncated, rewritten, lag int, err error) {
+// reconcileStats is what reconcile found. Every count is a number of tracked files.
+type reconcileStats struct {
+	tracked                                            int // rows in ingest_state
+	missing, preserved, retained, truncated, rewritten int
+	lag                                                int // files with a complete unindexed line
+	// partial counts the files whose only new bytes are a last line without its
+	// newline: a session that stopped mid-write. Ingest absorbs only complete lines,
+	// so no re-index clears it; it is reported, never a warning.
+	partial int
+	// oldestChange is the age (by mtime) of the least recently written file holding
+	// a truncation, a rewrite or at least one unindexed complete line; 0 when none.
+	oldestChange time.Duration
+}
+
+func reconcile(database *db.DB, availRoots []string, now time.Time) (st reconcileStats, err error) {
 	rows, qerr := database.Query(`SELECT source_file, last_size, last_mtime, last_byte_offset, ` + missingMarkExpr(database) + ` FROM ingest_state`)
 	if qerr != nil {
-		return 0, 0, 0, 0, 0, 0, qerr
+		return st, qerr
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -415,8 +518,9 @@ func reconcile(database *db.DB, availRoots []string) (missing, preserved, retain
 		var lastSize, lastMtime, offset int64
 		var missingAt sql.NullInt64
 		if serr := rows.Scan(&path, &lastSize, &lastMtime, &offset, &missingAt); serr != nil {
-			return 0, 0, 0, 0, 0, 0, serr
+			return reconcileStats{}, serr
 		}
+		st.tracked++
 		fi, statErr := os.Stat(path)
 		if statErr != nil {
 			// A file marked missing was deleted at the source and its index kept on
@@ -426,27 +530,62 @@ func reconcile(database *db.DB, availRoots []string) (missing, preserved, retain
 			// silently skipping, so the check does not false-green.
 			switch {
 			case missingAt.Valid:
-				retained++
+				st.retained++
 			case !underAnyDir(path, availRoots):
-				preserved++
+				st.preserved++
 			default:
-				missing++
+				st.missing++
 			}
 			continue
 		}
+		changed := true
 		switch {
 		case fi.Size() < lastSize:
-			truncated++
+			st.truncated++
 		case fi.Size() == lastSize && fi.ModTime().UnixNano() != lastMtime:
 			// Same size, different mtime: ingest's own classifyChange
 			// (internal/ingest/incremental.go) treats this as a full rewrite, never
 			// an append — a same-size content swap that a size-only check can't see.
-			rewritten++
+			st.rewritten++
+		case fi.Size() > offset && !hasNewlineAfter(path, offset):
+			st.partial++
+			changed = false
 		case fi.Size() > offset:
-			lag++
+			st.lag++
+		default:
+			changed = false
+		}
+		if age := now.Sub(fi.ModTime()); changed && age > st.oldestChange {
+			st.oldestChange = age
 		}
 	}
-	return missing, preserved, retained, truncated, rewritten, lag, rows.Err()
+	if rerr := rows.Err(); rerr != nil {
+		return reconcileStats{}, rerr
+	}
+	return st, nil
+}
+
+// hasNewlineAfter reports whether the file holds a '\n' at or after offset, i.e.
+// whether its unindexed bytes include a complete line. It stops at the first one,
+// so a large backlog costs one read. An unreadable file counts as having one, so
+// the change is not hidden.
+func hasNewlineAfter(path string, offset int64) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	buf := make([]byte, 64<<10)
+	for {
+		n, rerr := f.ReadAt(buf, offset)
+		if bytes.IndexByte(buf[:n], '\n') >= 0 {
+			return true
+		}
+		if rerr != nil {
+			return !errors.Is(rerr, io.EOF)
+		}
+		offset += int64(n)
+	}
 }
 
 // coverageBySource compares on-disk session files to tracked ingest_state rows,

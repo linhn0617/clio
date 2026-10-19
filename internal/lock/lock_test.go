@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -38,26 +37,6 @@ func TestWithFileLockSerializes(t *testing.T) {
 	got, _ := strconv.Atoi(strings.TrimSpace(string(b)))
 	if got != n {
 		t.Fatalf("lost updates: counter=%d want %d", got, n)
-	}
-}
-
-// pidAlive must treat EPERM (process exists but we may not signal it) as alive, so a
-// lease owned by a live process we cannot signal is not wrongly stolen.
-func TestPidAliveTreatsEPERMAsAlive(t *testing.T) {
-	orig := signalProc
-	t.Cleanup(func() { signalProc = orig })
-
-	signalProc = func(*os.Process, os.Signal) error { return syscall.EPERM }
-	if !pidAlive(os.Getpid()) {
-		t.Error("EPERM should be treated as alive")
-	}
-	signalProc = func(*os.Process, os.Signal) error { return nil }
-	if !pidAlive(os.Getpid()) {
-		t.Error("nil signal error should be alive")
-	}
-	signalProc = func(*os.Process, os.Signal) error { return syscall.ESRCH }
-	if pidAlive(os.Getpid()) {
-		t.Error("ESRCH (no such process) should be dead")
 	}
 }
 

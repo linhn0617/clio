@@ -28,16 +28,16 @@ func TestReconcileDetectsTruncation(t *testing.T) {
 		src, 22, 1, 22, "fp", 1); err != nil {
 		t.Fatal(err)
 	}
-	if m, _, _, tr, _, _, _ := reconcile(d, []string{dir}); m != 0 || tr != 0 {
-		t.Fatalf("expected clean before truncation, got missing=%d truncated=%d", m, tr)
+	if st, _ := reconcile(d, []string{dir}, time.Now()); st.missing != 0 || st.truncated != 0 {
+		t.Fatalf("expected clean before truncation, got missing=%d truncated=%d", st.missing, st.truncated)
 	}
 
 	// Truncate the source file.
 	if err := os.WriteFile(src, []byte("0123\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, tr, _, _, _ := reconcile(d, []string{dir}); tr != 1 {
-		t.Fatalf("expected 1 truncated, got %d", tr)
+	if st, _ := reconcile(d, []string{dir}, time.Now()); st.truncated != 1 {
+		t.Fatalf("expected 1 truncated, got %d", st.truncated)
 	}
 }
 
@@ -67,8 +67,8 @@ func TestReconcileDetectsSameSizeRewrite(t *testing.T) {
 		src, fi.Size(), fi.ModTime().UnixNano(), fi.Size(), "fp", 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, _, rw, _, _ := reconcile(d, []string{dir}); rw != 0 {
-		t.Fatalf("expected clean before rewrite, got rewritten=%d", rw)
+	if st, _ := reconcile(d, []string{dir}, time.Now()); st.rewritten != 0 {
+		t.Fatalf("expected clean before rewrite, got rewritten=%d", st.rewritten)
 	}
 
 	// Same-size rewrite: identical length, different content, distinct mtime (forced via
@@ -84,8 +84,8 @@ func TestReconcileDetectsSameSizeRewrite(t *testing.T) {
 	if err := os.Chtimes(src, newMTime, newMTime); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, tr, rw, _, _ := reconcile(d, []string{dir}); tr != 0 || rw != 1 {
-		t.Fatalf("expected the same-size rewrite detected (rewritten=1, truncated=0), got truncated=%d rewritten=%d", tr, rw)
+	if st, _ := reconcile(d, []string{dir}, time.Now()); st.truncated != 0 || st.rewritten != 1 {
+		t.Fatalf("expected the same-size rewrite detected (rewritten=1, truncated=0), got truncated=%d rewritten=%d", st.truncated, st.rewritten)
 	}
 }
 
@@ -98,8 +98,8 @@ func TestReconcileDetectsMissing(t *testing.T) {
 	defer d.Close()
 	d.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at) VALUES (?,?,?,?,?,?)`,
 		filepath.Join(dir, "gone.jsonl"), 10, 1, 10, "fp", 1)
-	if m, _, _, _, _, _, _ := reconcile(d, []string{dir}); m != 1 {
-		t.Fatalf("expected 1 missing, got %d", m)
+	if st, _ := reconcile(d, []string{dir}, time.Now()); st.missing != 1 {
+		t.Fatalf("expected 1 missing, got %d", st.missing)
 	}
 }
 
@@ -355,7 +355,8 @@ func TestReconcileFlagsUnverifiable(t *testing.T) {
 	defer d.Close()
 	d.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at) VALUES (?,?,?,?,?,?)`,
 		filepath.Join(notDir, "child.jsonl"), 10, 1, 10, "fp", 1)
-	m, _, _, _, _, _, rerr := reconcile(d, []string{dir})
+	st, rerr := reconcile(d, []string{dir}, time.Now())
+	m := st.missing
 	if rerr != nil {
 		t.Fatalf("unexpected error: %v", rerr)
 	}
@@ -375,7 +376,8 @@ func TestReconcilePreservesFilesUnderUnavailableRoot(t *testing.T) {
 	// is preservation (the root is unavailable), not a deletion.
 	d.Exec(`INSERT INTO ingest_state(source_file,last_size,last_mtime,last_byte_offset,tail_fingerprint,last_ingested_at) VALUES (?,?,?,?,?,?)`,
 		filepath.Join(dir, "unavailable-root", "rollout-x.jsonl"), 10, 1, 10, "fp", 1)
-	m, preserved, _, _, _, _, rerr := reconcile(d, []string{filepath.Join(dir, "available-root")})
+	st, rerr := reconcile(d, []string{filepath.Join(dir, "available-root")}, time.Now())
+	m, preserved := st.missing, st.preserved
 	if rerr != nil {
 		t.Fatal(rerr)
 	}
@@ -648,7 +650,8 @@ func TestReconcileCountsRetainedNotMissing(t *testing.T) {
 		filepath.Join(dir, "kept.jsonl"), filepath.Join(dir, "gone.jsonl")); err != nil {
 		t.Fatal(err)
 	}
-	m, preserved, retained, _, _, _, rerr := reconcile(d, []string{dir})
+	st, rerr := reconcile(d, []string{dir}, time.Now())
+	m, preserved, retained := st.missing, st.preserved, st.retained
 	if rerr != nil {
 		t.Fatal(rerr)
 	}

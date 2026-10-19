@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -145,14 +144,8 @@ func (l *Lease) live(rec *record) bool {
 // Used by CLI commands to defer to a running MCP writer.
 // This is a lock-free best-effort read; no mutex is used.
 func IsHeld(path string) bool {
-	rec, err := readRecord(path)
-	if err != nil || rec == nil {
-		return false
-	}
-	if rec.pid != os.Getpid() && !pidAlive(rec.pid) {
-		return false
-	}
-	return time.Now().Unix()-rec.ts <= int64(DefaultTTL/time.Second)
+	st, err := Inspect(path)
+	return err == nil && st.Present && !st.Malformed && st.Fresh
 }
 
 // WithFileLock runs fn while holding an exclusive cross-process advisory lock keyed on
@@ -206,14 +199,3 @@ func writeRecordAtomic(path string, pid int, nonce uint64, ts int64) error {
 
 // signalProc is a seam so tests can simulate signal outcomes (e.g. EPERM).
 var signalProc = func(p *os.Process, sig os.Signal) error { return p.Signal(sig) }
-
-func pidAlive(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// EPERM means the process exists but we lack permission to signal it (e.g. a
-	// different user) — still alive, so don't steal its lease.
-	serr := signalProc(proc, syscall.Signal(0))
-	return serr == nil || errors.Is(serr, syscall.EPERM)
-}
