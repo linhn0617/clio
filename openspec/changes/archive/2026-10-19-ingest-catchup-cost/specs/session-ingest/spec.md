@@ -19,6 +19,13 @@ processes. On the read path this attempt SHALL NOT wait for a busy writer or
 produce a warning; correctness SHALL NOT depend on its success.
 When the maximum ID equals the watermark, backfill SHALL perform no write.
 
+#### Scenario: Existing history is backfilled
+
+- **WHEN** the activity index is added to a database that already contains
+  tool_use messages
+- **THEN** activity queries SHALL return facts for those historical messages
+  without requiring a full re-ingest
+
 #### Scenario: Upgrade with unchanged files
 
 - **WHEN** an upgraded database has historical tool_use messages without targets and no new files
