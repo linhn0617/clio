@@ -29,7 +29,7 @@ func sessionStartGroups(t *testing.T, root map[string]any) []any {
 	return ss
 }
 
-func TestAddSessionStartHookPreservesExisting(t *testing.T) {
+func TestInstallRecallHookPreservesExisting(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{
 		"theme":"dark",
@@ -38,7 +38,7 @@ func TestAddSessionStartHookPreservesExisting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := AddSessionStartHook(path, "/Users/lin/go/bin/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/Users/lin/go/bin/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
 	if has, _ := HasSessionStartHook(path); !has {
@@ -65,12 +65,12 @@ func TestAddSessionStartHookPreservesExisting(t *testing.T) {
 	}
 }
 
-func TestAddSessionStartHookIdempotent(t *testing.T) {
+func TestInstallRecallHookIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	if err := AddSessionStartHook(path, "/x/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/x/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddSessionStartHook(path, "/x/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/x/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
 	if ss := sessionStartGroups(t, readSettings(t, path)); len(ss) != 1 {
@@ -78,7 +78,7 @@ func TestAddSessionStartHookIdempotent(t *testing.T) {
 	}
 }
 
-func TestRemoveSessionStartHookKeepsCoGroupedHook(t *testing.T) {
+func TestUninstallRecallHookKeepsCoGroupedHook(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	// clio's hook shares a single group with an unrelated hook.
 	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[
@@ -89,7 +89,7 @@ func TestRemoveSessionStartHookKeepsCoGroupedHook(t *testing.T) {
 	]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := RemoveSessionStartHook(path); err != nil {
+	if err := RemoveClioHooks(path); err != nil {
 		t.Fatal(err)
 	}
 	root := readSettings(t, path)
@@ -117,7 +117,7 @@ func TestIsClioRecallDoesNotFalseMatch(t *testing.T) {
 	}
 }
 
-func TestRemoveSessionStartHookKeepsOthers(t *testing.T) {
+func TestUninstallRecallHookKeepsOthers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[
 		{"hooks":[{"type":"command","command":"/opt/security-scan.sh"}]},
@@ -125,7 +125,7 @@ func TestRemoveSessionStartHookKeepsOthers(t *testing.T) {
 	]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := RemoveSessionStartHook(path); err != nil {
+	if err := RemoveClioHooks(path); err != nil {
 		t.Fatal(err)
 	}
 	if has, _ := HasSessionStartHook(path); has {
@@ -147,7 +147,7 @@ func preToolUseGroups(t *testing.T, root map[string]any) []any {
 	return pt
 }
 
-func TestAddPreToolUseReadHookPreservesExistingGroup(t *testing.T) {
+func TestInstallFileHistoryHookPreservesExistingGroup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{
 		"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"/opt/read-gate.sh"}]}],
@@ -155,7 +155,7 @@ func TestAddPreToolUseReadHookPreservesExistingGroup(t *testing.T) {
 	}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddPreToolUseReadHook(path, "/Users/lin/go/bin/clio file-history --hook"); err != nil {
+	if err := AddClioHooks(path, "/x/clio recall", "/Users/lin/go/bin/clio file-history --hook"); err != nil {
 		t.Fatal(err)
 	}
 	if has, _ := HasPreToolUseReadHook(path); !has {
@@ -186,17 +186,17 @@ func TestAddPreToolUseReadHookPreservesExistingGroup(t *testing.T) {
 		t.Fatalf("clio group missing or matcher != Read|Bash: %#v", clio)
 	}
 	if len(sessionStartGroups(t, root)) != 1 {
-		t.Error("SessionStart must be untouched by the PreToolUse add")
+		t.Error("the existing recall hook must not be duplicated by the install")
 	}
 }
 
-func TestAddPreToolUseReadHookIdempotent(t *testing.T) {
+func TestInstallFileHistoryHookIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		if err := AddPreToolUseReadHook(path, "/x/clio file-history --hook"); err != nil {
+		if err := AddClioHooks(path, "/x/clio recall", "/x/clio file-history --hook"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -205,7 +205,7 @@ func TestAddPreToolUseReadHookIdempotent(t *testing.T) {
 	}
 }
 
-func TestRemovePreToolUseReadHookKeepsOthersAndDeletesEmptyKey(t *testing.T) {
+func TestUninstallFileHistoryHookKeepsOthersAndDeletesEmptyKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	// clio's entry co-grouped with a foreign Read hook, plus a foreign-only group.
 	if err := os.WriteFile(path, []byte(`{
@@ -216,7 +216,7 @@ func TestRemovePreToolUseReadHookKeepsOthersAndDeletesEmptyKey(t *testing.T) {
 	}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := RemovePreToolUseReadHook(path); err != nil {
+	if err := RemoveClioHooks(path); err != nil {
 		t.Fatal(err)
 	}
 	root := readSettings(t, path)
@@ -240,7 +240,7 @@ func TestRemovePreToolUseReadHookKeepsOthersAndDeletesEmptyKey(t *testing.T) {
 	if err := os.WriteFile(path2, []byte(`{"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"/x/clio file-history --hook"}]}]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := RemovePreToolUseReadHook(path2); err != nil {
+	if err := RemoveClioHooks(path2); err != nil {
 		t.Fatal(err)
 	}
 	hooks, _ := readSettings(t, path2)["hooks"].(map[string]any)
@@ -251,7 +251,7 @@ func TestRemovePreToolUseReadHookKeepsOthersAndDeletesEmptyKey(t *testing.T) {
 
 // An entry parked under a matcher that does not cover Read and Bash is the user's
 // choice: install leaves it, adds nothing, and says so; removal still clears it.
-func TestAddPreToolUseReadHookLeavesWrongMatcherAndWarns(t *testing.T) {
+func TestInstallFileHistoryHookLeavesWrongMatcherAndWarns(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/x/clio file-history --hook"}]}]}}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -259,7 +259,7 @@ func TestAddPreToolUseReadHookLeavesWrongMatcherAndWarns(t *testing.T) {
 	if has, _ := HasPreToolUseReadHook(path); has {
 		t.Fatal("an entry under matcher Bash must not count as installed")
 	}
-	res, err := InstallPreToolUseReadHook(path, "/x/clio file-history --hook")
+	res, err := InstallClioHooks(path, "/x/clio recall", "/x/clio file-history --hook")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,6 +293,30 @@ func TestAddClioHooksEmptyFileHistoryRemovesExisting(t *testing.T) {
 	}
 	if len(sessionStartGroups(t, root)) != 1 {
 		t.Error("recall hook must stay")
+	}
+}
+
+// A recall-only install (empty file-history command, the --no-file-context
+// path the recall-hook tests use) removes only clio's own file-history entry:
+// foreign PreToolUse hooks, co-grouped or not, are left exactly as they were.
+func TestAddClioHooksRecallOnlyKeepsForeignPreToolUse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"PreToolUse":[
+		{"matcher":"Read","hooks":[{"type":"command","command":"/opt/read-gate.sh"},{"type":"command","command":"/x/clio file-history --hook"}]},
+		{"matcher":"Bash","hooks":[{"type":"command","command":"/opt/bash-gate.sh","timeout":5}]}
+	]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddClioHooks(path, "/x/clio recall", ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err := json.Marshal(preToolUseGroups(t, readSettings(t, path)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"hooks":[{"command":"/opt/read-gate.sh","type":"command"}],"matcher":"Read"},{"hooks":[{"command":"/opt/bash-gate.sh","timeout":5,"type":"command"}],"matcher":"Bash"}]`
+	if string(got) != want {
+		t.Fatalf("foreign PreToolUse changed:\n got %s\nwant %s", got, want)
 	}
 }
 
@@ -417,9 +441,9 @@ func clioRecallEntry(t *testing.T, g map[string]any) map[string]any {
 
 // The recall hook skips `fork` (it inherits the parent's context) and carries a
 // short timeout so a cold-cache index can never stall startup for 600 s.
-func TestAddSessionStartHookWritesMatcherAndTimeout(t *testing.T) {
+func TestInstallRecallHookWritesMatcherAndTimeout(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	if err := AddSessionStartHook(path, "/x/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/x/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
 	gs := recallGroups(t, readSettings(t, path))
@@ -436,7 +460,7 @@ func TestAddSessionStartHookWritesMatcherAndTimeout(t *testing.T) {
 
 // An entry written by an older clio (no matcher, no timeout) is upgraded where
 // it sits, not duplicated.
-func TestAddSessionStartHookUpgradesLegacyInPlace(t *testing.T) {
+func TestInstallRecallHookUpgradesLegacyInPlace(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[
 		{"hooks":[{"type":"command","command":"/opt/scan.sh"}]},
@@ -447,7 +471,7 @@ func TestAddSessionStartHookUpgradesLegacyInPlace(t *testing.T) {
 	if legacy, _ := HasLegacySessionStartHook(path); !legacy {
 		t.Fatal("legacy shape should be detected before upgrade")
 	}
-	if err := AddSessionStartHook(path, "/new/bin/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/new/bin/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
 	root := readSettings(t, path)
@@ -469,7 +493,7 @@ func TestAddSessionStartHookUpgradesLegacyInPlace(t *testing.T) {
 		t.Error("no legacy entry should remain")
 	}
 	// A second run is a no-op.
-	if err := AddSessionStartHook(path, "/new/bin/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/new/bin/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(sessionStartGroups(t, readSettings(t, path))); n != 2 {
@@ -479,14 +503,14 @@ func TestAddSessionStartHookUpgradesLegacyInPlace(t *testing.T) {
 
 // A legacy clio entry co-grouped with a foreign hook moves to its own matched
 // group; the foreign hook keeps firing on every event as before.
-func TestAddSessionStartHookUpgradesCoGroupedLegacy(t *testing.T) {
+func TestInstallRecallHookUpgradesCoGroupedLegacy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[
 		{"hooks":[{"type":"command","command":"/opt/scan.sh"},{"type":"command","command":"/x/clio recall"}]}
 	]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddSessionStartHook(path, "/x/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/x/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
 	root := readSettings(t, path)
@@ -505,13 +529,13 @@ func TestAddSessionStartHookUpgradesCoGroupedLegacy(t *testing.T) {
 }
 
 // A recall entry the user placed under their own matcher is theirs: left as is.
-func TestAddSessionStartHookKeepsCustomMatcher(t *testing.T) {
+func TestInstallRecallHookKeepsCustomMatcher(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	orig := `{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"/x/clio recall"}]}]}}`
 	if err := os.WriteFile(path, []byte(orig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddSessionStartHook(path, "/x/clio recall"); err != nil {
+	if err := AddClioHooks(path, "/x/clio recall", ""); err != nil {
 		t.Fatal(err)
 	}
 	gs := recallGroups(t, readSettings(t, path))
@@ -660,7 +684,7 @@ func TestAddPreToolUseHookUpgradesReadOnlyGroupInPlace(t *testing.T) {
 	path := installPT(t, `[{"matcher":"Edit","hooks":[{"type":"command","command":"/opt/e.sh"}]},
 		{"matcher":" Read ","note":"keep me","hooks":[{"type":"command","command":"`+clioFH+`","timeout":5}]},
 		{"matcher":"Write","hooks":[{"type":"command","command":"/opt/w.sh"}]}]`)
-	res, err := InstallPreToolUseReadHook(path, clioFH)
+	res, err := InstallClioHooks(path, "/x/clio recall", clioFH)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -685,7 +709,7 @@ func TestAddPreToolUseHookUpgradesReadOnlyGroupInPlace(t *testing.T) {
 // entry moves to its own Read|Bash group.
 func TestAddPreToolUseHookMixedReadGroupMovesClioOut(t *testing.T) {
 	path := installPT(t, `[{"matcher":"Read","hooks":[{"type":"command","command":"/opt/gate.sh"},{"type":"command","command":"`+clioFH+`","timeout":10}]}]`)
-	res, err := InstallPreToolUseReadHook(path, clioFH)
+	res, err := InstallClioHooks(path, "/x/clio recall", clioFH)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -717,7 +741,7 @@ func TestAddPreToolUseHookRepeatInstallsConverge(t *testing.T) {
 	if has, _ := HasPreToolUseReadHook(path); !has {
 		t.Error("Read|Bash group counts as installed")
 	}
-	res, _ := InstallPreToolUseReadHook(path, clioFH)
+	res, _ := InstallClioHooks(path, "/x/clio recall", clioFH)
 	if res != (FileHistoryInstall{}) {
 		t.Errorf("a settled install must report nothing, got %+v", res)
 	}
@@ -728,7 +752,7 @@ func TestAddPreToolUseHookDedupesWhenBothMatchersPresent(t *testing.T) {
 	path := installPT(t, `[
 		{"matcher":"Read","hooks":[{"type":"command","command":"`+clioFH+`"}]},
 		{"matcher":"Read|Bash","hooks":[{"type":"command","command":"`+clioFH+`"}]}]`)
-	res, err := InstallPreToolUseReadHook(path, clioFH)
+	res, err := InstallClioHooks(path, "/x/clio recall", clioFH)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -746,7 +770,7 @@ func TestAddPreToolUseHookLegacyLeftoverCollapsed(t *testing.T) {
 	path := installPT(t, `[
 		{"matcher":"Read|Bash","hooks":[{"type":"command","command":"`+clioFH+`"}]},
 		{"matcher":"Read","hooks":[{"type":"command","command":"/opt/gate.sh"},{"type":"command","command":"`+clioFH+`"}]}]`)
-	res, _ := InstallPreToolUseReadHook(path, clioFH)
+	res, _ := InstallClioHooks(path, "/x/clio recall", clioFH)
 	if res.Collapsed != 1 || res.Upgraded {
 		t.Errorf("result = %+v", res)
 	}
@@ -762,7 +786,7 @@ func TestAddPreToolUseHookCollapsesDuplicates(t *testing.T) {
 		{"matcher":"Read|Bash","hooks":[{"type":"command","command":"`+clioFH+`"}]},
 		{"matcher":"*","hooks":[{"type":"command","command":"/opt/gate.sh"},{"type":"command","command":"`+clioFH+`"}]},
 		{"matcher":"Read|Bash","hooks":[{"type":"command","command":"`+clioFH+`"}]}]`)
-	res, _ := InstallPreToolUseReadHook(path, clioFH)
+	res, _ := InstallClioHooks(path, "/x/clio recall", clioFH)
 	if res.Collapsed != 2 {
 		t.Errorf("Collapsed = %d, want 2", res.Collapsed)
 	}
@@ -789,7 +813,7 @@ func TestAddPreToolUseHookInstallDecisionByCoverage(t *testing.T) {
 		"Read|Edit": true, "Bash": true, "^Read$": true, "Rea.": true, "Edit": true, "Rea": true, "^Edit$": true, "mcp__.*": true,
 	} {
 		path := installPT(t, `[{"matcher":"`+matcher+`","hooks":[{"type":"command","command":"`+clioFH+`"}]}]`)
-		res, err := InstallPreToolUseReadHook(path, clioFH)
+		res, err := InstallClioHooks(path, "/x/clio recall", clioFH)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -809,7 +833,7 @@ func TestAddPreToolUseHookInstallDecisionByCoverage(t *testing.T) {
 	}
 	// A group without any matcher key matches everything.
 	path := installPT(t, `[{"hooks":[{"type":"command","command":"`+clioFH+`"}]}]`)
-	if res, _ := InstallPreToolUseReadHook(path, clioFH); res != (FileHistoryInstall{}) {
+	if res, _ := InstallClioHooks(path, "/x/clio recall", clioFH); res != (FileHistoryInstall{}) {
 		t.Errorf("no-matcher group is fully installed, got %+v", res)
 	}
 }
@@ -819,7 +843,7 @@ func TestAddPreToolUseHookLegacyReadUpgradesBesideUserEntry(t *testing.T) {
 	path := installPT(t, `[
 		{"matcher":"Edit","hooks":[{"type":"command","command":"`+clioFH+`"}]},
 		{"matcher":"Read","hooks":[{"type":"command","command":"`+clioFH+`"}]}]`)
-	res, _ := InstallPreToolUseReadHook(path, clioFH)
+	res, _ := InstallClioHooks(path, "/x/clio recall", clioFH)
 	if !res.Upgraded || res.Misplaced != "" {
 		t.Errorf("result = %+v", res)
 	}
@@ -832,7 +856,7 @@ func TestAddPreToolUseHookLegacyReadUpgradesBesideUserEntry(t *testing.T) {
 // No clio entry anywhere: a Read|Bash group is added and reported.
 func TestAddPreToolUseHookAddsWhenAbsent(t *testing.T) {
 	path := installPT(t, `[{"matcher":"Bash","hooks":[{"type":"command","command":"/opt/other.sh"}]}]`)
-	res, _ := InstallPreToolUseReadHook(path, clioFH)
+	res, _ := InstallClioHooks(path, "/x/clio recall", clioFH)
 	if !res.Added || res.Misplaced != "" {
 		t.Errorf("result = %+v", res)
 	}

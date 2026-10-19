@@ -1,7 +1,11 @@
 package mcp
 
 import (
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/linhn0617/clio/internal/registry"
 )
@@ -113,5 +117,26 @@ func TestHandleReadSessionDefaultSourceComesFromRegistry(t *testing.T) {
 	r2 := call(t, handleReadSession(d, nil), map[string]any{"uuid": "cx1"})
 	if !r2.IsError {
 		t.Fatal("expected the codex session to be out of scope under the registry default source")
+	}
+}
+
+// An ambiguous read_session prefix lists candidates with the same RFC 3339
+// times every other MCP tool returns.
+func TestHandleReadSessionAmbiguousUsesRFC3339(t *testing.T) {
+	d := testDB(t)
+	ts := time.Date(2026, 10, 1, 9, 30, 0, 0, time.Local).Unix()
+	for _, u := range []string{"amb-1", "amb-2"} {
+		if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, source) VALUES (?,?,?,?,?,?,?,?)`,
+			u, "/p", u+".jsonl", ts, ts, 1, "t", "claude-code"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "amb", "source": "claude-code"})
+	if !r.IsError || len(r.Content) == 0 {
+		t.Fatalf("want an error result, got %+v", r)
+	}
+	text := r.Content[0].(mcp.TextContent).Text
+	if !strings.Contains(text, tsString(ts)) || !strings.Contains(text, "amb-1") || strings.Contains(text, time.Unix(ts, 0).Format("2006-01-02 15:04")) {
+		t.Fatalf("want RFC 3339 candidate times:\n%s", text)
 	}
 }

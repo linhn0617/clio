@@ -3,11 +3,14 @@ package sessions
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/linhn0617/clio/internal/db"
 )
@@ -242,8 +245,254 @@ func TestResolvePrefixAmbiguous(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "abc111", "/p", 1)
 	addSession(t, d, "abc222", "/p", 1)
-	if _, err := ResolvePrefix(context.Background(), d, "abc", ""); err != ErrAmbiguous {
+	if _, err := ResolvePrefix(context.Background(), d, "abc", ""); !errors.Is(err, ErrAmbiguous) {
 		t.Fatalf("expected ErrAmbiguous, got %v", err)
+	}
+}
+
+func addCandidate(t *testing.T, d *db.DB, uuid, parent, source, title string, started int64) {
+	t.Helper()
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, started_at, ended_at, turn_count, title, parent_session, source) VALUES (?,?,?,?,?,?,?,NULLIF(?,''),?)`,
+		uuid, "/p", uuid+".jsonl", started, started, 1, title, parent, source); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func ambiguousErr(t *testing.T, d *db.DB, prefix string) *AmbiguousError {
+	t.Helper()
+	_, err := ResolvePrefix(context.Background(), d, prefix, "")
+	var amb *AmbiguousError
+	if !errors.As(err, &amb) || !errors.Is(err, ErrAmbiguous) {
+		t.Fatalf("want *AmbiguousError matching ErrAmbiguous for %q, got %T %v", prefix, err, err)
+	}
+	return amb
+}
+
+// Every listed id, retyped, resolves to exactly that session.
+func assertIDsResolve(t *testing.T, d *db.DB, amb *AmbiguousError) {
+	t.Helper()
+	for _, c := range amb.Candidates {
+		got, err := ResolvePrefix(context.Background(), d, c.ID, "")
+		if err != nil || got.UUID != c.UUID {
+			t.Errorf("listed id %q does not resolve to %s: got %q err=%v", c.ID, c.UUID, got.UUID, err)
+		}
+	}
+}
+
+// An ambiguous prefix lists at most maxAmbiguousCandidates sessions, newest
+// first, with a more-line, a single-line escape-free title and RFC 3339 times
+// in Error(); Render takes the caller's formatting.
+func TestResolvePrefixAmbiguousListsCandidates(t *testing.T) {
+	d := testDB(t)
+	base := time.Date(2026, 10, 1, 9, 0, 0, 0, time.Local).Unix()
+	for i := 0; i < 12; i++ {
+		addCandidate(t, d, fmt.Sprintf("abcdef12-%04d", i), "", "claude-code", fmt.Sprintf("title %d\nsecond line\x1b[31m", i), base+int64(i)*3600)
+	}
+	amb := ambiguousErr(t, d, "abc")
+	if len(amb.Candidates) != maxAmbiguousCandidates || !amb.More {
+		t.Fatalf("want %d candidates and More, got %d more=%v", maxAmbiguousCandidates, len(amb.Candidates), amb.More)
+	}
+	if amb.Candidates[0].UUID != "abcdef12-0011" || amb.Candidates[maxAmbiguousCandidates-1].UUID != "abcdef12-0002" {
+		t.Fatalf("candidates not newest first: first %s last %s", amb.Candidates[0].UUID, amb.Candidates[len(amb.Candidates)-1].UUID)
+	}
+	msg := amb.Error()
+	for _, want := range []string{`"abc"`, "abcdef12-0011", "title 11 second line", time.Unix(base+11*3600, 0).Format(time.RFC3339), "more"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message lacks %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "abcdef12-0001") || strings.Contains(msg, "\x1b") {
+		t.Errorf("message lists an 11th candidate or keeps a terminal escape:\n%s", msg)
+	}
+	if got := strings.Count(msg, "\n"); got != maxAmbiguousCandidates+1 {
+		t.Errorf("want header + %d candidate lines + more line, got %d newlines:\n%s", maxAmbiguousCandidates, got, msg)
+	}
+	custom := amb.Render(func(int64) string { return "T" }, func(string) string { return "X" })
+	if !strings.Contains(custom, "\n  abcdef12-0011  T  X") {
+		t.Errorf("Render ignores the caller's formatting:\n%s", custom)
+	}
+}
+
+// Shown ids are the shortest prefix (at least 8 characters, or the whole id)
+// that resolves to that session alone across the whole index, including
+// sessions beyond the listed ones, and never another session's exact id.
+func TestResolvePrefixAmbiguousIDsResolve(t *testing.T) {
+	d := testDB(t)
+	addCandidate(t, d, "abc11111-x", "", "claude-code", "a", 3)
+	addCandidate(t, d, "abc22222-y", "", "claude-code", "b", 2)
+	addCandidate(t, d, "ab1", "", "claude-code", "short", 1)
+	amb := ambiguousErr(t, d, "ab")
+	ids := map[string]string{}
+	for _, c := range amb.Candidates {
+		ids[c.UUID] = c.ID
+	}
+	if ids["abc11111-x"] != "abc11111" || ids["abc22222-y"] != "abc22222" || ids["ab1"] != "ab1" {
+		t.Fatalf("want 8-char ids and the whole short id, got %v", ids)
+	}
+	assertIDsResolve(t, d, amb)
+
+	// 12 sessions: the 10 newest are listed; an unlisted older one shares the
+	// listed m0000010's 9-character prefix, so the shown id must be longer.
+	d2 := testDB(t)
+	for i := 0; i < 11; i++ {
+		addCandidate(t, d2, fmt.Sprintf("m%07d-x", i), "", "claude-code", "t", int64(100+i))
+	}
+	addCandidate(t, d2, "m0000010-y", "", "claude-code", "t", 1)
+	amb2 := ambiguousErr(t, d2, "m")
+	if !amb2.More || amb2.Candidates[0].UUID != "m0000010-x" || amb2.Candidates[0].ID != "m0000010-x" {
+		t.Fatalf("listed id must distinguish from the unlisted m0000010-y: %+v", amb2.Candidates[0])
+	}
+	assertIDsResolve(t, d2, amb2)
+
+	// A prefix that is another session's exact id (in another source) would
+	// resolve to that session, so it is not offered.
+	d3 := testDB(t)
+	addCandidate(t, d3, "abcdefgh-1x", "", "claude-code", "t", 2)
+	addCandidate(t, d3, "abcdefgh-2", "", "claude-code", "t", 1)
+	addCandidate(t, d3, "abcdefgh-1", "", "codex", "t", 1)
+	amb3 := ambiguousErr(t, d3, "abc")
+	if amb3.Candidates[0].UUID != "abcdefgh-1x" || amb3.Candidates[0].ID != "abcdefgh-1x" {
+		t.Fatalf("offered another session's exact id instead of the full one: %+v", amb3.Candidates[0])
+	}
+	assertIDsResolve(t, d3, amb3)
+}
+
+// Top-level sessions are listed before subagents, which are tagged.
+func TestResolvePrefixAmbiguousSubagentsLast(t *testing.T) {
+	d := testDB(t)
+	addCandidate(t, d, "abc-parent", "", "claude-code", "parent", 50)
+	for i := 0; i < 10; i++ {
+		addCandidate(t, d, fmt.Sprintf("abc-agent-%d", i), "abc-parent", "claude-code", "parent", int64(60+i))
+	}
+	addCandidate(t, d, "abc-older", "", "claude-code", "wanted", 10)
+	amb := ambiguousErr(t, d, "abc")
+	if amb.Candidates[0].UUID != "abc-parent" || amb.Candidates[1].UUID != "abc-older" {
+		t.Fatalf("top-level sessions must come first: %s, %s", amb.Candidates[0].UUID, amb.Candidates[1].UUID)
+	}
+	msg := amb.Error()
+	if strings.Count(msg, "[subagent] ") != maxAmbiguousCandidates-2 || strings.Contains(msg, "[subagent] wanted") {
+		t.Errorf("subagents not tagged exactly:\n%s", msg)
+	}
+}
+
+// An id that is not plain printable text is shown quoted and escaped, so two
+// ids differing only by a control character stay visibly distinct; multi-byte
+// ids are cut on rune boundaries.
+func TestResolvePrefixAmbiguousIDDisplay(t *testing.T) {
+	d := testDB(t)
+	addCandidate(t, d, "abcdefg\x1bh", "", "claude-code", "t", 2)
+	addCandidate(t, d, "abcdefgh", "", "claude-code", "t", 1)
+	addCandidate(t, d, "abc中文中文中文中文-1", "", "claude-code", "t", 3)
+	addCandidate(t, d, "abc中文中文中文中文-2", "", "claude-code", "t", 4)
+	msg := ambiguousErr(t, d, "abc").Error()
+	if !strings.Contains(msg, `"abcdefg\x1b"`) || strings.Contains(msg, "\x1b") {
+		t.Errorf("control character not shown escaped:\n%s", msg)
+	}
+	if !utf8.ValidString(msg) || !strings.Contains(msg, "abc中文中文中文中文-1 ") {
+		t.Errorf("multi-byte id cut mid-rune or not lengthened:\n%s", msg)
+	}
+}
+
+// SQLite's LIKE decodes invalid UTF-8 differently from Go's bytewise view, so
+// when any matching id is invalid UTF-8 (or contains U+FFFD) the candidates are
+// listed with whole ids, which always resolve by exact match.
+func TestResolvePrefixAmbiguousInvalidUTF8ID(t *testing.T) {
+	for _, odd := range []string{"abcdefg\xffX1-long", "abcdefg\uFFFDX1-long"} {
+		d := testDB(t)
+		addCandidate(t, d, odd, "", "claude-code", "t", 3)
+		addCandidate(t, d, "abcdefg\xffY2-long", "", "claude-code", "t", 2)
+		addCandidate(t, d, "abcdefgZZ3-long", "", "claude-code", "t", 1)
+		amb := ambiguousErr(t, d, "abc")
+		for _, c := range amb.Candidates {
+			if c.ID != c.UUID {
+				t.Errorf("want the whole id beside an invalid one, got %q for %q", c.ID, c.UUID)
+			}
+		}
+		assertIDsResolve(t, d, amb)
+	}
+}
+
+// A session without a start time shows an empty time, as MCP's other tools do.
+func TestAmbiguousErrorZeroTimeEmpty(t *testing.T) {
+	amb := &AmbiguousError{Prefix: "ab", Candidates: []Candidate{{Session: Session{UUID: "abc11111-x", Title: "t"}, ID: "abc11111"}}}
+	if msg := amb.Error(); !strings.HasSuffix(msg, "\n  abc11111    t") {
+		t.Fatalf("zero time not rendered empty:\n%q", msg)
+	}
+}
+
+// LIKE folds ASCII case, so ids differing only in case share a prefix: the
+// shown id must go past the case-folded common prefix.
+func TestResolvePrefixAmbiguousCaseFoldedIDs(t *testing.T) {
+	d := testDB(t)
+	addCandidate(t, d, "ABCDEFGH-1x", "", "claude-code", "t", 2)
+	addCandidate(t, d, "abcdefgh-2x", "", "claude-code", "t", 1)
+	amb := ambiguousErr(t, d, "abc")
+	if amb.Candidates[0].ID != "ABCDEFGH-1" || amb.Candidates[1].ID != "abcdefgh-2" {
+		t.Fatalf("want ids past the case-folded common prefix, got %q %q", amb.Candidates[0].ID, amb.Candidates[1].ID)
+	}
+	assertIDsResolve(t, d, amb)
+}
+
+// Ids with zero-width or bidi format characters are shown quoted, so they cannot
+// render like another candidate's id or reorder the line.
+func TestResolvePrefixAmbiguousInvisibleIDQuoted(t *testing.T) {
+	d := testDB(t)
+	addCandidate(t, d, "abcdefgh\u200b1", "", "claude-code", "t", 3)
+	addCandidate(t, d, "abcdefgh\u202e2", "", "claude-code", "t", 2)
+	addCandidate(t, d, "abcdefghij", "", "claude-code", "t", 1)
+	msg := ambiguousErr(t, d, "abc").Error()
+	if !strings.Contains(msg, `"abcdefgh\u200b"`) || !strings.Contains(msg, `"abcdefgh\u202e"`) || strings.ContainsAny(msg, "\u200b\u202e") {
+		t.Fatalf("invisible characters not shown escaped:\n%q", msg)
+	}
+	if !strings.Contains(msg, "\n  abcdefghi ") {
+		t.Fatalf("plain id should stay unquoted:\n%s", msg)
+	}
+}
+
+// A candidate without a start time keeps the title column aligned.
+func TestAmbiguousErrorAlignsMissingTime(t *testing.T) {
+	ts := time.Date(2026, 10, 1, 9, 30, 0, 0, time.Local).Unix()
+	amb := &AmbiguousError{Prefix: "ab", Candidates: []Candidate{
+		{Session: Session{UUID: "abc11111-x", StartedAt: ts, Title: "first"}, ID: "abc11111"},
+		{Session: Session{UUID: "abc22222-y", Title: "second"}, ID: "abc22222"},
+	}}
+	lines := strings.Split(amb.Error(), "\n")
+	if a, b := strings.Index(lines[1], "first"), strings.Index(lines[2], "second"); a < 0 || a != b {
+		t.Fatalf("title columns differ (%d vs %d):\n%s", a, b, amb.Error())
+	}
+}
+
+// A whitespace-only id is as missing as an empty one.
+func TestResolvePrefixBlankID(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "abc111", "/p", 1)
+	for _, id := range []string{" ", "\t", " \n "} {
+		if _, err := ResolvePrefix(context.Background(), d, id, ""); !errors.Is(err, ErrEmptyID) {
+			t.Fatalf("want ErrEmptyID for %q, got %v", id, err)
+		}
+	}
+}
+
+// GetSession is exact: a prefix of an existing id is not found.
+func TestGetSessionExactOnly(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "abc111", "/p", 1)
+	addSession(t, d, "abc222", "/p", 1)
+	if s, err := GetSession(context.Background(), d, "abc111"); err != nil || s.UUID != "abc111" {
+		t.Fatalf("exact lookup: %+v %v", s, err)
+	}
+	if _, err := GetSession(context.Background(), d, "abc"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("prefix must not resolve in GetSession, got %v", err)
+	}
+}
+
+// An empty id is a missing argument: it lists nothing.
+func TestResolvePrefixEmptyID(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "abc111", "/p", 1)
+	addSession(t, d, "abc222", "/p", 1)
+	if _, err := ResolvePrefix(context.Background(), d, "", ""); !errors.Is(err, ErrEmptyID) {
+		t.Fatalf("want ErrEmptyID, got %v", err)
 	}
 }
 

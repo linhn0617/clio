@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"errors"
 	"strings"
 	"time"
 
+	"github.com/linhn0617/clio/internal/sessions"
 	"github.com/linhn0617/clio/internal/termsafe"
 	"github.com/linhn0617/clio/internal/timeutil"
 )
@@ -29,14 +31,7 @@ func formatTS(ts int64) string {
 }
 
 // oneLine also strips terminal escapes: every caller prints indexed text.
-func oneLine(s string, max int) string {
-	s = strings.ReplaceAll(strings.TrimSpace(termsafe.Strip(s)), "\n", " ")
-	r := []rune(s)
-	if len(r) > max {
-		return string(r[:max]) + "…"
-	}
-	return s
-}
+func oneLine(s string, max int) string { return termsafe.OneLine(s, max) }
 
 func trimProject(p string) string {
 	p = termsafe.Strip(p)
@@ -47,4 +42,14 @@ func trimProject(p string) string {
 		return p[i+1:]
 	}
 	return p
+}
+
+// resolveError renders an ambiguous session id with the same time and title
+// formatting as `clio list`.
+func resolveError(err error) error {
+	var amb *sessions.AmbiguousError
+	if errors.As(err, &amb) {
+		return errors.New(amb.Render(formatTS, func(t string) string { return oneLine(t, 60) }))
+	}
+	return err
 }

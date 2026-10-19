@@ -37,3 +37,13 @@ func TestParseSinceInvalid(t *testing.T) {
 		t.Fatal("expected error for invalid input")
 	}
 }
+
+func TestFormatRFC3339(t *testing.T) {
+	ts := time.Date(2026, 10, 1, 9, 30, 0, 0, time.Local).Unix()
+	if got := FormatRFC3339(ts); got != time.Unix(ts, 0).Format(time.RFC3339) {
+		t.Fatalf("got %q", got)
+	}
+	if got := FormatRFC3339(0); got != "" {
+		t.Fatalf("zero must render empty, got %q", got)
+	}
+}

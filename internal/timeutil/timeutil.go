@@ -36,3 +36,12 @@ func ParseSince(s string) (int64, error) {
 	}
 	return 0, fmt.Errorf("invalid time %q (use 7d, 12h, 30m, or YYYY-MM-DD)", s)
 }
+
+// FormatRFC3339 renders a unix timestamp as local RFC 3339, the time format of
+// every MCP tool; 0 (unknown) renders empty.
+func FormatRFC3339(ts int64) string {
+	if ts == 0 {
+		return ""
+	}
+	return time.Unix(ts, 0).Format(time.RFC3339)
+}

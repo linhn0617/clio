@@ -8,9 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/linhn0617/clio/internal/db"
+	"github.com/linhn0617/clio/internal/termsafe"
+	"github.com/linhn0617/clio/internal/timeutil"
 )
 
 // Session is a row of the sessions table.
@@ -170,46 +175,65 @@ func pathUnderClause(col, path string) (string, []any) {
 	return ` AND (` + col + ` = ? OR substr(` + col + `, 1, length(?)) = ?)`, []any{p, p + "/", p + "/"}
 }
 
-// ErrNotFound / ErrAmbiguous report prefix resolution failures.
+// ErrNotFound / ErrAmbiguous / ErrEmptyID report prefix resolution failures.
 var (
 	ErrNotFound  = errors.New("no session matches that id")
 	ErrAmbiguous = errors.New("ambiguous session id prefix")
+	ErrEmptyID   = errors.New("session id is empty")
 )
+
+const sessionCols = `uuid, COALESCE(project_path,''), COALESCE(title,''), COALESCE(started_at,0), COALESCE(ended_at,0), turn_count, COALESCE(parent_session,''), COALESCE(agent_type,''), COALESCE(source,'claude-code')`
+
+func scanSession(sc interface{ Scan(...any) error }) (Session, error) {
+	var s Session
+	err := sc.Scan(&s.UUID, &s.ProjectPath, &s.Title, &s.StartedAt, &s.EndedAt, &s.TurnCount, &s.ParentSession, &s.AgentType, &s.Source)
+	return s, err
+}
+
+// GetSession returns the session with exactly this uuid, in any source, or
+// ErrNotFound. Unlike ResolvePrefix it never treats the id as a prefix.
+func GetSession(ctx context.Context, q Querier, uuid string) (Session, error) {
+	s, err := scanSession(q.QueryRowContext(ctx, `SELECT `+sessionCols+` FROM sessions WHERE uuid = ?`, uuid))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Session{}, ErrNotFound
+	}
+	return s, err
+}
 
 // ResolvePrefix resolves a full uuid or unambiguous prefix to a Session. An exact
 // uuid match is honored regardless of source (an exact id is explicit intent); a
 // prefix match is restricted to the requested source ("" / "claude-code" default),
-// so a short prefix never reaches across tools unless asked.
+// so a short prefix never reaches across tools unless asked. An ambiguous prefix
+// returns an *AmbiguousError listing the candidates. All reads share one
+// snapshot, so a concurrent ingest cannot make the listing disagree with the
+// ambiguity it reports.
 func ResolvePrefix(ctx context.Context, database *db.DB, prefix, source string) (Session, error) {
-	const cols = `uuid, COALESCE(project_path,''), COALESCE(title,''), COALESCE(started_at,0), COALESCE(ended_at,0), turn_count, COALESCE(parent_session,''), COALESCE(agent_type,''), COALESCE(source,'claude-code')`
-	// Exact match wins regardless of how many prefixes also match, and regardless of source.
-	var s Session
-	err := database.QueryRowContext(ctx, `SELECT `+cols+` FROM sessions WHERE uuid = ?`, prefix).
-		Scan(&s.UUID, &s.ProjectPath, &s.Title, &s.StartedAt, &s.EndedAt, &s.TurnCount, &s.ParentSession, &s.AgentType, &s.Source)
-	switch {
-	case err == nil:
-		return s, nil
-	case !errors.Is(err, sql.ErrNoRows):
-		return Session{}, err
+	// An empty or blank prefix would match every session; it is a missing
+	// argument, not a request to list the newest ones.
+	if strings.TrimSpace(prefix) == "" {
+		return Session{}, ErrEmptyID
 	}
-	// No exact match: resolve by unique prefix (escaped, cap 2 to detect ambiguity),
-	// scoped to the requested source.
-	srcClause, srcArgs := db.SourceFilter("source", source)
-	args := append([]any{db.EscapeLike(prefix) + "%"}, srcArgs...)
-	rows, err := database.QueryContext(ctx, `SELECT `+cols+` FROM sessions WHERE uuid LIKE ? ESCAPE '\'`+srcClause+` LIMIT 2`, args...)
+	tx, err := database.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return Session{}, err
 	}
-	defer rows.Close()
-	var matches []Session
-	for rows.Next() {
-		var m Session
-		if err := rows.Scan(&m.UUID, &m.ProjectPath, &m.Title, &m.StartedAt, &m.EndedAt, &m.TurnCount, &m.ParentSession, &m.AgentType, &m.Source); err != nil {
-			return Session{}, err
-		}
-		matches = append(matches, m)
+	defer tx.Rollback() // read-only: nothing to commit
+	// Exact match wins regardless of how many prefixes also match, and regardless of source.
+	s, err := GetSession(ctx, tx, prefix)
+	switch {
+	case err == nil:
+		return s, nil
+	case !errors.Is(err, ErrNotFound):
+		return Session{}, err
 	}
-	if err := rows.Err(); err != nil {
+	// No exact match: resolve by unique prefix (escaped), scoped to the requested
+	// source. Two rows are enough to detect ambiguity, so the common unique case
+	// stops early; only an ambiguous prefix pays for the ordered candidate query.
+	srcClause, srcArgs := db.SourceFilter("source", source)
+	like := db.EscapeLike(prefix) + "%"
+	matches, err := querySessions(ctx, tx, `SELECT `+sessionCols+` FROM sessions WHERE uuid LIKE ? ESCAPE '\'`+srcClause+` LIMIT 2`,
+		append([]any{like}, srcArgs...)...)
+	if err != nil {
 		return Session{}, err
 	}
 	switch len(matches) {
@@ -217,9 +241,201 @@ func ResolvePrefix(ctx context.Context, database *db.DB, prefix, source string) 
 		return Session{}, ErrNotFound
 	case 1:
 		return matches[0], nil
-	default:
-		return Session{}, ErrAmbiguous
 	}
+	return Session{}, ambiguous(ctx, tx, prefix, like, srcClause, srcArgs)
+}
+
+func querySessions(ctx context.Context, q Querier, query string, args ...any) ([]Session, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Session
+	for rows.Next() {
+		m, err := scanSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// ambiguous builds the *AmbiguousError for a prefix known to match several
+// sessions: top-level sessions before subagents, each group newest first.
+func ambiguous(ctx context.Context, q Querier, prefix, like, srcClause string, srcArgs []any) error {
+	args := append(append([]any{like}, srcArgs...), maxAmbiguousCandidates+1)
+	matches, err := querySessions(ctx, q, `SELECT `+sessionCols+` FROM sessions WHERE uuid LIKE ? ESCAPE '\'`+srcClause+
+		` ORDER BY COALESCE(parent_session,'') <> '', COALESCE(started_at,0) DESC, uuid LIMIT ?`, args...)
+	if err != nil {
+		return err
+	}
+	amb := &AmbiguousError{Prefix: prefix}
+	if len(matches) > maxAmbiguousCandidates {
+		matches, amb.More = matches[:maxAmbiguousCandidates], true
+	}
+	// Every session a shortened id could reach starts with prefix, so one read of
+	// the prefix's matches (all sources: an exact id wins across sources) is
+	// enough to pick each id.
+	rows, err := q.QueryContext(ctx, `SELECT uuid, CASE WHEN 1=1`+srcClause+` THEN 1 ELSE 0 END FROM sessions WHERE uuid LIKE ? ESCAPE '\'`,
+		append(append([]any{}, srcArgs...), like)...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var inScope []string
+	exact := map[string]bool{}
+	bytewise := true // byte comparison agrees with SQLite LIKE for these ids
+	for rows.Next() {
+		var u string
+		var scoped bool
+		if err := rows.Scan(&u, &scoped); err != nil {
+			return err
+		}
+		exact[u] = true
+		if scoped {
+			inScope = append(inScope, u)
+			bytewise = bytewise && likeSafe(u)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, m := range matches {
+		id := m.UUID // the whole id always resolves: an exact match wins
+		if bytewise {
+			id = resolvableID(m.UUID, inScope, exact)
+		}
+		amb.Candidates = append(amb.Candidates, Candidate{Session: m, ID: id})
+	}
+	return amb
+}
+
+// resolvableID is the shortest prefix of uuid (at least 8 characters, or the
+// whole id) that ResolvePrefix resolves back to this session: no other in-scope
+// session starts with it (LIKE folds ASCII case) and no session in any source
+// has it as its exact id. inScope holds every in-scope match of the typed
+// prefix (at least two), so the shared prefix already covers the typed one.
+// Callers use it only when every in-scope id is likeSafe, where LIKE matching
+// equals ASCII-folded byte-prefix matching.
+func resolvableID(uuid string, inScope []string, exact map[string]bool) string {
+	low := asciiLower(uuid)
+	longest := 0 // longest common prefix, in bytes, with another in-scope session
+	for _, u := range inScope {
+		if u == uuid {
+			continue
+		}
+		lu := asciiLower(u)
+		n := 0
+		for n < len(low) && n < len(lu) && low[n] == lu[n] {
+			n++
+		}
+		longest = max(longest, n)
+	}
+	chars := 0
+	for i := 0; i < len(uuid); {
+		_, size := utf8.DecodeRuneInString(uuid[i:])
+		i += size
+		chars++
+		if chars >= 8 && i > longest && i < len(uuid) && !exact[uuid[:i]] {
+			return uuid[:i]
+		}
+	}
+	return uuid
+}
+
+// likeSafe reports whether SQLite's LIKE sees id as the same characters Go's
+// byte comparison does: valid UTF-8 with no U+FFFD. SQLite decodes invalid
+// sequences differently (several byte patterns read as U+FFFD, a lead byte
+// absorbs following bytes), so a shortened id computed bytewise could fail to
+// resolve; such prefixes are listed with whole ids instead.
+func likeSafe(id string) bool {
+	return utf8.ValidString(id) && !strings.ContainsRune(id, utf8.RuneError)
+}
+
+// asciiLower folds ASCII letters only, matching SQLite's default LIKE.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
+// maxAmbiguousCandidates caps how many sessions an ambiguous prefix lists.
+const maxAmbiguousCandidates = 10
+
+// Candidate is one session an ambiguous prefix matched, with ID, a prefix of
+// its uuid that resolves to it alone.
+type Candidate struct {
+	Session
+	ID string
+}
+
+// AmbiguousError is returned for a prefix that matches several sessions. It
+// matches ErrAmbiguous under errors.Is. Callers render it with their own time and
+// title formatting via Render; Error uses RFC 3339 times.
+type AmbiguousError struct {
+	Prefix     string
+	Candidates []Candidate
+	More       bool // more sessions match than Candidates holds
+}
+
+func (e *AmbiguousError) Is(target error) bool { return target == ErrAmbiguous }
+
+func (e *AmbiguousError) Error() string {
+	return e.Render(timeutil.FormatRFC3339, func(t string) string { return termsafe.OneLine(t, 60) })
+}
+
+// Render lists the candidates, one per line, with the caller's time and title
+// formatting. Ids are padded to one width; an id that is not plain printable
+// text is shown quoted with escapes, so it stays visible and distinct.
+func (e *AmbiguousError) Render(formatTime func(int64) string, formatTitle func(string) string) string {
+	ids := make([]string, len(e.Candidates))
+	times := make([]string, len(e.Candidates))
+	idWidth, timeWidth := 0, 0
+	for i, c := range e.Candidates {
+		ids[i] = displayID(c.ID)
+		times[i] = formatTime(c.StartedAt)
+		idWidth = max(idWidth, utf8.RuneCountInString(ids[i]))
+		timeWidth = max(timeWidth, utf8.RuneCountInString(times[i]))
+	}
+	pad := func(s string, w int) string { return s + strings.Repeat(" ", w-utf8.RuneCountInString(s)) }
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s matches several sessions; use a longer id:", ErrAmbiguous, strconv.Quote(e.Prefix))
+	for i, c := range e.Candidates {
+		tag := ""
+		if c.ParentSession != "" {
+			tag = "[subagent] "
+		}
+		fmt.Fprintf(&b, "\n  %s  %s  %s%s", pad(ids[i], idWidth), pad(times[i], timeWidth), tag, formatTitle(c.Title))
+	}
+	if e.More {
+		fmt.Fprintf(&b, "\n  (more than %d match)", maxAmbiguousCandidates)
+	}
+	return b.String()
+}
+
+// displayID returns id unchanged when every rune is printable and not a space
+// (zero-width and bidi format characters are not), otherwise its quoted
+// Go-escaped form.
+func displayID(id string) string {
+	if utf8.ValidString(id) && termsafe.Strip(id) == id {
+		plain := true
+		for _, r := range id {
+			if r == ' ' || !unicode.IsPrint(r) {
+				plain = false
+				break
+			}
+		}
+		if plain {
+			return id
+		}
+	}
+	return strconv.Quote(id)
 }
 
 // rawColumn selects raw_json only when the caller needs it; otherwise an empty

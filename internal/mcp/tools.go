@@ -250,6 +250,8 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 		}
 		sess, err := sessions.ResolvePrefix(ctx, database, uuid, req.GetString("source", registry.DefaultSource()))
 		if err != nil {
+			// An ambiguous prefix lists its candidates with RFC 3339 times,
+			// like every other MCP tool (AmbiguousError.Error).
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		limit := clamp(req.GetInt("limit", defaultReadLimit), defaultReadLimit, maxReadLimit)
@@ -646,9 +648,4 @@ func handleAsk(database *db.DB, beforeRead func(context.Context)) func(context.C
 	}
 }
 
-func tsString(ts int64) string {
-	if ts == 0 {
-		return ""
-	}
-	return time.Unix(ts, 0).Format(time.RFC3339)
-}
+func tsString(ts int64) string { return timeutil.FormatRFC3339(ts) }
