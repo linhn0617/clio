@@ -2,6 +2,10 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -28,6 +32,13 @@ const (
 	defaultMaxTokens = 2000
 	minMaxTokens     = 200
 	maxMaxTokens     = 8000
+
+	// Response budget: Claude Code spills tool output over 50,000 characters
+	// to a file and hands the model only the path, costing a second read. The
+	// default stays under that threshold; max_chars may move it within bounds.
+	defaultMaxChars = 40000
+	minMaxChars     = 4000
+	maxMaxChars     = 48000
 )
 
 // parseSince is the MCP-side wrapper: same parsing as the CLI, but a bad value
@@ -100,7 +111,10 @@ func handleSearch(database *db.DB, beforeRead func(context.Context)) func(contex
 		for _, r := range res {
 			out = append(out, hit{r.SessionUUID, r.ParentSession, r.AgentType, r.Source, r.ProjectPath, r.Role, tsString(r.TS), r.Snippet})
 		}
-		return mcp.NewToolResultJSON(map[string]any{"results": out, "count": len(out)})
+		return fitRows(out, maxCharsOf(req),
+			func(r *hit, c int) { r.Snippet = capText(r.Snippet, c) },
+			func(rows []hit) map[string]any { return map[string]any{"results": rows, "count": len(rows)} },
+			"results", "narrow with since/project/role or a smaller limit"), nil
 	}
 }
 
@@ -139,7 +153,10 @@ func handleListSessions(database *db.DB, beforeRead func(context.Context)) func(
 		for _, s := range rows {
 			out = append(out, srow{s.UUID, s.ParentSession, s.AgentType, s.SubagentCount, s.Source, s.ProjectPath, s.Title, tsString(s.StartedAt), tsString(s.EndedAt), s.TurnCount})
 		}
-		return mcp.NewToolResultJSON(map[string]any{"sessions": out, "count": len(out)})
+		return fitRows(out, maxCharsOf(req),
+			func(r *srow, c int) { r.Title = capText(r.Title, c) },
+			func(rows []srow) map[string]any { return map[string]any{"sessions": rows, "count": len(rows)} },
+			"sessions", "narrow with since/project/min_turns or a smaller limit"), nil
 	}
 }
 
@@ -153,6 +170,7 @@ func handleActivitySummary(database *db.DB, beforeRead func(context.Context)) fu
 			since = time.Now().Add(-7 * 24 * time.Hour).Unix()
 		}
 		groupBy := req.GetString("group_by", "day")
+		maxChars := maxCharsOf(req)
 		source := req.GetString("source", registry.DefaultSource())
 		switch groupBy {
 		case "day", "project":
@@ -160,10 +178,11 @@ func handleActivitySummary(database *db.DB, beforeRead func(context.Context)) fu
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
-			return mcp.NewToolResultJSON(map[string]any{
-				"since":   tsString(since),
-				"buckets": buckets,
-			})
+			return fitRows(buckets, maxChars, nil,
+				func(rows []sessions.Bucket) map[string]any {
+					return map[string]any{"since": tsString(since), "buckets": rows}
+				},
+				"buckets", "use a shorter since or a project filter"), nil
 		case "file", "command", "tool", "pattern", "url":
 			counts, err := sessions.ActivityByKind(ctx, database, groupBy, since,
 				req.GetString("project", ""), source, clamp(req.GetInt("limit", 30), 30, maxSearchLimit))
@@ -178,11 +197,12 @@ func handleActivitySummary(database *db.DB, beforeRead func(context.Context)) fu
 			for _, c := range counts {
 				out = append(out, ac{c.Value, c.Count})
 			}
-			return mcp.NewToolResultJSON(map[string]any{
-				"since":    tsString(since),
-				"group_by": groupBy,
-				"activity": out,
-			})
+			return fitRows(out, maxChars,
+				func(r *ac, c int) { r.Value = capText(r.Value, c) },
+				func(rows []ac) map[string]any {
+					return map[string]any{"since": tsString(since), "group_by": groupBy, "activity": rows}
+				},
+				"rows", "use a smaller limit or a project filter"), nil
 		case "usage":
 			// Session-level token aggregates with source attribution and
 			// jump-through ids for read_session. Per-source subtotals only —
@@ -197,18 +217,27 @@ func handleActivitySummary(database *db.DB, beforeRead func(context.Context)) fu
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
-			return mcp.NewToolResultJSON(map[string]any{
-				"since":    tsString(since),
-				"group_by": "usage",
-				"note":     "token counts are per source and not comparable across sources; stale=true means the last usage scan failed and values are last-known, not current",
-				"totals":   totals,
-				"sessions": rows,
-			})
+			return fitRows(rows, maxChars, nil,
+				func(kept []sessions.UsageSessionRow) map[string]any {
+					return map[string]any{
+						"since":    tsString(since),
+						"group_by": "usage",
+						"note":     "token counts are per source and not comparable across sources; stale=true means the last usage scan failed and values are last-known, not current",
+						"totals":   totals,
+						"sessions": kept,
+					}
+				},
+				"sessions", "use a smaller limit or a project filter"), nil
 		default:
 			return mcp.NewToolResultError(`group_by must be one of "day", "project", "file", "command", "tool", "pattern", "url", "usage"`), nil
 		}
 	}
 }
+
+// afterReadSessionCount, when set (tests only), runs inside read_session's
+// read transaction right after the message count, where a concurrent write
+// would land between count and page fetch.
+var afterReadSessionCount func()
 
 func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -223,11 +252,152 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		offset := req.GetInt("offset", 0)
 		limit := clamp(req.GetInt("limit", defaultReadLimit), defaultReadLimit, maxReadLimit)
-		msgs, hasMore, err := sessions.GetMessages(ctx, database, sess.UUID, offset, limit, req.GetBool("include_tool_output", false), false)
+		inclTool := req.GetBool("include_tool_output", false)
+
+		// Three mutually exclusive ways to pick the page. offset=0 counts as
+		// unset because the tool schema advertises 0 as its default and
+		// clients may echo defaults back; last_n and around_sequence have no
+		// default (and around_sequence=0 is a real value), so they are
+		// detected by presence.
+		args := req.GetArguments()
+		// intArg coerces like GetInt does for offset, limit and max_chars
+		// (numbers and numeric strings), but rejects a fractional number
+		// rather than truncating it.
+		intArg := func(name string) (int, bool) {
+			if f, ok := args[name].(float64); ok && f != math.Trunc(f) {
+				return 0, false
+			}
+			v, err := req.RequireInt(name)
+			return v, err == nil
+		}
+		offset := req.GetInt("offset", 0)
+		hasLast := args["last_n"] != nil
+		hasAround := args["around_sequence"] != nil
+		modes := 0
+		for _, set := range []bool{offset != 0, hasLast, hasAround} {
+			if set {
+				modes++
+			}
+		}
+		if modes > 1 {
+			return mcp.NewToolResultError("offset, last_n and around_sequence are mutually exclusive: pass at most one"), nil
+		}
+		if offset < 0 {
+			return mcp.NewToolResultError("offset must not be negative"), nil
+		}
+		lastN, aroundSeq := 0, 0
+		if hasLast {
+			n, ok := intArg("last_n")
+			if !ok || n < 1 {
+				return mcp.NewToolResultError("last_n must be a positive integer"), nil
+			}
+			lastN = n
+		}
+		var aroundOK bool
+		if hasAround {
+			aroundSeq, aroundOK = intArg("around_sequence")
+		}
+		type mode int
+		const (
+			fromOffset mode = iota
+			fromEnd
+			aroundTarget
+		)
+		pageMode, rows, target, total := fromOffset, limit, 0, -1
+		var (
+			msgs    []sessions.Message
+			hasMore bool
+			argErr  string
+			note    string
+		)
+		// The count and the page fetch read one snapshot, so a message
+		// ingested in between cannot shift last_n off the tail. The
+		// transaction must end before the queries further down: the writer
+		// pool has a single connection.
+		tx, err := database.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
+		}
+		err = func() error {
+			defer tx.Rollback() // read-only: nothing to commit
+			count := func() (err error) {
+				total, err = sessions.CountMessages(ctx, tx, sess.UUID, inclTool, nil)
+				if err == nil && afterReadSessionCount != nil {
+					afterReadSessionCount()
+				}
+				return err
+			}
+			switch {
+			case hasLast:
+				if err := count(); err != nil {
+					return err
+				}
+				// The page is the tail: as many rows as last_n asks for, but
+				// never more than the page size.
+				pageMode, rows = fromEnd, min(lastN, limit)
+				offset = max(0, total-rows)
+			case hasAround:
+				maxSeq, err := sessions.MaxSeq(ctx, tx, sess.UUID)
+				if err != nil {
+					return err
+				}
+				if maxSeq < 0 {
+					argErr = "around_sequence: this session has no messages"
+					return nil
+				}
+				if !aroundOK || aroundSeq < 0 || aroundSeq > maxSeq {
+					argErr = fmt.Sprintf("around_sequence must be an integer between 0 and %d (this session's last seq)", maxSeq)
+					return nil
+				}
+				if err := count(); err != nil {
+					return err
+				}
+				before, err := sessions.CountMessages(ctx, tx, sess.UUID, inclTool, &aroundSeq)
+				if err != nil {
+					return err
+				}
+				if !inclTool {
+					role, err := sessions.MessageRole(ctx, tx, sess.UUID, aroundSeq)
+					if err != nil {
+						return err
+					}
+					if role != "" && role != "user" && role != "assistant" {
+						where := "the window is centred on the next dialogue message instead"
+						switch {
+						case total == 0:
+							where = "the session has no dialogue messages, so the page is empty"
+						case before == total:
+							where = "no dialogue message follows it, so the window ends at the last one"
+						}
+						note = fmt.Sprintf("seq %d is a %s message, hidden unless include_tool_output=true; %s", aroundSeq, role, where)
+					}
+				}
+				pageMode = aroundTarget
+				// Centre on the target, then slide back so a window near the
+				// end is still a full page (the mirror of clamping at offset 0).
+				offset = max(0, min(before-limit/2, total-limit))
+				target = before
+			}
+			var err error
+			msgs, hasMore, err = sessions.GetMessages(ctx, tx, sess.UUID, offset, rows, inclTool, false)
+			if err != nil || total >= 0 {
+				return err
+			}
+			// Plain offset mode needs no count to pick its page; a page that
+			// reaches the end already gives the total, so count only when it
+			// does not (more rows follow, or offset is past the end).
+			if !hasMore && (len(msgs) > 0 || offset == 0) {
+				total = offset + len(msgs)
+				return nil
+			}
+			return count()
+		}()
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if argErr != "" {
+			return mcp.NewToolResultError(argErr), nil
 		}
 		children, err := sessions.ListSessions(ctx, database, sessions.ListFilter{ParentSession: sess.UUID, Limit: 1000})
 		if err != nil {
@@ -257,7 +427,7 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 			if inclSub {
 				// Bounded by the same limit as the parent; has_more tells the client a
 				// long subagent was truncated (paginate it via read_session on its uuid).
-				cmsgs, cMore, err := sessions.GetMessages(ctx, database, c.UUID, 0, limit, req.GetBool("include_tool_output", false), false)
+				cmsgs, cMore, err := sessions.GetMessages(ctx, database, c.UUID, 0, limit, inclTool, false)
 				if err != nil {
 					return mcp.NewToolResultError(err.Error()), nil
 				}
@@ -270,17 +440,118 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 			}
 			subs = append(subs, row)
 		}
-		return mcp.NewToolResultJSON(map[string]any{
-			"session": map[string]any{
-				"uuid": sess.UUID, "project": sess.ProjectPath, "title": sess.Title,
-				"started_at": tsString(sess.StartedAt), "turn_count": sess.TurnCount,
-				"parent_session": sess.ParentSession, "agent_type": sess.AgentType,
-			},
-			"messages":  out,
-			"subagents": subs,
-			"offset":    offset,
-			"has_more":  hasMore,
-		})
+
+		maxChars := maxCharsOf(req)
+		sessionInfo := map[string]any{
+			"uuid": sess.UUID, "project": sess.ProjectPath, "title": sess.Title,
+			"started_at": tsString(sess.StartedAt), "turn_count": sess.TurnCount,
+			"parent_session": sess.ParentSession, "agent_type": sess.AgentType,
+		}
+		n := len(out)
+		// pick returns which k of the n fetched messages survive when the
+		// budget forces a cut: the front for a forward page, the tail for
+		// last_n (the end is what was asked for), a window around the target
+		// for around_sequence.
+		pick := func(k int) (lo, hi int) {
+			switch pageMode {
+			case fromEnd:
+				return n - k, n
+			case aroundTarget:
+				t := min(max(target-offset, 0), n-1)
+				lo = min(max(t-(k-1)/2, 0), n-k)
+				return lo, lo + k
+			}
+			return 0, k
+		}
+		shownSubs, notes := subs, []string{}
+		render := func(k, textCap int) map[string]any {
+			lo, hi := pick(k)
+			kept := out[lo:hi]
+			if textCap >= 0 {
+				kept = slices.Clone(kept)
+				for i := range kept {
+					kept[i].Content = capText(kept[i].Content, textCap)
+				}
+			}
+			resp := map[string]any{
+				"session":   sessionInfo,
+				"messages":  kept,
+				"subagents": shownSubs,
+				"offset":    offset + lo,
+				"total":     total,
+				"has_more":  hasMore || hi < n,
+			}
+			if hi < n {
+				resp["next_offset"] = offset + hi
+			}
+			if note != "" {
+				resp["note"] = note
+			}
+			if len(notes) > 0 {
+				resp["truncated"] = true
+				resp["next"] = strings.Join(notes, "; ")
+			}
+			return resp
+		}
+
+		// Subagents give way before the parent's own messages, but only as far
+		// as needed, and only once the whole response is known not to fit
+		// (fitBudget calls shed then). 1) The list is held to half the
+		// budget, measured on its entries without inlined messages, so a
+		// session with hundreds of children cannot starve its own messages.
+		// 2) Inlined subagent messages stay while one parent message still
+		// fits beside them, measured as sent with its hints (fitBudget then
+		// shrinks the parent page);
+		// otherwise they all go, each subagent staying readable by its uuid.
+		strip := func(list []sub) []sub {
+			out := make([]sub, len(list))
+			for i, c := range list {
+				if len(c.Messages) > 0 {
+					c.Messages, c.HasMore = nil, true
+				}
+				out[i] = c
+			}
+			return out
+		}
+		shed := func(fits func(k int) bool) bool {
+			if len(subs) == 0 {
+				return false
+			}
+			bare := strip(subs)
+			if shownSubs = bare; measure(render(0, -1)) > maxChars/2 {
+				best, lo, hi := 0, 0, len(bare)-1
+				for lo <= hi {
+					mid := (lo + hi) / 2
+					shownSubs = bare[:mid]
+					if measure(render(0, -1)) <= maxChars/2 {
+						best, lo = mid, mid+1
+					} else {
+						hi = mid - 1
+					}
+				}
+				subs = subs[:best]
+				notes = append(notes, fmt.Sprintf("listed %d of %d subagents to fit max_chars", best, len(bare)))
+			}
+			shownSubs = subs
+			if inclSub && !fits(min(n, 1)) {
+				shownSubs = strip(subs)
+				notes = append(notes, "subagent messages omitted to fit max_chars; read each by its uuid")
+			}
+			return len(notes) > 0
+		}
+
+		return fitBudget(n, maxChars, true, render, func(kept, _ int) string {
+			lo, hi := pick(kept)
+			parts := []string{fmt.Sprintf("showing messages at offsets %d-%d of the %d requested to fit max_chars=%d", offset+lo, offset+hi-1, rows, maxChars)}
+			if hi < n {
+				parts = append(parts, fmt.Sprintf("continue with offset=%d", offset+hi))
+			}
+			if lo > 0 {
+				parts = append(parts, fmt.Sprintf("earlier ones start at offset=%d", offset))
+			}
+			parts = append(parts, fmt.Sprintf("or use a smaller limit, or raise max_chars (max %d)", maxMaxChars))
+			return strings.Join(parts, "; ")
+		}, shed), nil
 	}
 }
 
@@ -327,11 +598,51 @@ func handleAsk(database *db.DB, beforeRead func(context.Context)) func(context.C
 			}
 			groups = append(groups, group{g.SessionUUID, g.Title, g.Project, tsString(g.EndedAt), g.Source, ex})
 		}
-		return mcp.NewToolResultJSON(map[string]any{
-			"question": ans.Question,
-			"groups":   groups,
-			"count":    len(groups),
-		})
+		// The budget unit is one excerpt. Excerpts are ranked for survival: every
+		// is_hit excerpt (in group order) outranks every context excerpt, so a
+		// tight budget drops context first and then whole trailing groups, never
+		// the evidence a group was cited for. Groups left with no excerpt
+		// disappear; kept excerpts stay in their original order.
+		type ref struct{ g, e int }
+		var order []ref
+		for pass := 0; pass < 2; pass++ {
+			for gi, g := range groups {
+				for ei, e := range g.Excerpts {
+					if e.IsHit == (pass == 0) {
+						order = append(order, ref{gi, ei})
+					}
+				}
+			}
+		}
+		render := func(k, textCap int) map[string]any {
+			keep := make([][]bool, len(groups))
+			for gi, g := range groups {
+				keep[gi] = make([]bool, len(g.Excerpts))
+			}
+			for _, r := range order[:k] {
+				keep[r.g][r.e] = true
+			}
+			kept := make([]group, 0, len(groups))
+			for gi, g := range groups {
+				var ex []excerpt
+				for ei, e := range g.Excerpts {
+					if keep[gi][ei] {
+						e.Text = capText(e.Text, textCap)
+						ex = append(ex, e)
+					}
+				}
+				if len(ex) > 0 {
+					g.Excerpts = ex
+					kept = append(kept, g)
+				}
+			}
+			return map[string]any{"question": ans.Question, "groups": kept, "count": len(kept)}
+		}
+		maxChars := maxCharsOf(req)
+		return fitBudget(len(order), maxChars, true, render, func(kept, total int) string {
+			sessionsKept := render(kept, -1)["count"]
+			return fmt.Sprintf("included %d of %d sessions (%d of %d excerpts, hits first) to fit max_chars=%d; narrow with since/project, lower max_tokens or limit, or raise max_chars (max %d)", sessionsKept, len(groups), kept, total, maxChars, maxMaxChars)
+		}, nil), nil
 	}
 }
 
