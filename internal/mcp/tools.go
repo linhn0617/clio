@@ -648,9 +648,4 @@ func handleAsk(database *db.DB, beforeRead func(context.Context)) func(context.C
 	}
 }
 
-func tsString(ts int64) string {
-	if ts == 0 {
-		return ""
-	}
-	return time.Unix(ts, 0).Format(time.RFC3339)
-}
+func tsString(ts int64) string { return timeutil.FormatRFC3339(ts) }

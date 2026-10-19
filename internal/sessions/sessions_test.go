@@ -393,17 +393,23 @@ func TestResolvePrefixAmbiguousIDDisplay(t *testing.T) {
 	}
 }
 
-// An id with invalid UTF-8 still gets its shortest resolving byte prefix (an
-// invalid byte counts as one character), not the whole id.
+// SQLite's LIKE decodes invalid UTF-8 differently from Go's bytewise view, so
+// when any matching id is invalid UTF-8 (or contains U+FFFD) the candidates are
+// listed with whole ids, which always resolve by exact match.
 func TestResolvePrefixAmbiguousInvalidUTF8ID(t *testing.T) {
-	d := testDB(t)
-	addCandidate(t, d, "abcdefg\xffX1-long", "", "claude-code", "t", 2)
-	addCandidate(t, d, "abcdefg\xffY2-long", "", "claude-code", "t", 1)
-	amb := ambiguousErr(t, d, "abc")
-	if amb.Candidates[0].ID != "abcdefg\xffX" || amb.Candidates[1].ID != "abcdefg\xffY" {
-		t.Fatalf("want 9-byte prefixes, got %q %q", amb.Candidates[0].ID, amb.Candidates[1].ID)
+	for _, odd := range []string{"abcdefg\xffX1-long", "abcdefg\uFFFDX1-long"} {
+		d := testDB(t)
+		addCandidate(t, d, odd, "", "claude-code", "t", 3)
+		addCandidate(t, d, "abcdefg\xffY2-long", "", "claude-code", "t", 2)
+		addCandidate(t, d, "abcdefgZZ3-long", "", "claude-code", "t", 1)
+		amb := ambiguousErr(t, d, "abc")
+		for _, c := range amb.Candidates {
+			if c.ID != c.UUID {
+				t.Errorf("want the whole id beside an invalid one, got %q for %q", c.ID, c.UUID)
+			}
+		}
+		assertIDsResolve(t, d, amb)
 	}
-	assertIDsResolve(t, d, amb)
 }
 
 // A session without a start time shows an empty time, as MCP's other tools do.
@@ -411,6 +417,72 @@ func TestAmbiguousErrorZeroTimeEmpty(t *testing.T) {
 	amb := &AmbiguousError{Prefix: "ab", Candidates: []Candidate{{Session: Session{UUID: "abc11111-x", Title: "t"}, ID: "abc11111"}}}
 	if msg := amb.Error(); !strings.HasSuffix(msg, "\n  abc11111    t") {
 		t.Fatalf("zero time not rendered empty:\n%q", msg)
+	}
+}
+
+// LIKE folds ASCII case, so ids differing only in case share a prefix: the
+// shown id must go past the case-folded common prefix.
+func TestResolvePrefixAmbiguousCaseFoldedIDs(t *testing.T) {
+	d := testDB(t)
+	addCandidate(t, d, "ABCDEFGH-1x", "", "claude-code", "t", 2)
+	addCandidate(t, d, "abcdefgh-2x", "", "claude-code", "t", 1)
+	amb := ambiguousErr(t, d, "abc")
+	if amb.Candidates[0].ID != "ABCDEFGH-1" || amb.Candidates[1].ID != "abcdefgh-2" {
+		t.Fatalf("want ids past the case-folded common prefix, got %q %q", amb.Candidates[0].ID, amb.Candidates[1].ID)
+	}
+	assertIDsResolve(t, d, amb)
+}
+
+// Ids with zero-width or bidi format characters are shown quoted, so they cannot
+// render like another candidate's id or reorder the line.
+func TestResolvePrefixAmbiguousInvisibleIDQuoted(t *testing.T) {
+	d := testDB(t)
+	addCandidate(t, d, "abcdefgh\u200b1", "", "claude-code", "t", 3)
+	addCandidate(t, d, "abcdefgh\u202e2", "", "claude-code", "t", 2)
+	addCandidate(t, d, "abcdefghij", "", "claude-code", "t", 1)
+	msg := ambiguousErr(t, d, "abc").Error()
+	if !strings.Contains(msg, `"abcdefgh\u200b"`) || !strings.Contains(msg, `"abcdefgh\u202e"`) || strings.ContainsAny(msg, "\u200b\u202e") {
+		t.Fatalf("invisible characters not shown escaped:\n%q", msg)
+	}
+	if !strings.Contains(msg, "\n  abcdefghi ") {
+		t.Fatalf("plain id should stay unquoted:\n%s", msg)
+	}
+}
+
+// A candidate without a start time keeps the title column aligned.
+func TestAmbiguousErrorAlignsMissingTime(t *testing.T) {
+	ts := time.Date(2026, 10, 1, 9, 30, 0, 0, time.Local).Unix()
+	amb := &AmbiguousError{Prefix: "ab", Candidates: []Candidate{
+		{Session: Session{UUID: "abc11111-x", StartedAt: ts, Title: "first"}, ID: "abc11111"},
+		{Session: Session{UUID: "abc22222-y", Title: "second"}, ID: "abc22222"},
+	}}
+	lines := strings.Split(amb.Error(), "\n")
+	if a, b := strings.Index(lines[1], "first"), strings.Index(lines[2], "second"); a < 0 || a != b {
+		t.Fatalf("title columns differ (%d vs %d):\n%s", a, b, amb.Error())
+	}
+}
+
+// A whitespace-only id is as missing as an empty one.
+func TestResolvePrefixBlankID(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "abc111", "/p", 1)
+	for _, id := range []string{" ", "\t", " \n "} {
+		if _, err := ResolvePrefix(context.Background(), d, id, ""); !errors.Is(err, ErrEmptyID) {
+			t.Fatalf("want ErrEmptyID for %q, got %v", id, err)
+		}
+	}
+}
+
+// GetSession is exact: a prefix of an existing id is not found.
+func TestGetSessionExactOnly(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "abc111", "/p", 1)
+	addSession(t, d, "abc222", "/p", 1)
+	if s, err := GetSession(context.Background(), d, "abc111"); err != nil || s.UUID != "abc111" {
+		t.Fatalf("exact lookup: %+v %v", s, err)
+	}
+	if _, err := GetSession(context.Background(), d, "abc"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("prefix must not resolve in GetSession, got %v", err)
 	}
 }
 

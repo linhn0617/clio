@@ -25,6 +25,18 @@
 - [x] 3.9 Test that a recall-only install leaves foreign PreToolUse hooks intact.
 - [x] 3.10 Mutation-check each fix (each mutation turns a named test red).
 
-## 4. Verification
+## 4. Second review fixes
 
-- [x] 4.1 gofmt, go vet, go test ./..., openspec validate --all --strict.
+- [x] 4.1 `ask` uses an exact `GetSession` lookup for citation metadata.
+- [x] 4.2 Derive shown ids in memory from one read of the prefix's uuids.
+- [x] 4.3 Resolve inside one read-only transaction.
+- [x] 4.4 Reject whitespace-only ids.
+- [x] 4.5 Quote ids with non-printable runes (zero-width, bidi format).
+- [x] 4.6 Share the RFC 3339 formatter as `timeutil.FormatRFC3339`.
+- [x] 4.7 Pad the time column so a missing time keeps titles aligned.
+- [x] 4.8 Mutation-check 4.2, 4.4–4.7 and `GetSession` (each turns a named test red).
+- [x] 4.9 List whole ids when any matching id is invalid UTF-8 or contains U+FFFD.
+
+## 5. Verification
+
+- [x] 5.1 gofmt, go vet, go test ./..., openspec validate --all --strict.

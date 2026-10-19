@@ -12,9 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Ambiguous session ids list their candidates** (openspec change
   `list-ambiguous-candidates`). `clio show <prefix>` and MCP `read_session` with a
   prefix matching several sessions now list up to 10 of them (top-level sessions
-  first, subagents tagged), each with the shortest id that resolves to it alone,
+  first, subagents tagged), each with a short id that resolves to it alone,
   the start time and the title, instead of only "ambiguous session id prefix". An
-  empty id is now reported as empty rather than as ambiguous.
+  empty or blank id is now reported as empty rather than as ambiguous.
 - Removed test-only hook helpers (`AddSessionStartHook`, `RemoveSessionStartHook`,
   `AddPreToolUseReadHook`, `InstallPreToolUseReadHook`, `RemovePreToolUseReadHook`);
   the Traditional Chinese README gains the `usage` and `prune-raw` lines.

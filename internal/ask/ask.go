@@ -264,8 +264,9 @@ func assembleGroup(ctx context.Context, database *db.DB, uuid string, score floa
 		})
 	}
 
-	// Citation metadata: exact-uuid resolve returns title/project/ended_at/source.
-	if meta, err := sessions.ResolvePrefix(ctx, database, uuid, "all"); err == nil {
+	// Citation metadata: the group's uuid is a stored session id, so look it up
+	// exactly; a prefix resolve could enumerate ambiguity candidates for nothing.
+	if meta, err := sessions.GetSession(ctx, database, uuid); err == nil {
 		eg.Title = meta.Title
 		eg.Project = meta.ProjectPath
 		eg.EndedAt = meta.EndedAt

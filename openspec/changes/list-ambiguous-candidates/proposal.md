@@ -13,8 +13,8 @@ README lacked the `usage` and `prune-raw` lines of the English CLI list.
 
 - **cli-surface**: an ambiguous prefix reports up to 10 candidates, top-level
   sessions before subagents (tagged `[subagent]`), each group newest first. Each
-  shows the shortest id (at least 8 characters, or the whole id when shorter) that
-  resolves back to that session alone across the whole index — not merely among
+  shows the shortest id (at least 8 characters, or the whole id when shorter or
+  when invalid UTF-8 is involved, see below) that resolves back to that session alone across the whole index — not merely among
   the listed ones — and is not another session's exact id; its start time; and a
   one-line title without terminal escapes. A final line says when more match. An
   id that is not plain printable text is shown quoted with escapes, so it stays
@@ -25,9 +25,19 @@ README lacked the `usage` and `prune-raw` lines of the English CLI list.
 - An empty id is rejected (`ErrEmptyID`) before any query, instead of being
   treated as a prefix of every session.
 - The unique-prefix path is still one query that stops after two rows; only an
-  ambiguous prefix runs the ordered candidate query and the per-candidate
-  uniqueness checks. Candidate ids are byte prefixes cut at character boundaries
-  (an invalid UTF-8 byte counts as one character).
+  ambiguous prefix runs the ordered candidate query plus one read of the prefix's
+  matches, from which every shown id is derived in memory (longest common prefix,
+  with SQLite LIKE's ASCII case folding). When any in-scope matching id is invalid UTF-8
+  or contains U+FFFD, SQLite's LIKE and Go's bytes disagree, so those candidates
+  are listed with whole ids, which always resolve by exact match.
+- The whole resolve reads one snapshot (a read-only transaction), so a
+  concurrent ingest cannot make the listing disagree with the reported ambiguity.
+- A blank (whitespace-only) id is rejected like an empty one. Ids containing
+  non-printable runes (zero-width, bidi format characters) are shown quoted.
+- `ask` reads citation metadata with an exact lookup (`sessions.GetSession`)
+  rather than a prefix resolve. The RFC 3339 formatter moves to
+  `timeutil.FormatRFC3339`, shared by MCP and the ambiguity message; the time
+  column is padded so a missing time keeps titles aligned.
 - `termsafe.OneLine` holds the one-line title rendering the CLI already used, so
   the candidate list and `clio list` share it.
 - Delete the five test-only hook helpers. Their tests now drive `AddClioHooks` /
@@ -40,9 +50,11 @@ README lacked the `usage` and `prune-raw` lines of the English CLI list.
 
 ## Impact
 
-- `internal/sessions` (ResolvePrefix, AmbiguousError), `internal/cli` (show,
-  display), `internal/termsafe`, `internal/claudeconfig/hooks.go`, README_zh-TW.md.
-- An ambiguous lookup costs one ordered query plus two queries per listed
-  candidate when its first 8 characters are unique (as with random uuids), and two
-  more per extra character otherwise; the unique and not-found paths are unchanged.
+- `internal/sessions` (ResolvePrefix, GetSession, AmbiguousError), `internal/cli`
+  (show, display), `internal/ask`, `internal/mcp`, `internal/termsafe`,
+  `internal/timeutil`, `internal/claudeconfig/hooks.go`, README_zh-TW.md.
+- Every resolve now runs inside one read-only transaction (a plain BEGIN, not
+  the write-locking IMMEDIATE). The unique and not-found paths still run the
+  exact lookup and one two-row LIKE query; an ambiguous lookup adds the ordered
+  candidate query and one read of the prefix's uuids (four SELECTs in all).
 - No schema, flag or MCP schema change.

@@ -18,7 +18,8 @@ exactly, report the matching sessions so the user can retry with a longer id.
 - **WHEN** the user retries with an id shown in the list
 - **THEN** it SHALL resolve to that session: the shown id is the shortest prefix
   (at least 8 characters, or the whole id when it is shorter) that matches no other
-  session in scope and is no other session's exact id
+  session in scope and is no other session's exact id; when any matching id in scope is
+  not valid UTF-8 or contains U+FFFD, every candidate is shown with its whole id
 
 #### Scenario: More matches than listed
 
@@ -27,5 +28,5 @@ exactly, report the matching sessions so the user can retry with a longer id.
 
 #### Scenario: Empty id
 
-- **WHEN** the session id argument is empty
+- **WHEN** the session id argument is empty or only whitespace
 - **THEN** the system SHALL report an empty id rather than list any sessions
