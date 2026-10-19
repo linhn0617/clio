@@ -43,3 +43,7 @@
 - [x] 5.9 Reuse serialized results; skip the text-cut search for rows with no cuttable text;
       README notes a single row's text may be truncated; `note` for a hidden `around_sequence`
       target
+- [x] 5.10 Verifier follow-up: the subagent-message shed decision measures one parent message as
+      sent (truncated/next hints included), with a regression sweep over the subagent message
+      size; `around_sequence` on an empty session says the session has no messages; the hidden
+      target note is accurate when no dialogue message follows or none exists

@@ -99,14 +99,15 @@ func jsonText(b []byte) *mcp.CallToolResult {
 // row-dropping case. cuttable says whether rows have text render can cut.
 // shed (may be nil) runs once if all rows overflow, to drop parts outside the
 // rows that render reads (read_session's subagents) before any row goes; it
-// reports whether it dropped anything.
+// reports whether it dropped anything. Its fits(k) argument says whether k
+// uncut rows fit as they would be sent, truncated/next hints included.
 //
 // Order of attack, each step stopping as soon as the result fits: (1) all
 // rows, retried after a shed; (2) fewer rows (binary search, size is monotone
 // in k); (3) one row with its text cut (binary search on the cap), skipped
 // when rows have no cuttable text; (4) if even that overflows, one row's fixed
 // fields alone exceed the budget, so no rows are returned and the hint says so.
-func fitBudget(n, maxChars int, cuttable bool, render func(k, textCap int) map[string]any, hint func(kept, total int) string, shed func() bool) *mcp.CallToolResult {
+func fitBudget(n, maxChars int, cuttable bool, render func(k, textCap int) map[string]any, hint func(kept, total int) string, shed func(fits func(k int) bool) bool) *mcp.CallToolResult {
 	// build serializes k rows; note, when set, replaces the dropped-rows hint.
 	build := func(k, textCap int, note string) ([]byte, int, error) {
 		m := render(k, textCap)
@@ -157,7 +158,11 @@ func fitBudget(n, maxChars int, cuttable bool, render func(k, textCap int) map[s
 	if b, size, err := build(n, -1, ""); err != nil || size <= maxChars {
 		return finish(b, err)
 	}
-	if shed != nil && shed() {
+	fits := func(k int) bool {
+		_, size, err := build(k, -1, "")
+		return err != nil || size <= maxChars // an error surfaces on the final build
+	}
+	if shed != nil && shed(fits) {
 		if b, size, err := build(n, -1, ""); err != nil || size <= maxChars {
 			return finish(b, err)
 		}

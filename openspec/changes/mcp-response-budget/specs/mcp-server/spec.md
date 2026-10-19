@@ -22,7 +22,9 @@ the page. `last_n` and `around_sequence` SHALL accept the same number forms as `
 `limit` (a JSON number or a numeric string); a fractional number is a tool error. When
 `around_sequence` names a message hidden by the tool-output filter (tool output or thinking
 while `include_tool_output` is false), the window SHALL be centred on the next visible message
-and the response SHALL carry a `note` naming the hidden message's seq and role.
+(ending at the last one when none follows, empty when the session has none) and the response
+SHALL carry a `note` naming the hidden message's seq and role and saying which of these
+applies. `around_sequence` on a session with no messages SHALL be a tool error saying so.
 
 #### Scenario: Search tool call
 
@@ -93,7 +95,7 @@ another. `ask` SHALL drop context excerpts before `is_hit` excerpts and whole tr
 last, so every kept session retains a hit. When a `read_session` response exceeds the budget,
 the subagent list SHALL be cut to half the budget, measured on its entries without inlined
 messages; inlined subagent messages SHALL be kept while at least one parent message fits
-beside them, the parent page shrinking first, and SHALL be dropped (each subagent still listed
+beside them (measured on the final text, hints included), the parent page shrinking first, and SHALL be dropped (each subagent still listed
 with `has_more`) only when even one parent message does not fit; each of these SHALL set
 `truncated: true` with a note. A response that fits SHALL keep every subagent. When
 `read_session` drops parent messages it SHALL drop from the end of a forward page, from the

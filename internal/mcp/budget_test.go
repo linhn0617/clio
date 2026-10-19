@@ -968,3 +968,68 @@ func TestReadSessionAroundHiddenToolResultSaysSo(t *testing.T) {
 		t.Fatalf("a visible target needs no note: %v", m["note"])
 	}
 }
+
+// ---- review round 3, verifier follow-up ----
+
+// The shed decision must measure the text actually sent, hints included: with
+// a subagent message just small enough that one parent message fits beside it
+// only without the truncated/next fields, the parent page must not vanish.
+func TestBudgetSubagentShedMeasuresFinalText(t *testing.T) {
+	for size := 3200; size <= 3600; size += 10 {
+		d := testDB(t)
+		addSession(t, d, "P", "/p")
+		addMsg(t, d, "P", 0, "user", strings.Repeat("u", 100))
+		addMsg(t, d, "P", 1, "user", strings.Repeat("v", 100))
+		addChild(t, d, "agent-c", "/p", "P", "general-purpose")
+		addMsg(t, d, "agent-c", 0, "assistant", strings.Repeat("s", size))
+		r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "include_subagents": true, "max_chars": 4000})
+		m := resultJSON(t, r)
+		if n := resultLen(t, r); n > 4000 {
+			t.Errorf("size %d: response %d chars over budget", size, n)
+		}
+		if len(m["messages"].([]any)) == 0 {
+			t.Errorf("size %d: a parent message fits alone and must be kept (next=%v)", size, m["next"])
+		}
+		if next, _ := m["next"].(string); strings.Contains(next, "fixed fields") {
+			t.Errorf("size %d: false fixed-fields hint: %q", size, next)
+		}
+	}
+}
+
+func TestReadSessionAroundSequenceOnEmptySession(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "around_sequence": 0})
+	if !r.IsError {
+		t.Fatal("expected a tool error")
+	}
+	txt := r.Content[0].(mcp.TextContent).Text
+	if strings.Contains(txt, "-1") || !strings.Contains(txt, "no messages") {
+		t.Fatalf("error should say the session has no messages, got %q", txt)
+	}
+}
+
+func TestReadSessionAroundSequenceWithOnlyToolMessages(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addMsg(t, d, "P", 0, "tool_result", "t0")
+	addMsg(t, d, "P", 1, "tool_result", "t1")
+	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "around_sequence": 1}))
+	if n := len(m["messages"].([]any)); n != 0 {
+		t.Fatalf("no dialogue messages to show, got %d", n)
+	}
+	note, _ := m["note"].(string)
+	if strings.Contains(note, "centred on") || !strings.Contains(note, "no dialogue messages") || !strings.Contains(note, "include_tool_output") {
+		t.Fatalf("note must say there is no dialogue message to centre on, got %q", note)
+	}
+	// A hidden target after the last dialogue message: the window ends there.
+	d2 := testDB(t)
+	addSession(t, d2, "Q", "/p")
+	addMsg(t, d2, "Q", 0, "user", "u0")
+	addMsg(t, d2, "Q", 1, "tool_result", "t1")
+	m = resultJSON(t, call(t, handleReadSession(d2, nil), map[string]any{"uuid": "Q", "around_sequence": 1}))
+	wantSeqs(t, seqs(t, m), 0, 0)
+	if note, _ := m["note"].(string); strings.Contains(note, "next dialogue message") || !strings.Contains(note, "no dialogue message follows") {
+		t.Fatalf("note must say no dialogue message follows, got %q", note)
+	}
+}

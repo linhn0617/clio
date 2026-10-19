@@ -342,6 +342,10 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 				if err != nil {
 					return err
 				}
+				if maxSeq < 0 {
+					argErr = "around_sequence: this session has no messages"
+					return nil
+				}
 				if !aroundOK || aroundSeq < 0 || aroundSeq > maxSeq {
 					argErr = fmt.Sprintf("around_sequence must be an integer between 0 and %d (this session's last seq)", maxSeq)
 					return nil
@@ -359,7 +363,14 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 						return err
 					}
 					if role != "" && role != "user" && role != "assistant" {
-						note = fmt.Sprintf("seq %d is a %s message, hidden unless include_tool_output=true; the window is centred on the next dialogue message instead", aroundSeq, role)
+						where := "the window is centred on the next dialogue message instead"
+						switch {
+						case total == 0:
+							where = "the session has no dialogue messages, so the page is empty"
+						case before == total:
+							where = "no dialogue message follows it, so the window ends at the last one"
+						}
+						note = fmt.Sprintf("seq %d is a %s message, hidden unless include_tool_output=true; %s", aroundSeq, role, where)
 					}
 				}
 				pageMode = aroundTarget
@@ -489,7 +500,8 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 		// budget, measured on its entries without inlined messages, so a
 		// session with hundreds of children cannot starve its own messages.
 		// 2) Inlined subagent messages stay while one parent message still
-		// fits beside them (fitBudget then shrinks the parent page);
+		// fits beside them, measured as sent with its hints (fitBudget then
+		// shrinks the parent page);
 		// otherwise they all go, each subagent staying readable by its uuid.
 		strip := func(list []sub) []sub {
 			out := make([]sub, len(list))
@@ -501,7 +513,7 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 			}
 			return out
 		}
-		shed := func() bool {
+		shed := func(fits func(k int) bool) bool {
 			if len(subs) == 0 {
 				return false
 			}
@@ -521,7 +533,7 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 				notes = append(notes, fmt.Sprintf("listed %d of %d subagents to fit max_chars", best, len(bare)))
 			}
 			shownSubs = subs
-			if inclSub && measure(render(min(n, 1), -1)) > maxChars {
+			if inclSub && !fits(min(n, 1)) {
 				shownSubs = strip(subs)
 				notes = append(notes, "subagent messages omitted to fit max_chars; read each by its uuid")
 			}
