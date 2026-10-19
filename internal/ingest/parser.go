@@ -125,8 +125,9 @@ func (p *Parser) ParseLine(line []byte) ([]model.Message, EventInfo, error) {
 				p.clioToolUseIDs[b.ID] = true
 				continue
 			}
-			summary := toolUseSummary(b.Input)
-			add(model.RoleToolUse, b.Name+" "+summary, []model.ToolCall{{ToolName: b.Name, ParamsSummary: summary}}, extractTargets(b.Name, b.Input))
+			var rm redactMemo // summary and target redact the same input string once
+			summary := toolUseSummaryMemo(b.Input, &rm)
+			add(model.RoleToolUse, b.Name+" "+summary, []model.ToolCall{{ToolName: b.Name, ParamsSummary: summary}}, extractTargetsMemo(b.Name, b.Input, &rm))
 		case "tool_result":
 			if p.clioToolUseIDs[b.ToolUseID] {
 				continue
@@ -222,7 +223,10 @@ func stripHarnessBoilerplate(s string) (rest string, matched bool) {
 }
 
 // toolUseSummary builds a compact "key fields" string for a tool invocation.
-func toolUseSummary(input json.RawMessage) string {
+func toolUseSummary(input json.RawMessage) string { return toolUseSummaryMemo(input, nil) }
+
+// toolUseSummaryMemo is toolUseSummary with a shared redaction memo (see redactMemo).
+func toolUseSummaryMemo(input json.RawMessage, rm *redactMemo) string {
 	var m map[string]any
 	if err := json.Unmarshal(input, &m); err != nil {
 		return ""
@@ -233,11 +237,13 @@ func toolUseSummary(input json.RawMessage) string {
 				// Redact (and strip <private>) before truncating, as codex.go does:
 				// cutting first can drop a closing tag or split a secret so neither
 				// pattern matches on the remainder.
-				// debt: redactString probes a JSON decoder at every '{'/'[' and is
-				// near-quadratic on bracket floods (100k '[' ≈ 10 s); the raw_json walk
-				// already pays this for the same string, so this call doubles it. If
-				// ingest stalls on such a transcript, cap the probes per string.
-				return firstLine(redactString(s), 200)
+				// debt: the same string goes through redactString up to three times: the
+				// raw_json walk, this summary, and the activity target (the target reuses
+				// this result via redactMemo only when it reads the same field;
+				// Bash/Read/Edit do, a tool whose summary key differs from its target
+				// field pays a third pass). redactString itself is now linear on bracket
+				// floods (balanced-span pre-scan with bottom-up syntax validation).
+				return firstLine(rm.redact(s), 200)
 			}
 		}
 	}

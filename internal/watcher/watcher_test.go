@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -132,4 +133,67 @@ func TestWatcherPicksUpNewProjectDir(t *testing.T) {
 
 func line(sess, content string) string {
 	return `{"type":"user","timestamp":"2026-05-01T10:00:00Z","cwd":"/Users/x/p","sessionId":"` + sess + `","message":{"role":"user","content":"` + content + `"}}`
+}
+
+// The backstop walk must run under the caller's guard: a guard that refuses
+// (returns nil) skips the whole round, and one that grants runs it and is released.
+func TestWatcherBackstopHonorsGuard(t *testing.T) {
+	orig := backstopPeriod
+	backstopPeriod = 100 * time.Millisecond
+	t.Cleanup(func() { backstopPeriod = orig })
+
+	projects := t.TempDir()
+	dir := filepath.Join(projects, "-Users-x-p")
+	os.MkdirAll(dir, 0o755)
+	path := filepath.Join(dir, "g-1.jsonl")
+	os.WriteFile(path, []byte(line("g-1", "guarded")+"\n"), 0o600)
+
+	d, err := db.Open(filepath.Join(t.TempDir(), "w.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ing := ingest.New(d, log)
+	ing.IngestAll(context.Background(), projects, false)
+	os.Remove(path)
+
+	var calls, released atomic.Int32
+	var grant atomic.Bool
+	w := New(ing, projects, log)
+	w.BackstopGuard = func() func() {
+		calls.Add(1)
+		if !grant.Load() {
+			return nil
+		}
+		return func() { released.Add(1) }
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { w.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	marked := func() int {
+		var n int
+		d.QueryRow(`SELECT count(*) FROM ingest_state WHERE source_file=? AND source_missing_at IS NOT NULL`, path).Scan(&n)
+		return n
+	}
+	time.Sleep(600 * time.Millisecond)
+	if calls.Load() == 0 {
+		t.Fatal("guard never consulted by the backstop")
+	}
+	if marked() != 0 {
+		t.Fatal("backstop ran although the guard refused")
+	}
+	grant.Store(true)
+	deadline := time.Now().Add(5 * time.Second)
+	for marked() == 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if marked() == 0 {
+		t.Fatal("backstop did not run once the guard granted")
+	}
+	if released.Load() == 0 {
+		t.Fatal("guard release never called")
+	}
 }

@@ -14,6 +14,10 @@ const fingerprintWindow = 512
 // discarded once its newline is seen), so a giant or newline-less line cannot OOM.
 const maxLineBytes = 16 << 20 // 16 MiB
 
+// readBufBytes is the bufio buffer for streaming session files; the 4 KB default
+// costs a read syscall per few lines on multi-MB transcripts.
+const readBufBytes = 256 << 10
+
 // headFingerprint hashes the leading fingerprintWindow bytes. Validated alongside the
 // tail fingerprint to catch a rewrite that changed the start of an (otherwise
 // append-looking) file. Returns "" for an empty file.
