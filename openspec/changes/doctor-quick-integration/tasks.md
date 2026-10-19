@@ -40,3 +40,10 @@
 - [x] 6.7 README / flag help describe what `--quick` really skips; quick and full runs list the same row names
 - [x] 6.8 Cleanup: `binaryProblem` once per hook, `clioBinaryOf` breaks out of its loop, `Run` comments no longer claim HOME independence, claudeconfig and lock inspect tests snapshot the whole directory
 - [x] 6.9 Spec delta: MODIFIED "Health diagnostics" keeps the main spec's "World-readable private file flagged" scenario; ADDED requirements split one per check so each stays under the `--strict` length limit
+
+## 7. Round three, verifier follow-up
+
+- [x] 7.1 Reconciliation no longer counts a file whose only unindexed bytes are a partial last line as lag; it reports `N ending in a partial line (indexed once complete)` and passes, agreeing with freshness (RunWith-level test)
+- [x] 7.2 Hook check: a file-history entry under a matcher that does not cover Read|Bash (install-hook's rules) stays ok with a note
+- [x] 7.3 MCP: a relative command with a separator is not looked up; its note names Claude Code's working directory
+- [x] 7.4 Test: freshness reports "unavailable (source reconciliation failed)" and fails when reconciliation errors

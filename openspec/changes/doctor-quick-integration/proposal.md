@@ -19,7 +19,8 @@ server, and an index nobody has refreshed for days.
   matcher all ask for `clio install-hook`), `mcp registration` (not registered is ok, MCP is
   optional; a bare command is noted, not judged on doctor's PATH), `mcp lease`, `index freshness`
   (judges the age of the oldest unindexed change that source reconciliation found, warning past
-  24 h; a partial last line is not a change; a quiet index is fine). The lease check separates a
+  24 h; a partial last line is not a change, and source reconciliation no longer counts one as
+  drift either; a quiet index is fine). The lease check separates a
   live-but-late leader from a dead one.
 - Not done (`debt:` in code): comparing the running MCP server's version with this binary; it
   needs the lease file to carry a version.

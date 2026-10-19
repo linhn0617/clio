@@ -147,6 +147,25 @@ func TestHookBinaryCheck(t *testing.T) {
 			t.Fatalf("got %+v", r)
 		}
 	})
+	// install-hook leaves a user's own placement alone, so doctor does not warn,
+	// but says the hook never fires on Read or Bash.
+	t.Run("unrelated file-history matcher is ok with a note", func(t *testing.T) {
+		writeJSON(t, settings, `{"hooks":{
+		  "SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"`+good+` recall"}]}],
+		  "PreToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"`+good+` file-history --hook"}]}]}}`)
+		r := checkHookBinary(settings)
+		if !r.OK || !strings.HasSuffix(r.Detail, "; file-history hook matcher Edit does not cover Read|Bash") {
+			t.Fatalf("got %+v", r)
+		}
+		for _, m := range []string{`"Read|Bash"`, `"*"`, `"Bash|Read|Edit"`, `"Read.*|Bash"`} {
+			writeJSON(t, settings, `{"hooks":{
+			  "SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"`+good+` recall"}]}],
+			  "PreToolUse":[{"matcher":`+m+`,"hooks":[{"type":"command","command":"`+good+` file-history --hook"}]}]}}`)
+			if r := checkHookBinary(settings); !r.OK || strings.Contains(r.Detail, "does not cover") {
+				t.Errorf("matcher %s covers both: got %+v", m, r)
+			}
+		}
+	})
 	t.Run("ok detail reports each hook separately", func(t *testing.T) {
 		writeJSON(t, settings, settingsWith(good+" recall", good+" file-history --hook"))
 		r := checkHookBinary(settings)
@@ -225,11 +244,17 @@ func TestMCPRegistrationCheck(t *testing.T) {
 	t.Run("non-absolute command is ok with a PATH note", func(t *testing.T) {
 		const note = "resolved on doctor's PATH, not Claude Code's; prefer an absolute path"
 		t.Setenv("PATH", "")
-		for _, c := range []string{"clio", "bin/clio"} {
+		writeJSON(t, cfg, `{"mcpServers":{"clio":{"command":"clio"}}}`)
+		if r := checkMCPRegistration(cfg); !r.OK || !strings.Contains(r.Detail, "registered: clio (not found on doctor's PATH, which is not Claude Code's; prefer an absolute path)") {
+			t.Errorf("clio not on PATH: want ok with note, got %+v", r)
+		}
+		// A relative path with a separator is not looked up on PATH at all: Claude
+		// Code resolves it against its own working directory, so doctor does not try.
+		for _, c := range []string{"bin/clio", "./clio"} {
 			writeJSON(t, cfg, fmt.Sprintf(`{"mcpServers":{"clio":{"command":%q}}}`, c))
 			r := checkMCPRegistration(cfg)
-			if !r.OK || !strings.Contains(r.Detail, "registered: "+c) || !strings.Contains(r.Detail, "not found on doctor's PATH, which is not Claude Code's; prefer an absolute path") {
-				t.Errorf("%q not on PATH: want ok with note, got %+v", c, r)
+			if want := "registered: " + c + " (relative path, resolved against Claude Code's working directory, not doctor's; prefer an absolute path)"; !r.OK || r.Detail != want {
+				t.Errorf("%q: want ok %q, got %+v", c, want, r)
 			}
 		}
 		t.Setenv("PATH", dir)
@@ -407,8 +432,7 @@ func TestIndexFreshnessJudgesReconcileAge(t *testing.T) {
 
 // A session that stopped mid-write leaves a last line without its newline. Ingest
 // only absorbs complete lines, so `clio index` can never clear those bytes; they
-// must not make freshness warn, but the detail still says why reconciliation
-// counts them.
+// must not make freshness or reconciliation warn, and both name them.
 func TestIndexFreshnessIgnoresPartialLastLine(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "x.sqlite")
@@ -436,8 +460,8 @@ func TestIndexFreshnessIgnoresPartialLastLine(t *testing.T) {
 		t.Fatalf("partial last line must not warn: %+v", r)
 	}
 	res := Run(d, dir, dbPath)
-	if rec := findResult(t, res, "source reconciliation"); !strings.Contains(rec.Detail, "1 with new unindexed bytes") {
-		t.Fatalf("reconciliation still counts the bytes: %+v", rec)
+	if rec := findResult(t, res, "source reconciliation"); !rec.OK || !strings.Contains(rec.Detail, "1 ending in a partial line") {
+		t.Fatalf("reconciliation must report the partial line without warning: %+v", rec)
 	}
 
 	// Once the line is completed it is a real change again.
@@ -662,5 +686,65 @@ func TestHasNewlineAfter(t *testing.T) {
 	}
 	if !hasNewlineAfter(filepath.Join(filepath.Dir(p), "gone"), 0) {
 		t.Fatal("an unreadable file must not hide its change")
+	}
+}
+
+// End to end through RunWith: a file whose only unindexed bytes are a partial last
+// line must leave source reconciliation and index freshness both ok and agreeing,
+// since no `clio index` can absorb those bytes; a complete unindexed line must still
+// make reconciliation warn.
+func TestPartialLastLineReconciliationAndFreshnessAgree(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "x.sqlite")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	p := filepath.Join(dir, "s.jsonl")
+	head := "{\"type\":\"user\"}\n"
+	body := head + `{"type":"user","uuid":"half`
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(p)
+	ingestRow(t, d, p, fi.Size(), int64(len(head)), fi.ModTime().UnixNano(), time.Now().Unix())
+	opts := Options{Quick: true, Integration: true,
+		SettingsPath: filepath.Join(dir, "settings.json"), ClaudeConfigPath: filepath.Join(dir, ".claude.json"), LockPath: filepath.Join(dir, "mcp.lock")}
+
+	res := RunWith(d, dir, dbPath, opts)
+	rec, fresh := findResult(t, res, "source reconciliation"), findResult(t, res, "index freshness")
+	if !rec.OK || !strings.Contains(rec.Detail, "0 with new unindexed bytes, 1 ending in a partial line (indexed once complete)") {
+		t.Fatalf("partial tail only: reconciliation must be ok and name it, got %+v", rec)
+	}
+	if !fresh.OK || !strings.Contains(fresh.Detail, "1 file(s) end in a partial line") {
+		t.Fatalf("partial tail only: freshness must be ok and agree, got %+v", fresh)
+	}
+
+	// Completing the line makes it a real, indexable change again.
+	if err := os.WriteFile(p, []byte(body+"\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res = RunWith(d, dir, dbPath, opts)
+	if rec := findResult(t, res, "source reconciliation"); rec.OK || !strings.Contains(rec.Detail, "1 with new unindexed bytes") || strings.Contains(rec.Detail, "partial") {
+		t.Fatalf("complete unindexed line must warn: %+v", rec)
+	}
+}
+
+// Freshness has nothing to judge when reconciliation fails; it must say so and
+// not pass.
+func TestIndexFreshnessWhenReconciliationFails(t *testing.T) {
+	d, dir, dbPath := newQuickDB(t)
+	if _, err := d.Exec("DROP TABLE ingest_state"); err != nil {
+		t.Fatal(err)
+	}
+	res := RunWith(d, dir, dbPath, Options{Quick: true, Integration: true,
+		SettingsPath: filepath.Join(dir, "settings.json"), ClaudeConfigPath: filepath.Join(dir, ".claude.json"), LockPath: filepath.Join(dir, "mcp.lock")})
+	if r := findResult(t, res, "source reconciliation"); r.OK {
+		t.Fatalf("fixture: reconciliation should fail, got %+v", r)
+	}
+	r := findResult(t, res, "index freshness")
+	if r.OK || !strings.HasPrefix(r.Detail, "unavailable (source reconciliation failed): ") || !strings.Contains(r.Detail, "ingest_state") {
+		t.Fatalf("want not-ok 'unavailable (source reconciliation failed): …', got %+v", r)
 	}
 }

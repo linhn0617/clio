@@ -119,7 +119,8 @@ func TestClioHookBinariesLegacyUnquotedWithSpace(t *testing.T) {
 	}
 }
 
-// Only the exact older matcher is flagged; Read|Bash and a user's own matcher are not.
+// Only the exact older matcher is flagged as OldMatcher; a user's own matcher that
+// misses Read or Bash is reported in Uncovered; Read|Bash is neither.
 func TestClioHookOldMatcher(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "settings.json")
@@ -134,7 +135,7 @@ func TestClioHookOldMatcher(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	want := []HookEntry{{Binary: "/a/clio", OldMatcher: true}, {Binary: "/b/clio"}, {Binary: "/c/clio"}}
+	want := []HookEntry{{Binary: "/a/clio", OldMatcher: true}, {Binary: "/b/clio"}, {Binary: "/c/clio", Uncovered: "Bash"}}
 	if !reflect.DeepEqual(f, want) {
 		t.Fatalf("file-history entries = %+v, want %+v", f, want)
 	}

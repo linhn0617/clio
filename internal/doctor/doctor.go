@@ -189,6 +189,9 @@ func RunWith(database *db.DB, projectsDir, dbPath string, opts Options) []Result
 	} else {
 		detail := fmt.Sprintf("%d missing/unreadable files, %d truncated, %d same-size rewrite(s) needing re-ingest, %d with new unindexed bytes",
 			rec.missing, rec.truncated, rec.rewritten, rec.lag)
+		if rec.partial > 0 {
+			detail += fmt.Sprintf(", %d ending in a partial line (indexed once complete)", rec.partial)
+		}
 		if rec.preserved > 0 {
 			detail += fmt.Sprintf(", %d preserved (source root unavailable)", rec.preserved)
 		}
@@ -197,7 +200,8 @@ func RunWith(database *db.DB, projectsDir, dbPath string, opts Options) []Result
 		}
 		// Every category above is a real discrepancy between the index and its source
 		// files: none of them may be silently treated as healthy, or doctor would
-		// report OK/exit 0 while the detail text itself lists live problems.
+		// report OK/exit 0 while the detail text itself lists live problems. A partial
+		// last line is not one: nothing can index it until its writer finishes it.
 		add("source reconciliation", rec.missing == 0 && rec.truncated == 0 && rec.rewritten == 0 && rec.lag == 0, detail)
 	}
 
@@ -493,9 +497,10 @@ func missingMarkExpr(database *db.DB) string {
 type reconcileStats struct {
 	tracked                                            int // rows in ingest_state
 	missing, preserved, retained, truncated, rewritten int
-	lag                                                int // files with new unindexed bytes
-	// partial counts the lag files whose new bytes hold no newline: a session that
-	// stopped mid-write. Ingest absorbs only complete lines, so no re-index clears it.
+	lag                                                int // files with a complete unindexed line
+	// partial counts the files whose only new bytes are a last line without its
+	// newline: a session that stopped mid-write. Ingest absorbs only complete lines,
+	// so no re-index clears it; it is reported, never a warning.
 	partial int
 	// oldestChange is the age (by mtime) of the least recently written file holding
 	// a truncation, a rewrite or at least one unindexed complete line; 0 when none.
@@ -542,12 +547,11 @@ func reconcile(database *db.DB, availRoots []string, now time.Time) (st reconcil
 			// (internal/ingest/incremental.go) treats this as a full rewrite, never
 			// an append — a same-size content swap that a size-only check can't see.
 			st.rewritten++
+		case fi.Size() > offset && !hasNewlineAfter(path, offset):
+			st.partial++
+			changed = false
 		case fi.Size() > offset:
 			st.lag++
-			if !hasNewlineAfter(path, offset) {
-				st.partial++
-				changed = false
-			}
 		default:
 			changed = false
 		}

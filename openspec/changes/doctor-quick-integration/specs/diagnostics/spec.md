@@ -33,6 +33,37 @@ NOT count as a failure, and SHALL say why.
   have a mode other than `0600`
 - **THEN** `clio doctor` SHALL report a permissions warning naming the file and its mode
 
+### Requirement: Source-of-truth reconciliation
+
+The system SHALL detect semantic drift between the DB and the source `.jsonl` files,
+including content that was read but could not be indexed. A file whose only unindexed bytes
+are a last line without its newline SHALL NOT count as drift: ingest absorbs only complete
+lines, so no re-index can clear it. Reconciliation SHALL report such files as an
+informational count and pass.
+
+#### Scenario: Truncated source file
+
+- **WHEN** a `.jsonl` file is truncated or missing a tail relative to what was ingested
+- **THEN** `clio doctor` SHALL flag the affected session as out of sync
+
+#### Scenario: Unparseable source lines reported
+
+- **WHEN** ingest has skipped one or more complete lines that could not be parsed
+  (recorded in `ingest_state.unparsed_lines`)
+- **THEN** `clio doctor` SHALL report the total count as a warning and suggest running
+  `clio index --full` after upgrading clio; a total of zero SHALL NOT warn
+
+#### Scenario: Partial last line is not drift
+
+- **WHEN** a tracked file's only unindexed bytes are a last line without its newline
+- **THEN** `source reconciliation` SHALL pass, reporting `1 ending in a partial line (indexed
+  once complete)`
+
+#### Scenario: Complete unindexed line is drift
+
+- **WHEN** a tracked file holds a complete line beyond what was ingested
+- **THEN** `source reconciliation` SHALL fail, counting the file under `new unindexed bytes`
+
 ## ADDED Requirements
 
 ### Requirement: doctor --quick skips whole-database scans
@@ -98,6 +129,13 @@ an absolute path to an existing executable (on Windows: a regular file), never r
 PATH or cwd. Every failure SHALL end with `; rerun clio install-hook`. With neither hook
 installed the check SHALL pass, noting `not installed`.
 
+#### Scenario: File-history under an unrelated matcher
+
+- **WHEN** clio's file-history hook sits in a group whose matcher does not cover both Read and
+  Bash (by install-hook's matcher rules) and is not the older `Read` shape, e.g. `Edit`
+- **THEN** `hook binary` SHALL pass, noting `file-history hook matcher Edit does not cover
+  Read|Bash`, since install-hook leaves the user's placement alone
+
 #### Scenario: Both hooks healthy
 
 - **WHEN** both hooks point at an existing executable
@@ -150,10 +188,16 @@ rerun clio install-mcp`.
 
 #### Scenario: Bare MCP command
 
-- **WHEN** the `clio` MCP entry's command is not absolute, such as install-mcp's bare `clio`
+- **WHEN** the `clio` MCP entry's command is a bare name, such as install-mcp's `clio`
   fallback
 - **THEN** `mcp registration` SHALL pass, noting that it is resolved on doctor's PATH, not Claude
   Code's, and that an absolute path is preferred, whether or not doctor's PATH finds it
+
+#### Scenario: Relative MCP command with a separator
+
+- **WHEN** the `clio` MCP entry's command is a relative path such as `bin/clio`
+- **THEN** `mcp registration` SHALL pass without resolving it, noting it is resolved against
+  Claude Code's working directory, not doctor's, and that an absolute path is preferred
 
 #### Scenario: Registered binary is gone
 
@@ -204,5 +248,5 @@ hours, and with `never indexed; run clio index` when `ingest_state` is empty.
 
 - **WHEN** a tracked file's only unindexed bytes are a last line without its newline, last
   modified 30 hours ago
-- **THEN** `index freshness` SHALL pass, noting the file ends in a partial line, and source
-  reconciliation SHALL still count the file as having new unindexed bytes
+- **THEN** `index freshness` and `source reconciliation` SHALL both pass, each noting the file
+  that ends in a partial line, and doctor SHALL exit 0 when nothing else fails

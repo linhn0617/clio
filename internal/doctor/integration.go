@@ -53,7 +53,7 @@ func checkHookBinary(settingsPath string) Result {
 	if len(recall) == 0 && len(fh) == 0 {
 		return Result{Name: name, OK: true, Detail: "not installed (clio install-hook)"}
 	}
-	var problems, good []string
+	var problems, good, notes []string
 	seen := map[string]bool{}
 	problem := func(s string) {
 		if !seen[s] {
@@ -86,20 +86,25 @@ func checkHookBinary(settingsPath string) Result {
 			if e.OldMatcher {
 				problem(hook.kind + " hook matcher is Read, needs upgrade")
 			}
+			// install-hook leaves the user's own placement alone, so this is a note.
+			if note := hook.kind + " hook matcher " + e.Uncovered + " does not cover Read|Bash"; e.Uncovered != "" && !slices.Contains(notes, note) {
+				notes = append(notes, note)
+			}
 		}
 		good = append(good, hook.kind+": "+strings.Join(bins, ", "))
 	}
 	if len(problems) > 0 {
 		return Result{Name: name, OK: false, Detail: strings.Join(problems, "; ") + "; rerun clio install-hook"}
 	}
-	return Result{Name: name, OK: true, Detail: strings.Join(good, "; ")}
+	return Result{Name: name, OK: true, Detail: strings.Join(append(good, notes...), "; ")}
 }
 
 // checkMCPRegistration reports whether clio is registered as an MCP server and, if
 // so, whether its command still exists. Not registered is fine: MCP is optional.
 // install-mcp falls back to a bare `clio` when it cannot resolve its own path, and
 // Claude Code then looks that up on its own PATH, which doctor cannot see; so a
-// non-absolute command passes with a note instead of being judged on doctor's PATH.
+// non-absolute command passes with a note instead of being judged on doctor's PATH
+// (or, for a relative path with a separator, on doctor's working directory).
 func checkMCPRegistration(configPath string) Result {
 	const name = "mcp registration"
 	cmd, kind, err := claudeconfig.LookupServer(configPath, "clio")
@@ -113,6 +118,10 @@ func checkMCPRegistration(configPath string) Result {
 		return Result{Name: name, OK: true, Detail: "registered (url-based, no local binary to check)"}
 	case claudeconfig.ServerMalformed:
 		return Result{Name: name, OK: false, Detail: "malformed mcpServers.clio entry; rerun clio install-mcp"}
+	}
+	if !filepath.IsAbs(cmd) && strings.ContainsAny(cmd, "/"+string(filepath.Separator)) {
+		// Not a PATH lookup at all, and doctor's cwd says nothing about Claude Code's.
+		return Result{Name: name, OK: true, Detail: "registered: " + cmd + " (relative path, resolved against Claude Code's working directory, not doctor's; prefer an absolute path)"}
 	}
 	if !filepath.IsAbs(cmd) {
 		const note = "resolved on doctor's PATH, not Claude Code's; prefer an absolute path"
