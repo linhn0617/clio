@@ -16,7 +16,13 @@ seq, otherwise a tool error). Supplying more than one mode SHALL return a tool e
 all three parameters; an `offset` of 0 SHALL count as not supplied, while `last_n` and
 `around_sequence` count as supplied whenever present (including 0). In every mode the
 response SHALL report `offset` (the zero-based start of the returned page), `total` (the
-session's message count under the same tool-output filter) and `has_more`.
+session's message count under the same tool-output filter) and `has_more`; the count and the
+page SHALL be read from one consistent snapshot, so a message written meanwhile cannot shift
+the page. `last_n` and `around_sequence` SHALL accept the same number forms as `offset` and
+`limit` (a JSON number or a numeric string); a fractional number is a tool error. When
+`around_sequence` names a message hidden by the tool-output filter (tool output or thinking
+while `include_tool_output` is false), the window SHALL be centred on the next visible message
+and the response SHALL carry a `note` naming the hidden message's seq and role.
 
 #### Scenario: Search tool call
 
@@ -41,6 +47,13 @@ session's message count under the same tool-output filter) and `has_more`.
 - **WHEN** an MCP client calls `read_session` with `around_sequence: 50` and `limit: 10` on a
   session whose seqs are 0..99
 - **THEN** the system SHALL return the messages with seq 45 through 54 and `offset: 45`
+
+#### Scenario: Read around a hidden tool result
+
+- **WHEN** an MCP client calls `read_session` with `around_sequence` naming a `tool_result`
+  message and without `include_tool_output`
+- **THEN** the system SHALL return the window around the next dialogue message with a `note`
+  saying that seq is a hidden `tool_result`
 
 #### Scenario: Conflicting read modes are rejected
 
@@ -69,24 +82,31 @@ counts, every MCP tool (`search`, `ask`, `list_sessions`, `activity_summary`,
 `read_session`) SHALL bound the serialized JSON length of its response (escapes included) to
 a character budget: the `max_chars` parameter, default 40,000 (below Claude Code's 50,000
 character threshold for spilling tool output to a file), clamped into 4,000–48,000, counted in
-characters (Unicode code points) of the final response the client receives, which SHALL be a
-single text content with no duplicate structured copy. When the full response exceeds the
-budget the system SHALL drop rows at row boundaries (search hits, session rows, activity rows
-or buckets, `ask` excerpts with sessions left empty omitted, `read_session` messages) until
-the re-serialized response fits, and SHALL set `truncated: true` and a non-empty `next` hint.
-`ask` SHALL drop context excerpts before `is_hit` excerpts and whole trailing sessions last,
-so every kept session retains a hit. `read_session` SHALL shed inlined subagent messages
-before any parent message and cut the subagent list to half the budget, setting
-`truncated: true` with a note when it does; when it drops parent messages it SHALL drop from
-the end of a forward page, from the start for `last_n` (the end of the session survives) and
-from both ends for `around_sequence` (the target survives), setting `has_more`, `offset` (the
-first returned message) and, when later messages were dropped, `next_offset`. The size SHALL be
-measured on the real serialized output, not estimated. The response SHALL keep at least one
-row: when a single row alone exceeds the budget its free text (message content, excerpt text,
-snippet, title, activity value) SHALL be cut to a prefix ending in `… [truncated N chars]`
-with `truncated: true`; when the fixed fields alone exceed the budget the row SHALL be returned
-anyway and `next` SHALL say the fixed fields exceed `max_chars`. A response within budget SHALL
-carry neither `truncated` nor `next`.
+UTF-16 code units (so a character outside the Basic Multilingual Plane, such as most emoji,
+counts as two) of the final response the client receives, which SHALL be a single text content
+with no duplicate structured copy. When the full response exceeds the budget the system SHALL
+drop rows at row boundaries (search hits, session rows, activity rows or buckets, `ask`
+excerpts with sessions left empty omitted, `read_session` messages) until the re-serialized
+response fits, and SHALL set `truncated: true` and a non-empty `next` hint that names every
+reason the response was cut (rows dropped, row text cut, subagents shed), none overwriting
+another. `ask` SHALL drop context excerpts before `is_hit` excerpts and whole trailing sessions
+last, so every kept session retains a hit. When a `read_session` response exceeds the budget,
+the subagent list SHALL be cut to half the budget, measured on its entries without inlined
+messages; inlined subagent messages SHALL be kept while at least one parent message fits
+beside them, the parent page shrinking first, and SHALL be dropped (each subagent still listed
+with `has_more`) only when even one parent message does not fit; each of these SHALL set
+`truncated: true` with a note. A response that fits SHALL keep every subagent. When
+`read_session` drops parent messages it SHALL drop from the end of a forward page, from the
+start for `last_n` (the end of the session survives) and from both ends for `around_sequence`
+(the target survives), setting `has_more`, `offset` (the first returned message) and, when
+later messages were dropped, `next_offset`. The size SHALL be measured on the real serialized
+output, not estimated. When a single row alone exceeds the budget its free text (message
+content, excerpt text, snippet, title, activity value) SHALL be cut to a prefix ending in
+`… [truncated N chars]` with `truncated: true`. When a single row's fixed fields (those with no
+free text to cut) alone exceed the budget, no rows SHALL be returned and `next` SHALL say the
+fixed fields exceed `max_chars`; the response then still fits unless the fields outside the
+rows alone exceed the budget. A response within budget SHALL carry neither `truncated` nor
+`next`.
 
 #### Scenario: Excessive limit requested
 
@@ -116,3 +136,23 @@ carry neither `truncated` nor `next`.
 - **WHEN** an `ask` bundle exceeds the budget
 - **THEN** the system SHALL drop context excerpts and trailing sessions while every kept
   session still contains at least one `is_hit` excerpt
+
+#### Scenario: The budget counts UTF-16 code units
+
+- **WHEN** a `read_session` page holds messages made of emoji and the budget is 4,000
+- **THEN** the system SHALL keep the response within 4,000 UTF-16 code units (each emoji
+  counting two), cutting a lone oversized message on a character boundary
+
+#### Scenario: A single row's fixed fields exceed the budget
+
+- **WHEN** an MCP client calls `list_sessions` with `max_chars: 4000` and the only session's
+  project path is 6,000 characters long
+- **THEN** the system SHALL return no session rows, `truncated: true`, a `next` hint saying the
+  fixed fields exceed `max_chars`, and a response within 4,000 characters
+
+#### Scenario: Subagent messages survive a shorter parent page
+
+- **WHEN** a `read_session` call with `include_subagents` exceeds the budget and one parent
+  message fits beside the inlined subagent messages
+- **THEN** the system SHALL keep the subagent messages and return fewer parent messages with
+  `next_offset`

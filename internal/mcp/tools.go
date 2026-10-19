@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"math"
 	"slices"
@@ -233,6 +234,11 @@ func handleActivitySummary(database *db.DB, beforeRead func(context.Context)) fu
 	}
 }
 
+// afterReadSessionCount, when set (tests only), runs inside read_session's
+// read transaction right after the message count, where a concurrent write
+// would land between count and page fetch.
+var afterReadSessionCount func()
+
 func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if beforeRead != nil {
@@ -255,16 +261,15 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 		// default (and around_sequence=0 is a real value), so they are
 		// detected by presence.
 		args := req.GetArguments()
+		// intArg coerces like GetInt does for offset, limit and max_chars
+		// (numbers and numeric strings), but rejects a fractional number
+		// rather than truncating it.
 		intArg := func(name string) (int, bool) {
-			switch v := args[name].(type) {
-			case int:
-				return v, true
-			case int64:
-				return int(v), true
-			case float64:
-				return int(v), v == math.Trunc(v)
+			if f, ok := args[name].(float64); ok && f != math.Trunc(f) {
+				return 0, false
 			}
-			return 0, false
+			v, err := req.RequireInt(name)
+			return v, err == nil
 		}
 		offset := req.GetInt("offset", 0)
 		hasLast := args["last_n"] != nil
@@ -281,49 +286,107 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 		if offset < 0 {
 			return mcp.NewToolResultError("offset must not be negative"), nil
 		}
-		total, err := sessions.CountMessages(ctx, database, sess.UUID, inclTool, nil)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
+		lastN, aroundSeq := 0, 0
+		if hasLast {
+			n, ok := intArg("last_n")
+			if !ok || n < 1 {
+				return mcp.NewToolResultError("last_n must be a positive integer"), nil
+			}
+			lastN = n
+		}
+		var aroundOK bool
+		if hasAround {
+			aroundSeq, aroundOK = intArg("around_sequence")
 		}
 		type mode int
 		const (
 			fromOffset mode = iota
 			fromEnd
-			aroundSeq
+			aroundTarget
 		)
-		pageMode, rows, target := fromOffset, limit, 0
-		switch {
-		case hasLast:
-			n, ok := intArg("last_n")
-			if !ok || n < 1 {
-				return mcp.NewToolResultError("last_n must be a positive integer"), nil
-			}
-			// The page is the tail: as many rows as last_n asks for, but never
-			// more than the page size.
-			pageMode, rows = fromEnd, min(n, limit)
-			offset = max(0, total-rows)
-		case hasAround:
-			seq, ok := intArg("around_sequence")
-			maxSeq, err := sessions.MaxSeq(ctx, database, sess.UUID)
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			if !ok || seq < 0 || seq > maxSeq {
-				return mcp.NewToolResultError(fmt.Sprintf("around_sequence must be an integer between 0 and %d (this session's last seq)", maxSeq)), nil
-			}
-			before, err := sessions.CountMessages(ctx, database, sess.UUID, inclTool, &seq)
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			pageMode = aroundSeq
-			// Centre on the target, then slide back so a window near the end
-			// is still a full page (the mirror of clamping at offset 0).
-			offset = max(0, min(before-limit/2, total-limit))
-			target = before
-		}
-		msgs, hasMore, err := sessions.GetMessages(ctx, database, sess.UUID, offset, rows, inclTool, false)
+		pageMode, rows, target, total := fromOffset, limit, 0, -1
+		var (
+			msgs    []sessions.Message
+			hasMore bool
+			argErr  string
+			note    string
+		)
+		// The count and the page fetch read one snapshot, so a message
+		// ingested in between cannot shift last_n off the tail. The
+		// transaction must end before the queries further down: the writer
+		// pool has a single connection.
+		tx, err := database.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
+		}
+		err = func() error {
+			defer tx.Rollback() // read-only: nothing to commit
+			count := func() (err error) {
+				total, err = sessions.CountMessages(ctx, tx, sess.UUID, inclTool, nil)
+				if err == nil && afterReadSessionCount != nil {
+					afterReadSessionCount()
+				}
+				return err
+			}
+			switch {
+			case hasLast:
+				if err := count(); err != nil {
+					return err
+				}
+				// The page is the tail: as many rows as last_n asks for, but
+				// never more than the page size.
+				pageMode, rows = fromEnd, min(lastN, limit)
+				offset = max(0, total-rows)
+			case hasAround:
+				maxSeq, err := sessions.MaxSeq(ctx, tx, sess.UUID)
+				if err != nil {
+					return err
+				}
+				if !aroundOK || aroundSeq < 0 || aroundSeq > maxSeq {
+					argErr = fmt.Sprintf("around_sequence must be an integer between 0 and %d (this session's last seq)", maxSeq)
+					return nil
+				}
+				if err := count(); err != nil {
+					return err
+				}
+				before, err := sessions.CountMessages(ctx, tx, sess.UUID, inclTool, &aroundSeq)
+				if err != nil {
+					return err
+				}
+				if !inclTool {
+					role, err := sessions.MessageRole(ctx, tx, sess.UUID, aroundSeq)
+					if err != nil {
+						return err
+					}
+					if role != "" && role != "user" && role != "assistant" {
+						note = fmt.Sprintf("seq %d is a %s message, hidden unless include_tool_output=true; the window is centred on the next dialogue message instead", aroundSeq, role)
+					}
+				}
+				pageMode = aroundTarget
+				// Centre on the target, then slide back so a window near the
+				// end is still a full page (the mirror of clamping at offset 0).
+				offset = max(0, min(before-limit/2, total-limit))
+				target = before
+			}
+			var err error
+			msgs, hasMore, err = sessions.GetMessages(ctx, tx, sess.UUID, offset, rows, inclTool, false)
+			if err != nil || total >= 0 {
+				return err
+			}
+			// Plain offset mode needs no count to pick its page; a page that
+			// reaches the end already gives the total, so count only when it
+			// does not (more rows follow, or offset is past the end).
+			if !hasMore && (len(msgs) > 0 || offset == 0) {
+				total = offset + len(msgs)
+				return nil
+			}
+			return count()
+		}()
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if argErr != "" {
+			return mcp.NewToolResultError(argErr), nil
 		}
 		children, err := sessions.ListSessions(ctx, database, sessions.ListFilter{ParentSession: sess.UUID, Limit: 1000})
 		if err != nil {
@@ -382,7 +445,7 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 			switch pageMode {
 			case fromEnd:
 				return n - k, n
-			case aroundSeq:
+			case aroundTarget:
 				t := min(max(target-offset, 0), n-1)
 				lo = min(max(t-(k-1)/2, 0), n-k)
 				return lo, lo + k
@@ -410,6 +473,9 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 			if hi < n {
 				resp["next_offset"] = offset + hi
 			}
+			if note != "" {
+				resp["note"] = note
+			}
 			if len(notes) > 0 {
 				resp["truncated"] = true
 				resp["next"] = strings.Join(notes, "; ")
@@ -417,42 +483,55 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 			return resp
 		}
 
-		// Shed the least valuable parts first. 1) Inlined subagent messages go
-		// before any parent message does; each stays readable by its uuid.
-		// 2) The subagent list itself is held to half the budget so a session
-		// with hundreds of children cannot starve its own messages.
-		if inclSub && measure(render(n, -1)) > maxChars {
-			stripped := make([]sub, len(subs))
-			for i, c := range subs {
+		// Subagents give way before the parent's own messages, but only as far
+		// as needed, and only once the whole response is known not to fit
+		// (fitBudget calls shed then). 1) The list is held to half the
+		// budget, measured on its entries without inlined messages, so a
+		// session with hundreds of children cannot starve its own messages.
+		// 2) Inlined subagent messages stay while one parent message still
+		// fits beside them (fitBudget then shrinks the parent page);
+		// otherwise they all go, each subagent staying readable by its uuid.
+		strip := func(list []sub) []sub {
+			out := make([]sub, len(list))
+			for i, c := range list {
 				if len(c.Messages) > 0 {
 					c.Messages, c.HasMore = nil, true
 				}
-				stripped[i] = c
+				out[i] = c
 			}
-			shownSubs = stripped
-			notes = append(notes, "subagent messages omitted to fit max_chars; read each by its uuid")
+			return out
 		}
-		if len(shownSubs) > 0 && measure(render(0, -1)) > maxChars/2 {
-			all := shownSubs
-			best, lo, hi := 0, 0, len(all)-1
-			for lo <= hi {
-				mid := (lo + hi) / 2
-				shownSubs = all[:mid]
-				if measure(render(0, -1)) <= maxChars/2 {
-					best, lo = mid, mid+1
-				} else {
-					hi = mid - 1
-				}
+		shed := func() bool {
+			if len(subs) == 0 {
+				return false
 			}
-			shownSubs = all[:best]
-			notes = append(notes, fmt.Sprintf("listed %d of %d subagents to fit max_chars", best, len(all)))
+			bare := strip(subs)
+			if shownSubs = bare; measure(render(0, -1)) > maxChars/2 {
+				best, lo, hi := 0, 0, len(bare)-1
+				for lo <= hi {
+					mid := (lo + hi) / 2
+					shownSubs = bare[:mid]
+					if measure(render(0, -1)) <= maxChars/2 {
+						best, lo = mid, mid+1
+					} else {
+						hi = mid - 1
+					}
+				}
+				subs = subs[:best]
+				notes = append(notes, fmt.Sprintf("listed %d of %d subagents to fit max_chars", best, len(bare)))
+			}
+			shownSubs = subs
+			if inclSub && measure(render(min(n, 1), -1)) > maxChars {
+				shownSubs = strip(subs)
+				notes = append(notes, "subagent messages omitted to fit max_chars; read each by its uuid")
+			}
+			return len(notes) > 0
 		}
 
-		return fitBudget(n, maxChars, render, func(kept, of int) string {
+		return fitBudget(n, maxChars, true, render, func(kept, _ int) string {
 			lo, hi := pick(kept)
-			parts := append([]string(nil), notes...)
-			parts = append(parts, fmt.Sprintf("showing messages at offsets %d-%d of the %d requested to fit max_chars=%d", offset+lo, offset+hi-1, of, maxChars))
-			if hi < of {
+			parts := []string{fmt.Sprintf("showing messages at offsets %d-%d of the %d requested to fit max_chars=%d", offset+lo, offset+hi-1, rows, maxChars)}
+			if hi < n {
 				parts = append(parts, fmt.Sprintf("continue with offset=%d", offset+hi))
 			}
 			if lo > 0 {
@@ -460,7 +539,7 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 			}
 			parts = append(parts, fmt.Sprintf("or use a smaller limit, or raise max_chars (max %d)", maxMaxChars))
 			return strings.Join(parts, "; ")
-		}), nil
+		}, shed), nil
 	}
 }
 
@@ -548,10 +627,10 @@ func handleAsk(database *db.DB, beforeRead func(context.Context)) func(context.C
 			return map[string]any{"question": ans.Question, "groups": kept, "count": len(kept)}
 		}
 		maxChars := maxCharsOf(req)
-		return fitBudget(len(order), maxChars, render, func(kept, total int) string {
+		return fitBudget(len(order), maxChars, true, render, func(kept, total int) string {
 			sessionsKept := render(kept, -1)["count"]
 			return fmt.Sprintf("included %d of %d sessions (%d of %d excerpts, hits first) to fit max_chars=%d; narrow with since/project, lower max_tokens or limit, or raise max_chars (max %d)", sessionsKept, len(groups), kept, total, maxChars, maxMaxChars)
-		}), nil
+		}, nil), nil
 	}
 }
 

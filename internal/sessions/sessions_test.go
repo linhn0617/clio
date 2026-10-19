@@ -363,6 +363,20 @@ func TestCountMessagesMatchesGetMessagesFilter(t *testing.T) {
 	}
 }
 
+func TestMessageRole(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "s1", "/p", 1)
+	addMsg(t, d, "s1", 0, "user", "u")
+	addMsg(t, d, "s1", 1, "tool_result", "t")
+	ctx := context.Background()
+	for seq, want := range map[int]string{0: "user", 1: "tool_result", 7: ""} {
+		got, err := MessageRole(ctx, d, "s1", seq)
+		if err != nil || got != want {
+			t.Fatalf("seq %d: got %q err=%v want %q", seq, got, err, want)
+		}
+	}
+}
+
 func TestGetMessagesExcludesToolOutput(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "s1", "/p", 1)

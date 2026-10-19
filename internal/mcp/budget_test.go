@@ -1,10 +1,13 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -12,9 +15,10 @@ import (
 	"github.com/linhn0617/clio/internal/db"
 )
 
-// resultLen measures what the client actually receives: every text content in
-// Unicode code points, plus structuredContent if the handler attached one
-// (a second copy of the payload, which the budget must also cover).
+// resultLen measures what the client actually receives, in the budget's unit
+// (UTF-16 code units, so an astral character such as an emoji counts 2):
+// every text content plus structuredContent if the handler attached one (a
+// second copy of the payload, which the budget must also cover).
 func resultLen(t *testing.T, r *mcp.CallToolResult) int {
 	t.Helper()
 	n := 0
@@ -23,14 +27,14 @@ func resultLen(t *testing.T, r *mcp.CallToolResult) int {
 		if !ok {
 			t.Fatalf("content not text: %T", c)
 		}
-		n += utf8.RuneCountInString(tc.Text)
+		n += len(utf16.Encode([]rune(tc.Text)))
 	}
 	if r.StructuredContent != nil {
 		b, err := json.Marshal(r.StructuredContent)
 		if err != nil {
 			t.Fatal(err)
 		}
-		n += utf8.RuneCount(b)
+		n += len(utf16.Encode([]rune(string(b))))
 	}
 	return n
 }
@@ -364,16 +368,19 @@ func TestBudgetReadSessionDropsInlinedSubagentMessagesAsLastResort(t *testing.T)
 
 // ---- review round 2 ----
 
-// bigDataset seeds enough data that every tool's full response exceeds 48,000
-// characters, so each budget below must truncate.
+// bigDataset seeds realistic-size rows (ordinary project paths, ~250-char
+// messages, long but plausible shell commands, 800-char transcript messages):
+// no single row comes near even the 4,000 floor, so every tool must fit its
+// budget by dropping whole rows. The activity and read_session responses
+// exceed 48,000; the others exceed only the floor.
 func bigDataset(t *testing.T, d *db.DB) {
 	t.Helper()
-	long := strings.Repeat("p", 5000)
+	cmd := "cat <<'EOF' > deploy.sh\n" + strings.Repeat("kubectl rollout status deploy/api --timeout=120s && ", 22) + "\nEOF"
 	for i := range 50 {
 		id := fmt.Sprintf("s%02d", i)
-		addSession(t, d, id, fmt.Sprintf("/%s/%02d", long, i))
+		addSession(t, d, id, fmt.Sprintf("/home/dev/src/github.com/acme/service-%02d", i))
 		addMsg(t, d, id, 0, "user", "needlehaystack authentication failure "+strings.Repeat("filler ", 30))
-		addTarget(t, d, id, "command", fmt.Sprintf("cmd-%02d-%s", i, long))
+		addTarget(t, d, id, "command", fmt.Sprintf("%02d %s", i, cmd))
 	}
 	addSession(t, d, "R", "/r")
 	for i := range 200 {
@@ -384,41 +391,48 @@ func bigDataset(t *testing.T, d *db.DB) {
 func TestBudgetFinalResultWithinMaxCharsForEveryTool(t *testing.T) {
 	d := testDB(t)
 	bigDataset(t, d)
-	tools := map[string]func(max int) *mcp.CallToolResult{
-		"search": func(max int) *mcp.CallToolResult {
+	all := []int{4000, 40000, 48000}
+	tools := map[string]struct {
+		run          func(max int) *mcp.CallToolResult
+		mustTruncate []int // budgets this dataset exceeds; under the others it fits whole
+	}{
+		"search": {func(max int) *mcp.CallToolResult {
 			return call(t, handleSearch(d, nil), map[string]any{"query": "needlehaystack", "limit": 50, "max_chars": max})
-		},
-		"list_sessions": func(max int) *mcp.CallToolResult {
+		}, []int{4000}},
+		"list_sessions": {func(max int) *mcp.CallToolResult {
 			return call(t, handleListSessions(d, nil), map[string]any{"limit": 50, "max_chars": max})
-		},
-		"activity_summary": func(max int) *mcp.CallToolResult {
+		}, []int{4000}},
+		"activity_summary": {func(max int) *mcp.CallToolResult {
 			return call(t, handleActivitySummary(d, nil), map[string]any{"group_by": "command", "limit": 50, "max_chars": max})
-		},
-		"ask": func(max int) *mcp.CallToolResult {
+		}, all},
+		"ask": {func(max int) *mcp.CallToolResult {
 			return call(t, handleAsk(d, nil), map[string]any{"question": "authentication failure", "limit": 10, "max_tokens": 8000, "max_chars": max})
-		},
-		"read_session": func(max int) *mcp.CallToolResult {
+		}, []int{4000}},
+		"read_session": {func(max int) *mcp.CallToolResult {
 			return call(t, handleReadSession(d, nil), map[string]any{"uuid": "R", "limit": 200, "max_chars": max})
-		},
+		}, all},
 	}
-	for name, run := range tools {
-		for _, max := range []int{4000, 40000, 48000} {
-			r := run(max)
+	for name, tc := range tools {
+		for _, max := range all {
+			r := tc.run(max)
 			if r.StructuredContent != nil {
 				t.Errorf("%s/%d: structuredContent duplicates the payload", name, max)
 			}
-			next, _ := resultJSON(t, r)["next"].(string)
-			if n := resultLen(t, r); n > max && !strings.Contains(next, "fixed fields exceed") {
+			m := resultJSON(t, r)
+			if n := resultLen(t, r); n > max {
 				t.Errorf("%s/%d: final result is %d chars, over budget", name, max, n)
 			}
-			if resultJSON(t, r)["truncated"] != true {
-				t.Errorf("%s/%d: dataset should exceed the budget and be truncated", name, max)
+			if next, _ := m["next"].(string); strings.Contains(next, "fixed fields") {
+				t.Errorf("%s/%d: realistic rows must not hit the fixed-fields fallback: %s", name, max, next)
+			}
+			if want := slices.Contains(tc.mustTruncate, max); (m["truncated"] == true) != want {
+				t.Errorf("%s/%d: truncated=%v, want %v", name, max, m["truncated"], want)
 			}
 		}
 	}
 }
 
-func TestBudgetBudgetCountsUnicodeCodePointsNotBytes(t *testing.T) {
+func TestBudgetCountsCharactersNotBytes(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "P", "/p")
 	for i := range 20 {
@@ -427,11 +441,12 @@ func TestBudgetBudgetCountsUnicodeCodePointsNotBytes(t *testing.T) {
 	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "max_chars": 4000})
 	m := resultJSON(t, r)
 	if n := resultLen(t, r); n > 4000 {
-		t.Fatalf("%d code points over budget", n)
+		t.Fatalf("%d chars over budget", n)
 	}
-	// 600 CJK runes per message: ~5 fit by runes; a byte count would allow only ~1.
+	// 600 CJK characters per message (one UTF-16 unit each): ~5 fit; a byte
+	// count would allow only ~1.
 	if kept := len(m["messages"].([]any)); kept < 4 {
-		t.Fatalf("budget must count code points, not bytes: kept only %d", kept)
+		t.Fatalf("budget must count characters, not bytes: kept only %d", kept)
 	}
 }
 
@@ -461,8 +476,12 @@ func TestBudgetFixedFieldsExceedIsReportedAsSuch(t *testing.T) {
 	if m["truncated"] != true || !strings.Contains(m["next"].(string), "fixed fields exceed max_chars") {
 		t.Fatalf("want truncated + fixed-fields hint, got truncated=%v next=%v", m["truncated"], m["next"])
 	}
-	if len(m["sessions"].([]any)) != 1 {
-		t.Fatal("the row is still returned")
+	// The row cannot be made to fit, so it is dropped rather than sent over budget.
+	if n := len(m["sessions"].([]any)); n != 0 || m["count"].(float64) != 0 {
+		t.Fatalf("an unfittable row must not be returned: %d rows, count=%v", n, m["count"])
+	}
+	if n := resultLen(t, r); n > 4000 {
+		t.Fatalf("response %d chars over budget", n)
 	}
 }
 
@@ -625,5 +644,327 @@ func TestReadSessionPlainOffsetReportsTotal(t *testing.T) {
 	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "offset": 4, "limit": 3}))
 	if int(m["total"].(float64)) != 12 {
 		t.Fatalf("total=%v want 12", m["total"])
+	}
+}
+
+// ---- review round 3 ----
+
+// Each session's hit is preceded by two long context messages ("<" escapes
+// to six characters), so cutting excerpts in their original order would keep
+// a leading context excerpt and nothing else: a group without its hit.
+func TestBudgetAskKeepsHitWhenContextPrecedesIt(t *testing.T) {
+	d := testDB(t)
+	for i := range 3 {
+		id := fmt.Sprintf("s%d", i)
+		addSession(t, d, id, "/p")
+		addMsg(t, d, id, 0, "user", strings.Repeat("<", 600))
+		addMsg(t, d, id, 1, "assistant", strings.Repeat("<", 600))
+		addMsg(t, d, id, 2, "user", "authentication failure")
+	}
+	r := call(t, handleAsk(d, nil), map[string]any{"question": "authentication failure", "max_chars": 4000})
+	m := wantTruncated(t, r, 4000)
+	groups := m["groups"].([]any)
+	if len(groups) == 0 {
+		t.Fatal("expected at least one group")
+	}
+	for _, g := range groups {
+		hit := false
+		for _, e := range g.(map[string]any)["excerpts"].([]any) {
+			if e.(map[string]any)["is_hit"] == true {
+				hit = true
+			}
+		}
+		if !hit {
+			t.Fatalf("every kept group must contain its hit excerpt: %v", g)
+		}
+	}
+}
+
+// The tools whose single row carries uncuttable fields (paths, titles, ids)
+// that can on their own exceed the budget. For them the fallback is zero rows
+// plus a fixed-fields hint, and the response still fits. Every other tool's
+// row is cut by its text instead (TestBudgetCuttableRowsAreCutNotDropped).
+func TestBudgetFixedFieldsFallBackToNoRows(t *testing.T) {
+	long := "/p/" + strings.Repeat("x", 6000)
+	d := testDB(t)
+	addSession(t, d, "s1", long)
+	addMsg(t, d, "s1", 0, "user", "needlehaystack authentication failure")
+	addUsage(t, d, "s1", "claude-code", "model-one", 100, 150)
+	for name, tc := range map[string]struct {
+		args map[string]any
+		h    func(d *db.DB) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)
+		rows string
+	}{
+		"search": {map[string]any{"query": "needlehaystack"}, func(d *db.DB) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return handleSearch(d, nil)
+		}, "results"},
+		"list_sessions": {map[string]any{}, func(d *db.DB) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return handleListSessions(d, nil)
+		}, "sessions"},
+		"activity/project": {map[string]any{"group_by": "project"}, func(d *db.DB) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return handleActivitySummary(d, nil)
+		}, "buckets"},
+		"activity/usage": {map[string]any{"group_by": "usage", "source": "all"}, func(d *db.DB) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return handleActivitySummary(d, nil)
+		}, "sessions"},
+		"ask": {map[string]any{"question": "authentication failure"}, func(d *db.DB) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return handleAsk(d, nil)
+		}, "groups"},
+	} {
+		tc.args["max_chars"] = 4000
+		r := call(t, tc.h(d), tc.args)
+		m := resultJSON(t, r)
+		if next, _ := m["next"].(string); m["truncated"] != true || !strings.Contains(next, "fixed fields exceed max_chars=4000") {
+			t.Errorf("%s: want truncated + fixed-fields hint, got truncated=%v next=%v", name, m["truncated"], m["next"])
+		}
+		if rows, _ := m[tc.rows].([]any); len(rows) != 0 {
+			t.Errorf("%s: an unfittable row must be dropped, got %d", name, len(rows))
+		}
+		if n := resultLen(t, r); n > 4000 {
+			t.Errorf("%s: response %d chars over budget", name, n)
+		}
+	}
+}
+
+// Rows made of fixed-size fields plus one free-text field never take the
+// zero-row path: the text is cut instead.
+func TestBudgetCuttableRowsAreCutNotDropped(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addMsg(t, d, "P", 0, "user", strings.Repeat("a", 60000))
+	addTarget(t, d, "P", "command", strings.Repeat("c", 60000))
+	for name, r := range map[string]*mcp.CallToolResult{
+		"read_session":     call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "max_chars": 4000}),
+		"activity/command": call(t, handleActivitySummary(d, nil), map[string]any{"group_by": "command", "max_chars": 4000}),
+	} {
+		m := wantTruncated(t, r, 4000)
+		if next := m["next"].(string); strings.Contains(next, "fixed fields") || !strings.Contains(next, "content was cut") {
+			t.Errorf("%s: want the content-cut hint, got %q", name, next)
+		}
+		rows, _ := m["messages"].([]any)
+		if rows == nil {
+			rows, _ = m["activity"].([]any)
+		}
+		if len(rows) != 1 {
+			t.Errorf("%s: the cut row must be returned, got %d", name, len(rows))
+		}
+	}
+}
+
+// When the whole response fits, the subagent list is never cut, however much
+// of the budget its inlined messages take.
+func TestBudgetSubagentListKeptWhenResponseFits(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addMsg(t, d, "P", 0, "user", "hi")
+	for i := range 5 {
+		c := fmt.Sprintf("agent-%d", i)
+		addChild(t, d, c, "/p", "P", "general-purpose")
+		for j := range 10 {
+			addMsg(t, d, c, j, "assistant", strings.Repeat("s", 600))
+		}
+	}
+	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "include_subagents": true})
+	m := resultJSON(t, r)
+	if _, has := m["truncated"]; has {
+		t.Fatalf("a response that fits must not be truncated: next=%v", m["next"])
+	}
+	subs := m["subagents"].([]any)
+	if len(subs) != 5 {
+		t.Fatalf("all 5 subagents fit, got %d", len(subs))
+	}
+	for _, s := range subs {
+		if n := len(s.(map[string]any)["messages"].([]any)); n != 10 {
+			t.Fatalf("subagent messages must be kept: %d", n)
+		}
+	}
+	if n := resultLen(t, r); n <= defaultMaxChars/2 || n > defaultMaxChars {
+		t.Fatalf("fixture must fill more than half the budget but fit it: %d", n)
+	}
+}
+
+// When the response overflows, the half-budget cap on the subagent list
+// measures the list entries alone: one subagent whose inlined messages take
+// more than half the budget is still listed, and keeps its messages while
+// the parent page shrinks around them.
+func TestBudgetSubagentListCapIgnoresInlinedMessages(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	for i := range 60 {
+		addMsg(t, d, "P", i, "user", strings.Repeat("m", 800))
+	}
+	addChild(t, d, "agent-c", "/p", "P", "general-purpose")
+	for i := range 25 {
+		addMsg(t, d, "agent-c", i, "assistant", strings.Repeat("s", 1000))
+	}
+	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "limit": 200, "include_subagents": true})
+	m := wantTruncated(t, r, defaultMaxChars)
+	subs := m["subagents"].([]any)
+	if len(subs) != 1 {
+		t.Fatalf("the one subagent must stay listed, got %d (next=%q)", len(subs), m["next"])
+	}
+	if msgs, _ := subs[0].(map[string]any)["messages"].([]any); len(msgs) != 25 {
+		t.Fatalf("its messages fit beside a shorter parent page and must stay: %d", len(msgs))
+	}
+	if kept := len(m["messages"].([]any)); kept == 0 || kept >= 60 {
+		t.Fatalf("parent page should shrink to a non-empty prefix, got %d", kept)
+	}
+}
+
+// A large parent page is shrunk before the inlined subagent messages are
+// dropped; they go only when even one parent message cannot sit beside them.
+func TestBudgetSubagentMessagesKeptByShrinkingParentPage(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	for i := range 20 {
+		addMsg(t, d, "P", i, "user", strings.Repeat("m", 800))
+	}
+	addChild(t, d, "agent-c", "/p", "P", "general-purpose")
+	for i := range 3 {
+		addMsg(t, d, "agent-c", i, "assistant", strings.Repeat("s", 300))
+	}
+	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "include_subagents": true, "max_chars": 4000})
+	m := wantTruncated(t, r, 4000)
+	if kept := len(m["messages"].([]any)); kept == 0 || kept >= 20 {
+		t.Fatalf("parent page should shrink to a non-empty prefix, got %d", kept)
+	}
+	sub := m["subagents"].([]any)[0].(map[string]any)
+	if msgs, _ := sub["messages"].([]any); len(msgs) != 3 {
+		t.Fatalf("subagent messages must survive while the parent page can shrink: %v", sub)
+	}
+	if next := m["next"].(string); strings.Contains(next, "subagent messages omitted") {
+		t.Fatalf("no subagent messages were omitted: %q", next)
+	}
+}
+
+func TestBudgetHintSaysContentWasCutWhenRowsAlsoDropped(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addMsg(t, d, "P", 0, "user", strings.Repeat("a", 6000))
+	addMsg(t, d, "P", 1, "user", strings.Repeat("b", 6000))
+	m := wantTruncated(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "max_chars": 4000}), 4000)
+	next := m["next"].(string)
+	if !strings.Contains(next, "continue with offset=1") || !strings.Contains(next, "content was cut") {
+		t.Fatalf("hint must cover both the dropped message and the cut one: %q", next)
+	}
+}
+
+func TestBudgetHintKeepsSubagentNoteAlongsideContentCut(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addMsg(t, d, "P", 0, "user", strings.Repeat("a", 6000))
+	addChild(t, d, "agent-c", "/p", "P", "general-purpose")
+	for i := range 20 {
+		addMsg(t, d, "agent-c", i, "assistant", strings.Repeat("s", 800))
+	}
+	m := wantTruncated(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "include_subagents": true, "max_chars": 4000}), 4000)
+	next := m["next"].(string)
+	if !strings.Contains(next, "subagent messages omitted") || !strings.Contains(next, "content was cut") {
+		t.Fatalf("hint must keep the subagent note and add the content cut: %q", next)
+	}
+}
+
+func TestBudgetReadSessionHintNamesRequestedCount(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	for i := range 5 {
+		addMsg(t, d, "P", i, "user", strings.Repeat("m", 1500))
+	}
+	m := wantTruncated(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "max_chars": 4000}), 4000)
+	if next := m["next"].(string); !strings.Contains(next, fmt.Sprintf("of the %d requested", defaultReadLimit)) {
+		t.Fatalf("hint must name the %d messages requested: %q", defaultReadLimit, next)
+	}
+}
+
+// Emoji are one code point but two UTF-16 units; a code-point budget would
+// let these responses reach about twice max_chars in UTF-16.
+func TestBudgetCountsUTF16UnitsForAstralCharacters(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	for i := range 20 {
+		addMsg(t, d, "P", i, "user", strings.Repeat("😀", 600))
+	}
+	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "max_chars": 4000})
+	m := wantTruncated(t, r, 4000)
+	if kept := len(m["messages"].([]any)); kept == 0 || kept > 3 {
+		t.Fatalf("600 emoji = 1200 units per message: 1..3 fit in 4000, got %d", kept)
+	}
+	// A single oversized emoji message is cut on a character boundary.
+	d2 := testDB(t)
+	addSession(t, d2, "Q", "/p")
+	addMsg(t, d2, "Q", 0, "user", strings.Repeat("😀", 5000))
+	r = call(t, handleReadSession(d2, nil), map[string]any{"uuid": "Q", "max_chars": 4000})
+	m = wantTruncated(t, r, 4000)
+	c := m["messages"].([]any)[0].(map[string]any)["content"].(string)
+	if !strings.HasPrefix(c, "😀😀") || strings.ContainsRune(c, utf8.RuneError) {
+		t.Fatalf("content must keep whole emoji: %q...", c[:16])
+	}
+	if !strings.Contains(c, "[truncated ") {
+		t.Fatalf("missing truncation marker")
+	}
+}
+
+func TestReadSessionModeValuesAcceptNumericStrings(t *testing.T) {
+	d := testDB(t)
+	seedSeq(t, d, 100)
+	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "last_n": "5"}))
+	wantSeqs(t, seqs(t, m), 95, 99)
+	m = resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "around_sequence": "50", "limit": "10"}))
+	wantSeqs(t, seqs(t, m), 45, 54)
+}
+
+// last_n counts the messages and then fetches the tail; a message written in
+// between must not shift the page off the tail it counted.
+func TestReadSessionLastNReadsOneSnapshot(t *testing.T) {
+	d := testDB(t)
+	seedSeq(t, d, 30)
+	w, err := db.Open(d.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { w.Close() })
+	afterReadSessionCount = func() { addMsg(t, w, "P", 30, "user", "late") }
+	t.Cleanup(func() { afterReadSessionCount = nil })
+	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "last_n": 5}))
+	wantSeqs(t, seqs(t, m), 25, 29)
+	if m["has_more"] != false || int(m["total"].(float64)) != 30 {
+		t.Fatalf("page must be the tail of one snapshot: has_more=%v total=%v", m["has_more"], m["total"])
+	}
+}
+
+// Plain offset mode derives total from the page when the page reaches the
+// end, and counts otherwise; both must report the real count.
+func TestReadSessionPlainOffsetTotalOnEveryPage(t *testing.T) {
+	d := testDB(t)
+	seedSeq(t, d, 12)
+	for _, c := range []struct{ offset, limit int }{{0, 50}, {8, 10}, {4, 3}, {50, 10}, {12, 5}} {
+		m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "offset": c.offset, "limit": c.limit}))
+		if int(m["total"].(float64)) != 12 {
+			t.Errorf("offset=%d limit=%d: total=%v want 12", c.offset, c.limit, m["total"])
+		}
+	}
+}
+
+func TestReadSessionAroundHiddenToolResultSaysSo(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p")
+	addMsg(t, d, "P", 0, "user", "u0")
+	addMsg(t, d, "P", 1, "tool_result", "t1")
+	addMsg(t, d, "P", 2, "assistant", "a2")
+	m := resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "around_sequence": 1}))
+	note, _ := m["note"].(string)
+	if !strings.Contains(note, "seq 1") || !strings.Contains(note, "tool_result") || !strings.Contains(note, "include_tool_output") {
+		t.Fatalf("want a note naming the hidden tool_result, got %v", m["note"])
+	}
+	if _, has := m["truncated"]; has {
+		t.Fatalf("nothing was cut: %v", m)
+	}
+	m = resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "around_sequence": 1, "include_tool_output": true}))
+	if _, has := m["note"]; has {
+		t.Fatalf("a visible target needs no note: %v", m["note"])
+	}
+	m = resultJSON(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "around_sequence": 2}))
+	if _, has := m["note"]; has {
+		t.Fatalf("a visible target needs no note: %v", m["note"])
 	}
 }

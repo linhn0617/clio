@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"unicode/utf8"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -15,28 +15,66 @@ func maxCharsOf(req mcp.CallToolRequest) int {
 	return clampRange(req.GetInt("max_chars", defaultMaxChars), defaultMaxChars, minMaxChars, maxMaxChars)
 }
 
-// capText keeps the first limit code points of s and appends a marker saying
-// how many were cut. A negative limit means "no cap".
+// capText keeps the first limit characters of s (UTF-16 code units, the
+// budget's unit, never splitting a character) and appends a marker saying how
+// many were cut. A negative limit means "no cap".
 func capText(s string, limit int) string {
 	if limit < 0 {
 		return s
 	}
-	n := utf8.RuneCountInString(s)
+	n := 0
+	for _, r := range s {
+		n += runeUnits(r)
+	}
 	if n <= limit {
 		return s
 	}
-	r := []rune(s)
-	return string(r[:limit]) + fmt.Sprintf("… [truncated %d chars]", n-limit)
+	kept, end := 0, 0
+	for i, r := range s {
+		if kept+runeUnits(r) > limit {
+			end = i
+			break
+		}
+		kept += runeUnits(r)
+	}
+	return s[:end] + fmt.Sprintf("… [truncated %d chars]", n-kept)
 }
 
-// measure is the budget's unit: Unicode code points of the serialized JSON,
-// escapes included.
+// runeUnits is r's length in UTF-16 code units: 2 for an astral character
+// (most emoji), 1 otherwise.
+func runeUnits(r rune) int {
+	if r > 0xFFFF {
+		return 2
+	}
+	return 1
+}
+
+// utf16Units is the budget's unit: the UTF-16 code units of b, which must be
+// valid UTF-8 (json.Marshal output always is). That is how JavaScript counts
+// string length, and so most likely how Claude Code applies its 50,000
+// character threshold; an emoji counts 2 where a code-point count would say 1.
+// One unit per non-continuation byte, plus one more per 4-byte sequence.
+func utf16Units(b []byte) int {
+	n := 0
+	for _, c := range b {
+		if c&0xC0 != 0x80 {
+			n++
+		}
+		if c >= 0xF0 {
+			n++
+		}
+	}
+	return n
+}
+
+// measure is the budget's size of a payload: UTF-16 code units of its
+// serialized JSON, escapes included.
 func measure(m map[string]any) int {
 	b, err := json.Marshal(m)
 	if err != nil {
 		return 0 // unreachable for our plain payloads; fitBudget reports it
 	}
-	return utf8.RuneCount(b)
+	return utf16Units(b)
 }
 
 // jsonText wraps a payload as a text-only tool result. The mcp-go helper
@@ -48,86 +86,106 @@ func jsonText(b []byte) *mcp.CallToolResult {
 	return mcp.NewToolResultText(string(b))
 }
 
-// fitBudget renders a response of n rows within maxChars code points of
-// serialized JSON, measured on the real output rather than estimated.
+// fitBudget renders a response of n rows within maxChars UTF-16 code units
+// of serialized JSON, measured on the exact text sent rather than estimated.
 //
 // render(k, textCap) must build the whole payload with only the first k rows
 // (it decides which k rows when "first" is not right, e.g. read_session
 // windows); textCap >= 0 asks it to cut each text field of the kept rows to
-// that many code points via capText, and < 0 means no cap. fitBudget adds
-// "truncated" and "next" itself whenever rows or text were dropped, so those
-// fields count towards the size; hint(kept, total) words the row-dropping case.
+// that many units via capText, and < 0 means no cap. A "next" string render
+// sets is a note of its own and is kept. fitBudget adds "truncated" and
+// "next" itself whenever rows or text were dropped, joining every reason, so
+// those fields count towards the size; hint(kept, total) words the
+// row-dropping case. cuttable says whether rows have text render can cut.
+// shed (may be nil) runs once if all rows overflow, to drop parts outside the
+// rows that render reads (read_session's subagents) before any row goes; it
+// reports whether it dropped anything.
 //
 // Order of attack, each step stopping as soon as the result fits: (1) all
-// rows; (2) fewer rows (binary search, size is monotone in k); (3) one row
-// with its text cut (binary search on the cap), because an empty page could
-// never make progress; (4) if even that overflows, the fixed fields alone
-// exceed the budget — the one row is returned anyway and the hint says so.
-func fitBudget(n, maxChars int, render func(k, textCap int) map[string]any, hint func(kept, total int) string) *mcp.CallToolResult {
-	build := func(k, textCap int) (map[string]any, int) {
+// rows, retried after a shed; (2) fewer rows (binary search, size is monotone
+// in k); (3) one row with its text cut (binary search on the cap), skipped
+// when rows have no cuttable text; (4) if even that overflows, one row's fixed
+// fields alone exceed the budget, so no rows are returned and the hint says so.
+func fitBudget(n, maxChars int, cuttable bool, render func(k, textCap int) map[string]any, hint func(kept, total int) string, shed func() bool) *mcp.CallToolResult {
+	// build serializes k rows; note, when set, replaces the dropped-rows hint.
+	build := func(k, textCap int, note string) ([]byte, int, error) {
 		m := render(k, textCap)
-		if k < n {
-			m["truncated"] = true
-			m["next"] = hint(k, n)
-		} else if textCap >= 0 {
-			m["truncated"] = true
-			if m["next"] == nil {
-				m["next"] = fmt.Sprintf("row content was cut to fit max_chars=%d; read the full text with a narrower query, or raise max_chars (max %d)", maxChars, maxMaxChars)
-			}
+		var parts []string
+		if s, _ := m["next"].(string); s != "" {
+			parts = append(parts, s)
 		}
-		return m, measure(m)
-	}
-	finish := func(m map[string]any) *mcp.CallToolResult {
+		if note != "" {
+			parts = append(parts, note)
+		} else if k < n {
+			parts = append(parts, hint(k, n))
+		}
+		if textCap >= 0 {
+			parts = append(parts, fmt.Sprintf("row content was cut to fit max_chars=%d; read the full text with a narrower query, or raise max_chars (max %d)", maxChars, maxMaxChars))
+		}
+		if len(parts) > 0 {
+			m["truncated"] = true
+			m["next"] = strings.Join(parts, "; ")
+		}
 		b, err := json.Marshal(m)
+		return b, utf16Units(b), err
+	}
+	finish := func(b []byte, err error) *mcp.CallToolResult {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error())
 		}
 		return jsonText(b)
 	}
-
-	if m, size := build(n, -1); size <= maxChars {
-		return finish(m)
+	// search returns the serialized result for the largest v in [lo, hi]
+	// whose size fits, or nil when none does.
+	search := func(lo, hi int, size func(v int) ([]byte, int, error)) ([]byte, error) {
+		var best []byte
+		for lo <= hi {
+			mid := (lo + hi) / 2
+			b, n, err := size(mid)
+			if err != nil {
+				return nil, err
+			}
+			if n <= maxChars {
+				best, lo = b, mid+1
+			} else {
+				hi = mid - 1
+			}
+		}
+		return best, nil
 	}
-	best, lo, hi := 0, 1, n-1
-	for lo <= hi {
-		mid := (lo + hi) / 2
-		if _, size := build(mid, -1); size <= maxChars {
-			best, lo = mid, mid+1
-		} else {
-			hi = mid - 1
+
+	if b, size, err := build(n, -1, ""); err != nil || size <= maxChars {
+		return finish(b, err)
+	}
+	if shed != nil && shed() {
+		if b, size, err := build(n, -1, ""); err != nil || size <= maxChars {
+			return finish(b, err)
 		}
 	}
-	if best > 0 {
-		m, _ := build(best, -1)
-		return finish(m)
+	b, err := search(1, n-1, func(k int) ([]byte, int, error) { return build(k, -1, "") })
+	if err != nil || b != nil {
+		return finish(b, err)
 	}
-
-	k := min(n, 1)
-	bestCap, lo, hi := -1, 0, maxChars
-	for k > 0 && lo <= hi {
-		mid := (lo + hi) / 2
-		if _, size := build(k, mid); size <= maxChars {
-			bestCap, lo = mid, mid+1
-		} else {
-			hi = mid - 1
+	if n > 0 && cuttable {
+		b, err := search(0, maxChars, func(c int) ([]byte, int, error) { return build(1, c, "") })
+		if err != nil || b != nil {
+			return finish(b, err)
 		}
 	}
-	if bestCap >= 0 {
-		m, _ := build(k, bestCap)
-		return finish(m)
+	note := fmt.Sprintf("fixed fields exceed max_chars=%d even for a single row, so no rows are returned; raise max_chars (max %d) or narrow the query", maxChars, maxMaxChars)
+	if n == 0 {
+		note = fmt.Sprintf("fixed fields exceed max_chars=%d even with no rows; raise max_chars (max %d) or narrow the query", maxChars, maxMaxChars)
 	}
-	m, _ := build(k, 0)
-	m["truncated"] = true
-	m["next"] = fmt.Sprintf("fixed fields exceed max_chars=%d even with row text removed; raise max_chars (max %d) or narrow the query", maxChars, maxMaxChars)
-	return finish(m)
+	b, _, err = build(0, -1, note)
+	return finish(b, err)
 }
 
 // fitRows is fitBudget for the tools whose payload is "fixed fields plus one
 // slice of rows kept from the front". build wraps a row slice into the
-// payload; capRow (may be nil) cuts a row's free-text field for the one-row
-// fallback; noun and advice word the dropped-rows hint.
+// payload; capRow (nil when rows have no free text) cuts a row's free-text
+// field for the one-row fallback; noun and advice word the dropped-rows hint.
 func fitRows[T any](rows []T, maxChars int, capRow func(r *T, textCap int), build func(rows []T) map[string]any, noun, advice string) *mcp.CallToolResult {
-	return fitBudget(len(rows), maxChars, func(k, textCap int) map[string]any {
+	return fitBudget(len(rows), maxChars, capRow != nil, func(k, textCap int) map[string]any {
 		kept := rows[:k]
 		if textCap >= 0 && capRow != nil {
 			kept = slices.Clone(kept)
@@ -138,5 +196,5 @@ func fitRows[T any](rows []T, maxChars int, capRow func(r *T, textCap int), buil
 		return build(kept)
 	}, func(kept, total int) string {
 		return fmt.Sprintf("showing %d of %d %s to fit max_chars=%d; %s, or raise max_chars (max %d)", kept, total, noun, maxChars, advice, maxMaxChars)
-	})
+	}, nil)
 }

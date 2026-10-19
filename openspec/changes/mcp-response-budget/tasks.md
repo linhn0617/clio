@@ -19,3 +19,27 @@
 ## 4. Verification
 
 - [x] 4.1 `gofmt -l .`, `go vet ./...`, `go test -count=1 ./...`, `openspec validate --all --strict`
+
+## 5. Round three (review fixes)
+
+- [x] 5.1 `ask` hit-first test whose data an in-order cut cannot pass (negative control: in-order
+      ranking turns it red)
+- [x] 5.2 A row whose fixed fields alone exceed the budget falls back to zero rows with a
+      fixed-fields hint measured on the final text; realistic-size data in the every-tool test
+      without the over-budget relaxation; the tools that may take this path are listed
+      (search, list_sessions, activity_summary project/usage, ask)
+- [x] 5.3 Subagent list cap measured on its entries without inlined messages, and applied only
+      when the whole response does not fit
+- [x] 5.4 Parent page shrinks before inlined subagent messages are dropped; they go only when one
+      parent message does not fit beside them
+- [x] 5.5 `last_n` / `around_sequence` accept numeric strings via the same coercion as `offset`,
+      `limit` and `max_chars`
+- [x] 5.6 `next` joins every reason (dropped rows, cut text, subagent notes); read_session names
+      the requested page size
+- [x] 5.7 Budget counted in UTF-16 code units everywhere (measure, binary searches, `capText`,
+      hints, tool description), 48,000 cap kept; emoji test
+- [x] 5.8 read_session count and page fetch in one read-only transaction; plain offset mode
+      derives `total` from a page that reaches the end instead of counting
+- [x] 5.9 Reuse serialized results; skip the text-cut search for rows with no cuttable text;
+      README notes a single row's text may be truncated; `note` for a hidden `around_sequence`
+      target

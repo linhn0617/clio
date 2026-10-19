@@ -232,11 +232,18 @@ func rawColumn(includeRaw bool) string {
 	return "''"
 }
 
+// Querier is the read surface the message helpers below need: a *db.DB, or a
+// *sql.Tx when several reads must see one snapshot.
+type Querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // GetMessages returns a session's messages ordered by seq, paginated.
 // When includeToolOutput is false, tool_use/tool_result/thinking are omitted.
 // When includeRaw is false, raw_json is not read (Message.RawJSON stays empty).
 // Returns the page and whether more rows exist past offset+limit.
-func GetMessages(ctx context.Context, database *db.DB, sessionUUID string, offset, limit int, includeToolOutput, includeRaw bool) ([]Message, bool, error) {
+func GetMessages(ctx context.Context, database Querier, sessionUUID string, offset, limit int, includeToolOutput, includeRaw bool) ([]Message, bool, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -272,7 +279,7 @@ func GetMessages(ctx context.Context, database *db.DB, sessionUUID string, offse
 // GetMessages. With beforeSeq non-nil only messages with seq < *beforeSeq are
 // counted, which is the zero-based position GetMessages' offset would use to
 // start at that seq.
-func CountMessages(ctx context.Context, database *db.DB, sessionUUID string, includeToolOutput bool, beforeSeq *int) (int, error) {
+func CountMessages(ctx context.Context, database Querier, sessionUUID string, includeToolOutput bool, beforeSeq *int) (int, error) {
 	q := `SELECT COUNT(*) FROM messages WHERE session_uuid = ?`
 	args := []any{sessionUUID}
 	if !includeToolOutput {
@@ -289,10 +296,21 @@ func CountMessages(ctx context.Context, database *db.DB, sessionUUID string, inc
 
 // MaxSeq returns the highest message seq of a session over all roles, or -1
 // when it has no messages.
-func MaxSeq(ctx context.Context, database *db.DB, sessionUUID string) (int, error) {
+func MaxSeq(ctx context.Context, database Querier, sessionUUID string) (int, error) {
 	var n int
 	err := database.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), -1) FROM messages WHERE session_uuid = ?`, sessionUUID).Scan(&n)
 	return n, err
+}
+
+// MessageRole returns the role of a session's message at seq, or "" when no
+// message has that seq.
+func MessageRole(ctx context.Context, database Querier, sessionUUID string, seq int) (string, error) {
+	var role string
+	err := database.QueryRowContext(ctx, `SELECT role FROM messages WHERE session_uuid = ? AND seq = ?`, sessionUUID, seq).Scan(&role)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return role, err
 }
 
 // GetWindow returns a conversational window around a retrieval hit: up to `before`
