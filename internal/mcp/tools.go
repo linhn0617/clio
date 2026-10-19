@@ -250,6 +250,8 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 		}
 		sess, err := sessions.ResolvePrefix(ctx, database, uuid, req.GetString("source", registry.DefaultSource()))
 		if err != nil {
+			// An ambiguous prefix lists its candidates with RFC 3339 times,
+			// like every other MCP tool (AmbiguousError.Error).
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		limit := clamp(req.GetInt("limit", defaultReadLimit), defaultReadLimit, maxReadLimit)

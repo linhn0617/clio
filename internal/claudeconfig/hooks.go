@@ -274,25 +274,6 @@ func hookIsClioRecall(h any) bool {
 	return ok && isClioRecall(cmd)
 }
 
-// AddPreToolUseReadHook registers clio's file-context hook: a PreToolUse group
-// with matcher "Read|Bash" and a 10-second timeout running the given command
-// (`<exe> file-history --hook`). Idempotent; other groups and keys untouched.
-func AddPreToolUseReadHook(settingsPath, command string) error {
-	_, err := InstallPreToolUseReadHook(settingsPath, command)
-	return err
-}
-
-// InstallPreToolUseReadHook is AddPreToolUseReadHook that reports what it did.
-func InstallPreToolUseReadHook(settingsPath, command string) (FileHistoryInstall, error) {
-	var res FileHistoryInstall
-	err := mutate(settingsPath, func(root map[string]any) error {
-		var err error
-		res, err = installFileHistory(root, command)
-		return err
-	})
-	return res, err
-}
-
 // installFileHistory makes exactly one clio file-history entry fire for both
 // Read and Bash.
 //   - A clio entry in a group whose matcher covers both counts as installed; the
@@ -486,12 +467,6 @@ func groupHooks(g any) (gm map[string]any, hs []any, ok bool) {
 	return gm, hs, ok
 }
 
-// RemovePreToolUseReadHook removes clio's file-context hook entries, keeping any
-// co-grouped foreign hooks and dropping the PreToolUse key only when empty.
-func RemovePreToolUseReadHook(settingsPath string) error {
-	return removeHookEntries(settingsPath, "PreToolUse", isClioFileHistory)
-}
-
 // HasPreToolUseReadHook reports whether clio's file-context hook is fully
 // registered: a clio entry sits in a group whose matcher covers both Read and
 // Bash. An older Read-only entry is not (install-hook upgrades it).
@@ -526,12 +501,8 @@ func HasAnyClioHookEntries(settingsPath string) (recall, fileHistory bool, err e
 	return recall, fileHistory, err
 }
 
-// removeHookEntries drops every hook entry under event whose command matches,
+// removeHookEntriesIn drops every hook entry under event whose command matches,
 // preserving co-grouped foreign entries and deleting an emptied event key.
-func removeHookEntries(settingsPath, event string, match func(string) bool) error {
-	return mutate(settingsPath, func(root map[string]any) error { return removeHookEntriesIn(root, event, match) })
-}
-
 func removeHookEntriesIn(root map[string]any, event string, match func(string) bool) error {
 	hooks, err := objKey(root, "hooks")
 	if err != nil {

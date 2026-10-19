@@ -162,3 +162,14 @@ func skipString(s string, i int, belEnds bool) int {
 	}
 	return i
 }
+
+// OneLine renders indexed text as one trimmed line for a terminal list: escapes
+// stripped, newlines turned into spaces, cut to max runes with a trailing "…".
+func OneLine(s string, max int) string {
+	s = strings.ReplaceAll(strings.TrimSpace(Strip(s)), "\n", " ")
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max]) + "…"
+	}
+	return s
+}

@@ -46,7 +46,7 @@ func newShowCmd() *cobra.Command {
 
 			sess, err := sessions.ResolvePrefix(cmd.Context(), database, args[0], source)
 			if err != nil {
-				return err
+				return resolveError(err)
 			}
 			format = resolveShowFormat(format, jsonFlag)
 			if limit <= 0 {
