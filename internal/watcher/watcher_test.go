@@ -193,6 +193,10 @@ func TestWatcherBackstopHonorsGuard(t *testing.T) {
 	if marked() == 0 {
 		t.Fatal("backstop did not run once the guard granted")
 	}
+	// The mark is written inside the walk; release runs when the walk returns.
+	for released.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if released.Load() == 0 {
 		t.Fatal("guard release never called")
 	}
