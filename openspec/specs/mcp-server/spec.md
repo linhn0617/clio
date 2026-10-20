@@ -2,9 +2,7 @@
 
 ## Purpose
 TBD - created by archiving change add-cli-and-mcp-foundation. Update Purpose after archive.
-
 ## Requirements
-
 ### Requirement: stdio MCP server with four tools
 
 The system SHALL run a stdio MCP server exposing `search`, `list_sessions`,
@@ -120,9 +118,16 @@ output, not estimated. When a single row alone exceeds the budget its free text 
 content, excerpt text, snippet, title, activity value) SHALL be cut to a prefix ending in
 `… [truncated N chars]` with `truncated: true`. When a single row's fixed fields (those with no
 free text to cut) alone exceed the budget, no rows SHALL be returned and `next` SHALL say the
-fixed fields exceed `max_chars`; the response then still fits unless the fields outside the
-rows alone exceed the budget. A response within budget SHALL carry neither `truncated` nor
-`next`.
+fixed fields exceed `max_chars`. Before the subagent list is shed and before any row is
+dropped, the system SHALL cut the strings of the fields outside the rows other than lists (an
+echoed `ask` question, a session's path or title) with the same marker to the largest common
+length that brings those fields within their uncuttable size plus a quarter of the rest of
+the budget, when they exceed it, leaving whole ids (`uuid` keys, `id`, `parent_session`, list elements under
+such keys), timestamps (`*_at`, `timestamp`), notes and hints and any string the cut would not
+shorten, and sending the smallest form when the uncuttable part alone fills the budget; `next`
+SHALL name each cut field once; the subagent
+list's half-budget check SHALL measure the payload with that cut applied. A response within budget SHALL carry neither
+`truncated` nor `next`.
 
 #### Scenario: Excessive limit requested
 
@@ -165,6 +170,15 @@ rows alone exceed the budget. A response within budget SHALL carry neither `trun
   project path is 6,000 characters long
 - **THEN** the system SHALL return no session rows, `truncated: true`, a `next` hint saying the
   fixed fields exceed `max_chars`, and a response within 4,000 characters
+
+#### Scenario: Fields outside the rows exceed the budget
+
+- **WHEN** an MCP client calls `read_session` with `max_chars: 4000` for a session whose
+  project path is 6,000 characters long, or `ask` with a question longer than the budget
+- **THEN** the system SHALL return a response within 4,000 characters with `truncated: true`,
+  the long field cut to a prefix ending in `… [truncated N chars]`, the session uuid whole,
+  the session's messages (or the evidence groups) and its subagents that fit beside it, and
+  a `next` hint naming the cut field
 
 #### Scenario: Subagent messages survive a shorter parent page
 
@@ -340,3 +354,4 @@ own change with a real configuration design.
 - **WHEN** an MCP client calls any clio tool, including `activity_summary` with
   `group_by: "usage"`
 - **THEN** no quota snapshot field appears anywhere in the response
+

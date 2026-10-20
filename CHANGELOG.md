@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-20
+
+Harness text out of the index, ambiguous session ids that list their candidates,
+and MCP responses that stay within `max_chars` when fields outside the rows are
+too long (openspec changes `strip-harness-tags`, `list-ambiguous-candidates`,
+`mcp-budget-fixed-fields`). Run `clio index --full` after upgrading so existing
+sessions drop their harness text and pick up the redaction rules of 0.21.0.
+
 ### Changed
 
 - **Ambiguous session ids list their candidates** (openspec change
