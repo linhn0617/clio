@@ -108,8 +108,8 @@ func jsonText(b []byte) *mcp.CallToolResult {
 //
 // Order of attack, each step stopping as soon as the result fits: (1) all
 // rows; (1b) fields outside the rows (an echoed question, a long path or
-// title) that alone take more than a quarter of the budget are cut to a
-// quarter, before the shed and before any row is dropped; (1c) all rows after a shed; (2) fewer
+// title) are cut, before the shed and before any row is dropped, so they take
+// what cannot be cut plus a quarter of the rest of the budget; (1c) all rows after a shed; (2) fewer
 // rows (binary search, size is monotone in k); (3) one row with its text cut
 // (binary search on the cap), skipped when rows have no cuttable text; (4) if
 // even that overflows, one row's own fields exceed the budget, so no rows are
@@ -151,6 +151,7 @@ func fitBudget(n, maxChars int, cuttable bool, render func(k, textCap int) map[s
 		}
 		if len(cutPaths) > 0 {
 			slices.Sort(cutPaths)
+			cutPaths = slices.Compact(cutPaths)
 			parts = append(parts, fmt.Sprintf("long fields were cut to fit max_chars=%d: %s", maxChars, strings.Join(cutPaths, ", ")))
 		}
 		if note != "" {
@@ -243,9 +244,10 @@ func fitBudget(n, maxChars int, cuttable bool, render func(k, textCap int) map[s
 // fixedFieldCap is fitBudget's step (1b). The fields outside the rows are the
 // top-level keys, other than lists (read_session's subagents have their own
 // shedding) and "next", whose value is the same with no rows and with all n.
-// When those fields alone take more than a quarter of the budget, it returns
-// them and the largest cap that brings them within a quarter (cap 0 if none);
-// otherwise cap -1. Their size is measured on their own, so it never shrinks as
+// The target is floor (their size with every cuttable string at its marker)
+// plus a quarter of the rest of the budget; when the fields exceed it, it
+// returns them and the largest cap that brings them within it (cap 0 when floor
+// alone fills the budget); otherwise cap -1. Their size is measured on their own, so it never shrinks as
 // the cap grows (capJSON only replaces a string with a shorter one) and the
 // binary search finds the largest cap.
 func fixedFieldCap(n, maxChars int, render func(k, textCap int) map[string]any) ([]string, int, error) {
@@ -283,11 +285,21 @@ func fixedFieldCap(n, maxChars int, render func(k, textCap int) map[string]any) 
 		}
 		return total, nil
 	}
-	// A quarter: read_session's subagent list is then held to half the budget
-	// with these fields included, so the list keeps at least a quarter and the
-	// rows the rest.
-	quarter := maxChars / 4
-	if s, err := size(-1); err != nil || s <= quarter {
+	// The cut can never go below floor: ids, notes, timestamps, keys, numbers
+	// and strings too short to cut. The fields get floor plus a quarter of the
+	// rest of the budget, so rows and hints keep three quarters of what the
+	// uncuttable part leaves (with a small floor, about a quarter of the budget;
+	// read_session's subagent list is held to half the budget with these fields
+	// included, so it keeps at least the rest of that half).
+	floor, err := size(0)
+	if err != nil {
+		return nil, -1, err
+	}
+	if floor >= maxChars {
+		return keys, 0, nil // nothing fits: send the smallest form
+	}
+	target := floor + (maxChars-floor)/4
+	if s, err := size(-1); err != nil || s <= target {
 		return nil, -1, err
 	}
 	lo, hi, found := 0, maxChars, 0
@@ -297,7 +309,7 @@ func fixedFieldCap(n, maxChars int, render func(k, textCap int) map[string]any) 
 		if err != nil {
 			return nil, -1, err
 		}
-		if s <= quarter {
+		if s <= target {
 			found, lo = mid, mid+1
 		} else {
 			hi = mid - 1
@@ -315,6 +327,7 @@ func capJSON(raw []byte, textCap int, path string) (json.RawMessage, []string, e
 	type frame struct {
 		obj, wantKey, first bool
 		key, path           string
+		name                string // the key holding this container: names its array elements
 	}
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.UseNumber()
@@ -367,6 +380,7 @@ func capJSON(raw []byte, textCap int, path string) (json.RawMessage, []string, e
 				key = f.key
 				cur = f.path + "." + key
 			} else {
+				key = f.name
 				if !f.first {
 					out.WriteByte(',')
 				}
@@ -376,14 +390,16 @@ func capJSON(raw []byte, textCap int, path string) (json.RawMessage, []string, e
 		switch v := t.(type) {
 		case json.Delim:
 			out.WriteByte(byte(v))
-			st = append(st, frame{obj: v == '{', wantKey: v == '{', first: true, path: cur})
+			st = append(st, frame{obj: v == '{', wantKey: v == '{', first: true, path: cur, name: key})
 			continue
 		case string:
 			c := capText(v, textCap)
 			if !keepWhole(key) && c != v && jsonUnits(c) < utf16Units([]byte(orig())) {
 				b, _ := json.Marshal(c)
 				out.Write(b)
-				cut = append(cut, cur)
+				if !slices.Contains(cut, cur) { // a list's elements share one path
+					cut = append(cut, cur)
+				}
 			} else {
 				out.WriteString(orig())
 			}
@@ -397,10 +413,12 @@ func capJSON(raw []byte, textCap int, path string) (json.RawMessage, []string, e
 
 // keepWhole reports whether a string under key (any case) must not be cut:
 // ids (a caller reads by them: uuid keys, id, parent_session), notes and hints
-// (guidance the caller follows).
+// (guidance the caller follows), and timestamps (`*_at`, timestamp: a cut one
+// is meaningless).
 func keepWhole(key string) bool {
 	k := strings.ToLower(key)
-	return strings.Contains(k, "uuid") || k == "id" || k == "parent_session" || k == "note" || k == "next"
+	return strings.Contains(k, "uuid") || k == "id" || k == "parent_session" || k == "note" || k == "next" ||
+		strings.HasSuffix(k, "_at") || k == "timestamp"
 }
 
 // jsonUnits is a string's budget size as sent: UTF-16 code units of its JSON

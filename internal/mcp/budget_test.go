@@ -1035,8 +1035,8 @@ func TestReadSessionAroundSequenceWithOnlyToolMessages(t *testing.T) {
 }
 
 // Fields outside the rows (the echoed ask question, a session's path and title)
-// can alone exceed max_chars. They are cut first, to half the budget, so rows
-// still come back in the other half; short fields such as ids stay whole and
+// can alone exceed max_chars. They are cut first, to what cannot be cut plus a
+// quarter of the rest of the budget, so rows still come back in the rest; short fields such as ids stay whole and
 // next names what was cut.
 func TestBudgetOversizedFixedFieldsAreCut(t *testing.T) {
 	d := testDB(t)
@@ -1234,5 +1234,92 @@ func TestBudgetUncutFieldsKeepEncoding(t *testing.T) {
 	wantTruncated(t, r, 4000)
 	if text := r.Content[0].(mcp.TextContent).Text; !strings.Contains(text, `"title":"t\ufffdx"`) {
 		t.Fatalf("uncut title re-encoded: %.200s", text[strings.Index(text, `"title"`):])
+	}
+}
+
+// Array elements are judged by the key that holds the array: ids in a list stay
+// whole, other list strings are cut, and each cut path is reported once.
+func TestCapJSONArraysUseTheirKey(t *testing.T) {
+	long := strings.Repeat("v", 80)
+	raw := []byte(`{"child_uuids":["` + long + `","` + long + `"],"tags":["` + long + `","` + long + `","` + long + `"]}`)
+	out, cut, err := capJSON(raw, 5, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v map[string][]string
+	if err := json.Unmarshal(out, &v); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range v["child_uuids"] {
+		if id != long {
+			t.Errorf("an id in a list was cut: %q", id)
+		}
+	}
+	for _, tag := range v["tags"] {
+		if !strings.Contains(tag, "[truncated ") {
+			t.Errorf("a long list string was not cut: %q", tag)
+		}
+	}
+	if strings.Join(cut, ",") != "session.tags" {
+		t.Errorf("cut paths = %v, want session.tags once", cut)
+	}
+}
+
+// When the fields that may not be cut are large, the target grows with them
+// (floor plus a quarter of the rest), so the response still fits; timestamps
+// stay whole however small the cap.
+func TestFixedFieldCapFallsBackWhenQuarterUnreachable(t *testing.T) {
+	render := func(k, textCap int) map[string]any {
+		return map[string]any{"session_uuid": strings.Repeat("u", 1500), "title": strings.Repeat("t", 6000), "started_at": "2026-10-01T09:30:00+08:00"}
+	}
+	r := fitBudget(0, 4000, false, render, func(int, int) string { return "" }, nil)
+	m := wantTruncated(t, r, 4000)
+	if m["started_at"] != "2026-10-01T09:30:00+08:00" || len(m["session_uuid"].(string)) != 1500 {
+		t.Fatalf("timestamp and id must stay whole: started_at=%v", m["started_at"])
+	}
+	// Half the budget is reachable, so the title keeps a real prefix rather
+	// than the bare marker cap 0 would leave.
+	if title := m["title"].(string); !strings.Contains(title, "[truncated ") || len(title) < 200 {
+		t.Fatalf("title must be cut to a useful prefix, got %d bytes: %.40q", len(title), title)
+	}
+}
+
+// When even the whole budget cannot hold the uncuttable fields, the smallest
+// form is still sent: everything else is cut to its marker.
+func TestFixedFieldCapSmallestWhenNothingFits(t *testing.T) {
+	render := func(k, textCap int) map[string]any {
+		return map[string]any{"session_uuid": strings.Repeat("u", 5000), "title": strings.Repeat("t", 6000)}
+	}
+	if _, c, err := fixedFieldCap(0, 4000, render); err != nil || c != 0 {
+		t.Fatalf("want cap 0, got %d err=%v", c, err)
+	}
+}
+
+// Timestamps stay whole even at cap 0: a cut one is meaningless.
+func TestCapJSONKeepsTimestamps(t *testing.T) {
+	raw := []byte(`{"started_at":"2026-10-01T09:30:00+08:00","timestamp":"2026-10-01T09:30:00+08:00","title":"` + strings.Repeat("t", 40) + `"}`)
+	_, cut, err := capJSON(raw, 0, "s")
+	if err != nil || strings.Join(cut, ",") != "s.title" {
+		t.Fatalf("only the title may be cut, got %v err=%v", cut, err)
+	}
+}
+
+// A long id (never cut) plus a long path: the path is still cut so the response
+// fits, and messages still come back.
+func TestBudgetLongIDAndPathStillFit(t *testing.T) {
+	for _, idLen := range []int{1500, 2500} { // 2500: the id alone is over half the budget
+		d := testDB(t)
+		id := strings.Repeat("u", idLen)
+		addSession(t, d, id, "/p/"+strings.Repeat("x", 6000))
+		for i := range 5 {
+			addMsg(t, d, id, i, "user", "hello")
+		}
+		m := wantTruncated(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": id, "max_chars": 4000}), 4000)
+		if msgs, _ := m["messages"].([]any); len(msgs) == 0 {
+			t.Fatalf("id %d: messages must still be returned", idLen)
+		}
+		if got := m["session"].(map[string]any)["uuid"]; got != id {
+			t.Fatalf("id %d: the id must stay whole", idLen)
+		}
 	}
 }

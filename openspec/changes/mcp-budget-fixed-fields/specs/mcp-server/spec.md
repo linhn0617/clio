@@ -30,11 +30,13 @@ content, excerpt text, snippet, title, activity value) SHALL be cut to a prefix 
 `… [truncated N chars]` with `truncated: true`. When a single row's fixed fields (those with no
 free text to cut) alone exceed the budget, no rows SHALL be returned and `next` SHALL say the
 fixed fields exceed `max_chars`. Before the subagent list is shed and before any row is
-dropped, when the fields outside the rows other than lists (an echoed `ask` question, a
-session's path or title) alone take more than a quarter of the budget, the system SHALL cut
-their strings with the same marker to the largest common length that brings those fields
-within a quarter, leaving whole ids (`uuid` keys, `id`, `parent_session`), notes and hints and
-any string the cut would not shorten, and `next` SHALL name the cut fields; the subagent
+dropped, the system SHALL cut the strings of the fields outside the rows other than lists (an
+echoed `ask` question, a session's path or title) with the same marker to the largest common
+length that brings those fields within their uncuttable size plus a quarter of the rest of
+the budget, when they exceed it, leaving whole ids (`uuid` keys, `id`, `parent_session`, list elements under
+such keys), timestamps (`*_at`, `timestamp`), notes and hints and any string the cut would not
+shorten, and sending the smallest form when the uncuttable part alone fills the budget; `next`
+SHALL name each cut field once; the subagent
 list's half-budget check SHALL measure the payload with that cut applied. A response within budget SHALL carry neither
 `truncated` nor `next`.
 

@@ -12,23 +12,32 @@ for a session whose project path is 6,000 characters sent 6,357 units.
 - **mcp-server**: a new step in `fitBudget`, before the subagent shed and
   before any row is dropped. The fields outside the rows are the top-level keys,
   other than lists (read_session's subagents keep their own shedding) and
-  `next`, whose value is the same with no rows and with all of them. When those
-  fields alone take more than a quarter of the budget, their strings are cut by
-  `capText` to one common cap, the largest that brings those fields within a
-  quarter (binary search). read_session's subagent list is held to half the
+  `next`, whose value is the same with no rows and with all of them. Their
+  target is floor (their size with every cuttable string at its marker) plus a
+  quarter of the rest of the budget; when they exceed it, their strings are cut
+  by `capText` to one common cap, the largest that brings them within it (binary
+  search). With short ids that is about a quarter of the budget; a long id
+  raises the target instead of starving the rows. read_session's subagent list is held to half the
   budget measured with the cut applied (`fitBudget` now hands the shed a
   `zeroSize` function, since measuring `render` itself would see the uncut
-  path), so the list keeps at least a quarter and the rows the rest: an
+  path), so the list keeps at least the rest of that half and the rows the rest: an
   oversized `ask` question still returns its evidence groups, and a session
   with an oversized path still returns its messages and as many subagents as
-  fit in that quarter (on a tight budget the list can be shorter than for the
-  same session with a short path).
+  fit (on a tight budget the list can be shorter than for the same session
+  with a short path).
 - The fields are measured on their own, and a string is replaced only when the
   cut changes it and is shorter as sent (JSON-escaped, in UTF-16 units), so that
   size never shrinks as the cap grows and the search finds the largest cap. The
   cut is re-applied on every render, so later steps are never overwritten.
-- Ids (keys containing `uuid`, `id`, `parent_session`, any case), `note` and
-  `next` are never cut, so a caller can still follow "read each by its uuid".
+- Ids (keys containing `uuid`, `id`, `parent_session`, any case, including the
+  elements of a list held by such a key), `note` and `next` are never cut, so a
+  caller can still follow "read each by its uuid". Timestamps (`*_at`,
+  `timestamp`) are never cut either. Because the target is floor plus a share
+  of what floor leaves, rows and hints keep three quarters of that rest. Known
+  limit: when floor comes within the size of the `next` hints (about 320 UTF-16
+  units) of the budget, the response can still exceed it; that takes ids or
+  notes thousands of characters long (clio's ids are 36), and the same range
+  overflowed before this change.
 - The cut streams the JSON tokens and writes every token it does not cut back
   byte for byte (whitespace between tokens is dropped, which json.Marshal output
   never has), so key order, numbers (int64 included) and escapes such as the
