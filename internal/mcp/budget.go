@@ -89,7 +89,8 @@ func jsonText(b []byte) *mcp.CallToolResult {
 // fitBudget renders a response of n rows within maxChars UTF-16 code units
 // of serialized JSON, measured on the exact text sent rather than estimated.
 //
-// render(k, textCap) must build the whole payload with only the first k rows
+// render(k, textCap) must return a new map on every call (fitBudget writes
+// "truncated" and "next" into it) and build the whole payload with only the first k rows
 // (it decides which k rows when "first" is not right, e.g. read_session
 // windows); textCap >= 0 asks it to cut each text field of the kept rows to
 // that many units via capText, and < 0 means no cap. A "next" string render
@@ -106,7 +107,9 @@ func jsonText(b []byte) *mcp.CallToolResult {
 // rows, retried after a shed; (2) fewer rows (binary search, size is monotone
 // in k); (3) one row with its text cut (binary search on the cap), skipped
 // when rows have no cuttable text; (4) if even that overflows, one row's fixed
-// fields alone exceed the budget, so no rows are returned and the hint says so.
+// fields alone exceed the budget, so no rows are returned and the hint says so;
+// (5) if the fields outside the rows still overflow, every string field is cut
+// to the largest common cap that fits.
 func fitBudget(n, maxChars int, cuttable bool, render func(k, textCap int) map[string]any, hint func(kept, total int) string, shed func(fits func(k int) bool) bool) *mcp.CallToolResult {
 	// build serializes k rows; note, when set, replaces the dropped-rows hint.
 	build := func(k, textCap int, note string) ([]byte, int, error) {
@@ -181,8 +184,79 @@ func fitBudget(n, maxChars int, cuttable bool, render func(k, textCap int) map[s
 	if n == 0 {
 		note = fmt.Sprintf("fixed fields exceed max_chars=%d even with no rows; raise max_chars (max %d) or narrow the query", maxChars, maxMaxChars)
 	}
-	b, _, err = build(0, -1, note)
+	b, size, err := build(0, -1, note)
+	if err != nil || size <= maxChars {
+		return finish(b, err)
+	}
+	// (5) The fields outside the rows alone overflow (an echoed question, a long
+	// path or title): cut every string field to one cap, the largest that fits,
+	// so the longest fields go first. A string is only replaced when its cut
+	// form is shorter, so the size never shrinks as the cap grows and the binary
+	// search finds the largest cap; a short field (an id) is cut only below its
+	// own length. Reasons render set itself (a subagent note) are kept.
+	cut := func(c int) ([]byte, int, error) {
+		m := render(0, -1)
+		var parts []string
+		if s, _ := m["next"].(string); s != "" {
+			parts = append(parts, s)
+		}
+		parts = append(parts, note, "long fields were cut to fit")
+		m, err := capFields(m, c)
+		if err != nil {
+			return nil, 0, err
+		}
+		m["truncated"] = true
+		m["next"] = strings.Join(parts, "; ")
+		b, err := json.Marshal(m)
+		return b, utf16Units(b), err
+	}
+	b, err = search(0, maxChars, cut)
+	if err != nil || b != nil {
+		return finish(b, err)
+	}
+	// With every long string at its marker, only numbers, keys and short
+	// strings remain; clio's zero-row payloads are far below minMaxChars then.
+	// Send that smallest form rather than an uncut one.
+	b, _, err = cut(0)
 	return finish(b, err)
+}
+
+// capFields returns a copy of payload m, through a JSON round trip so struct
+// values are covered too, with every string value cut to textCap units by
+// capText where that shortens it. Keys are unchanged.
+func capFields(m map[string]any, textCap int) (map[string]any, error) {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec.UseNumber() // keep integers exact
+	var v map[string]any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	return capStrings(v, textCap).(map[string]any), nil
+}
+
+func capStrings(v any, textCap int) any {
+	switch x := v.(type) {
+	case string:
+		// A cut that would not shorten the string as sent (its marker is longer
+		// than what it removes) keeps the original.
+		if t := capText(x, textCap); jsonUnits(t) < jsonUnits(x) {
+			return t
+		}
+		return x
+	case map[string]any:
+		for k, e := range x {
+			x[k] = capStrings(e, textCap)
+		}
+	case []any:
+		for i, e := range x {
+			x[i] = capStrings(e, textCap)
+		}
+	}
+	return v
 }
 
 // fitRows is fitBudget for the tools whose payload is "fixed fields plus one
@@ -202,4 +276,11 @@ func fitRows[T any](rows []T, maxChars int, capRow func(r *T, textCap int), buil
 	}, func(kept, total int) string {
 		return fmt.Sprintf("showing %d of %d %s to fit max_chars=%d; %s, or raise max_chars (max %d)", kept, total, noun, maxChars, advice, maxMaxChars)
 	}, nil)
+}
+
+// jsonUnits is a string's budget size as sent: UTF-16 code units of its JSON
+// encoding, quotes and escapes included.
+func jsonUnits(s string) int {
+	b, _ := json.Marshal(s)
+	return utf16Units(b)
 }

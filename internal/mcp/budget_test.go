@@ -1033,3 +1033,92 @@ func TestReadSessionAroundSequenceWithOnlyToolMessages(t *testing.T) {
 		t.Fatalf("note must say no dialogue message follows, got %q", note)
 	}
 }
+
+// Fields outside the rows (the echoed ask question, a session's path and title)
+// can alone exceed max_chars. They are cut like row text so the budget holds in
+// every case; short fields such as ids stay whole.
+func TestBudgetOversizedFixedFieldsAreCut(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p/"+strings.Repeat("x", 6000))
+	addMsg(t, d, "P", 0, "user", "hello")
+
+	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "max_chars": 4000})
+	m := wantTruncated(t, r, 4000)
+	sess := m["session"].(map[string]any)
+	if sess["uuid"] != "P" {
+		t.Fatalf("short fixed fields must stay whole, uuid=%v", sess["uuid"])
+	}
+	if p, _ := sess["project"].(string); !strings.HasPrefix(p, "/p/xxx") || !strings.Contains(p, "[truncated ") {
+		t.Fatalf("oversized project should keep a prefix and a truncation marker, got %.40q…", p)
+	}
+	if next := m["next"].(string); !strings.Contains(next, "fixed fields exceed max_chars=4000") {
+		t.Fatalf("next should explain the cut fields, got %q", next)
+	}
+
+	r2 := call(t, handleAsk(d, nil), map[string]any{"question": strings.Repeat("authentication failure ", 300), "max_chars": 4000})
+	m2 := wantTruncated(t, r2, 4000)
+	if q, _ := m2["question"].(string); !strings.HasPrefix(q, "authentication failure") || !strings.Contains(q, "[truncated ") {
+		t.Fatalf("oversized question should be cut with a marker, got %.40q…", q)
+	}
+}
+
+// Cutting the fields outside the rows keeps every reason the response was cut,
+// including the subagent note read_session set itself.
+func TestBudgetFieldCutKeepsSubagentNote(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p/"+strings.Repeat("x", 6000))
+	addMsg(t, d, "P", 0, "user", "hello")
+	for i := range 30 {
+		addChild(t, d, fmt.Sprintf("agent-%02d", i), "/p", "P", "general-purpose")
+	}
+	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "include_subagents": true, "max_chars": 4000})
+	m := wantTruncated(t, r, 4000)
+	next := m["next"].(string)
+	for _, want := range []string{"subagents to fit max_chars", "fixed fields exceed max_chars=4000", "long fields were cut to fit"} {
+		if !strings.Contains(next, want) {
+			t.Errorf("next lacks %q: %q", want, next)
+		}
+	}
+}
+
+// The payload size never shrinks as the field cap grows, so the binary search
+// over the cap finds the largest one that fits. Short strings whose marker
+// would be longer than they are, CJK (3 bytes, 1 unit) and JSON escapes are
+// where a naive cut would make a smaller cap produce a larger payload.
+func TestCapFieldsSizeMonotoneInCap(t *testing.T) {
+	m := map[string]any{"long": strings.Repeat("長", 3000) + strings.Repeat("\x01", 50), "n": []any{1, 2, 3}}
+	for i := range 20 {
+		m[fmt.Sprintf("k%02d", i)] = "general"
+	}
+	m["cjk"] = strings.Repeat("中", 30)
+	prev := -1
+	for c := 0; c <= 3200; c++ {
+		got, err := capFields(m, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if size := measure(got); size < prev {
+			t.Fatalf("size shrank from %d to %d when the cap grew to %d", prev, size, c)
+		} else {
+			prev = size
+		}
+	}
+}
+
+// Positive case: many short fields beside a long one keep their values whole
+// while the long one is cut. (A regression to a non-monotone cut is caught by
+// TestCapFieldsSizeMonotoneInCap; this fixture fits either way.)
+func TestBudgetFieldCutShortFieldsStayWhole(t *testing.T) {
+	render := func(k, textCap int) map[string]any {
+		m := map[string]any{"long": strings.Repeat("y", 9000), "nums": make([]int, 400)}
+		for i := range 20 {
+			m[fmt.Sprintf("short%02d", i)] = "seven77"
+		}
+		return m
+	}
+	r := fitBudget(0, 4000, false, render, func(int, int) string { return "" }, nil)
+	m := wantTruncated(t, r, 4000)
+	if m["short00"] != "seven77" || !strings.Contains(m["long"].(string), "[truncated ") {
+		t.Fatalf("short fields must stay whole and the long one be cut: short00=%v", m["short00"])
+	}
+}
