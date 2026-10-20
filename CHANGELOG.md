@@ -24,8 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP responses stay within `max_chars` when fields outside the rows are too
   long** (openspec change `mcp-budget-fixed-fields`). An echoed `ask` question or a
   session's path or title that alone exceeded the budget used to be sent whole;
-  it is now cut with the usual `… [truncated N chars]` marker, the longest field
-  first, and the response fits.
+  it is now cut to a quarter of the budget before rows or subagents are dropped,
+  with the usual `… [truncated N chars]` marker (ids and notes stay whole), so
+  evidence groups and messages still come back beside it (the subagent list keeps
+  at least a quarter), and `next` names the cut field.
 
 - **Harness text no longer indexed as user text** (openspec change
   `strip-harness-tags`). Claude Code writes `<system-reminder>`,

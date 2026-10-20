@@ -29,13 +29,14 @@ output, not estimated. When a single row alone exceeds the budget its free text 
 content, excerpt text, snippet, title, activity value) SHALL be cut to a prefix ending in
 `… [truncated N chars]` with `truncated: true`. When a single row's fixed fields (those with no
 free text to cut) alone exceed the budget, no rows SHALL be returned and `next` SHALL say the
-fixed fields exceed `max_chars`. When the fields outside the rows alone still exceed the
-budget (an echoed `ask` question, a session's path or title), the system SHALL cut string
-fields with the same marker to the largest common length that fits, leaving whole any string
-the cut would not shorten, so the longest fields are cut first and the response is within the
-budget whenever the content other than long strings fits (every clio zero-row payload does at
-the minimum `max_chars`). A response within budget
-SHALL carry neither `truncated` nor `next`.
+fixed fields exceed `max_chars`. Before the subagent list is shed and before any row is
+dropped, when the fields outside the rows other than lists (an echoed `ask` question, a
+session's path or title) alone take more than a quarter of the budget, the system SHALL cut
+their strings with the same marker to the largest common length that brings those fields
+within a quarter, leaving whole ids (`uuid` keys, `id`, `parent_session`), notes and hints and
+any string the cut would not shorten, and `next` SHALL name the cut fields; the subagent
+list's half-budget check SHALL measure the payload with that cut applied. A response within budget SHALL carry neither
+`truncated` nor `next`.
 
 #### Scenario: Excessive limit requested
 
@@ -85,7 +86,8 @@ SHALL carry neither `truncated` nor `next`.
   project path is 6,000 characters long, or `ask` with a question longer than the budget
 - **THEN** the system SHALL return a response within 4,000 characters with `truncated: true`,
   the long field cut to a prefix ending in `… [truncated N chars]`, the session uuid whole,
-  and a `next` hint saying the fixed fields exceed `max_chars`
+  the session's messages (or the evidence groups) and its subagents that fit beside it, and
+  a `next` hint naming the cut field
 
 #### Scenario: Subagent messages survive a shorter parent page
 

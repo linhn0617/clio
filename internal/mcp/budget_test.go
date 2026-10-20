@@ -1035,12 +1035,15 @@ func TestReadSessionAroundSequenceWithOnlyToolMessages(t *testing.T) {
 }
 
 // Fields outside the rows (the echoed ask question, a session's path and title)
-// can alone exceed max_chars. They are cut like row text so the budget holds in
-// every case; short fields such as ids stay whole.
+// can alone exceed max_chars. They are cut first, to half the budget, so rows
+// still come back in the other half; short fields such as ids stay whole and
+// next names what was cut.
 func TestBudgetOversizedFixedFieldsAreCut(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "P", "/p/"+strings.Repeat("x", 6000))
-	addMsg(t, d, "P", 0, "user", "hello")
+	for i := range 5 {
+		addMsg(t, d, "P", i, "user", "authentication failure while logging in")
+	}
 
 	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "max_chars": 4000})
 	m := wantTruncated(t, r, 4000)
@@ -1051,14 +1054,26 @@ func TestBudgetOversizedFixedFieldsAreCut(t *testing.T) {
 	if p, _ := sess["project"].(string); !strings.HasPrefix(p, "/p/xxx") || !strings.Contains(p, "[truncated ") {
 		t.Fatalf("oversized project should keep a prefix and a truncation marker, got %.40q…", p)
 	}
-	if next := m["next"].(string); !strings.Contains(next, "fixed fields exceed max_chars=4000") {
-		t.Fatalf("next should explain the cut fields, got %q", next)
+	if msgs, _ := m["messages"].([]any); len(msgs) != 5 {
+		t.Fatalf("cutting the path must leave room for the messages, got %d", len(msgs))
+	}
+	if next := m["next"].(string); !strings.Contains(next, "long fields were cut to fit max_chars=4000: session.project") || strings.Contains(next, "narrow the query") {
+		t.Fatalf("next should name the cut field, not advise narrowing: %q", next)
 	}
 
-	r2 := call(t, handleAsk(d, nil), map[string]any{"question": strings.Repeat("authentication failure ", 300), "max_chars": 4000})
+	// ask: a normal path, so only the echoed question is over budget.
+	d2 := testDB(t)
+	addSession(t, d2, "Q", "/q")
+	for i := range 5 {
+		addMsg(t, d2, "Q", i, "user", "authentication failure while logging in")
+	}
+	r2 := call(t, handleAsk(d2, nil), map[string]any{"question": strings.Repeat("authentication failure ", 300), "max_chars": 4000})
 	m2 := wantTruncated(t, r2, 4000)
 	if q, _ := m2["question"].(string); !strings.HasPrefix(q, "authentication failure") || !strings.Contains(q, "[truncated ") {
 		t.Fatalf("oversized question should be cut with a marker, got %.40q…", q)
+	}
+	if groups, _ := m2["groups"].([]any); len(groups) == 0 {
+		t.Fatal("cutting the question must leave room for evidence groups")
 	}
 }
 
@@ -1068,20 +1083,20 @@ func TestBudgetFieldCutKeepsSubagentNote(t *testing.T) {
 	d := testDB(t)
 	addSession(t, d, "P", "/p/"+strings.Repeat("x", 6000))
 	addMsg(t, d, "P", 0, "user", "hello")
-	for i := range 30 {
-		addChild(t, d, fmt.Sprintf("agent-%02d", i), "/p", "P", "general-purpose")
+	for i := range 200 { // more than fit: the shed must run
+		addChild(t, d, fmt.Sprintf("agent-%03d", i), "/p", "P", "general-purpose")
 	}
 	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "include_subagents": true, "max_chars": 4000})
 	m := wantTruncated(t, r, 4000)
 	next := m["next"].(string)
-	for _, want := range []string{"subagents to fit max_chars", "fixed fields exceed max_chars=4000", "long fields were cut to fit"} {
+	for _, want := range []string{"subagents to fit max_chars", "long fields were cut to fit max_chars=4000: session.project"} {
 		if !strings.Contains(next, want) {
 			t.Errorf("next lacks %q: %q", want, next)
 		}
 	}
 }
 
-// The payload size never shrinks as the field cap grows, so the binary search
+// The cut size never shrinks as the field cap grows, so the binary search
 // over the cap finds the largest one that fits. Short strings whose marker
 // would be longer than they are, CJK (3 bytes, 1 unit) and JSON escapes are
 // where a naive cut would make a smaller cap produce a larger payload.
@@ -1093,11 +1108,15 @@ func TestCapFieldsSizeMonotoneInCap(t *testing.T) {
 	m["cjk"] = strings.Repeat("中", 30)
 	prev := -1
 	for c := 0; c <= 3200; c++ {
-		got, err := capFields(m, c)
+		raw, err := json.Marshal(m)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if size := measure(got); size < prev {
+		got, _, err := capJSON(raw, c, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if size := utf16Units(got); size < prev {
 			t.Fatalf("size shrank from %d to %d when the cap grew to %d", prev, size, c)
 		} else {
 			prev = size
@@ -1120,5 +1139,100 @@ func TestBudgetFieldCutShortFieldsStayWhole(t *testing.T) {
 	m := wantTruncated(t, r, 4000)
 	if m["short00"] != "seven77" || !strings.Contains(m["long"].(string), "[truncated ") {
 		t.Fatalf("short fields must stay whole and the long one be cut: short00=%v", m["short00"])
+	}
+}
+
+// capJSON keeps key order and exact numbers, cuts long strings, and leaves ids,
+// notes and hints whole however small the cap.
+func TestCapJSONKeepsOrderNumbersAndIDs(t *testing.T) {
+	raw := []byte(`{"z_title":"` + strings.Repeat("t", 80) + `","uuid":"` + strings.Repeat("u", 80) + `","n":9223372036854775807,"session_uuid":"` + strings.Repeat("s", 80) + `","note":"` + strings.Repeat("n", 80) + `","a":[{"id":"` + strings.Repeat("i", 80) + `","ok":true,"x":null}]}`)
+	out, cut, err := capJSON(raw, 5, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := -1
+	for _, k := range []string{`"z_title"`, `"uuid"`, `"n"`, `"session_uuid"`, `"note"`, `"a"`} {
+		i := strings.Index(string(out), k+":")
+		if i <= prev {
+			t.Fatalf("key order changed at %s: %s", k, out)
+		}
+		prev = i
+	}
+	var v map[string]any
+	d := json.NewDecoder(strings.NewReader(string(out)))
+	d.UseNumber()
+	if err := d.Decode(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v["n"].(json.Number).String() != "9223372036854775807" {
+		t.Errorf("number changed: %v", v["n"])
+	}
+	for _, k := range []string{"uuid", "session_uuid", "note"} {
+		if s := v[k].(string); len(s) != 80 {
+			t.Errorf("%s must stay whole, got %q", k, s)
+		}
+	}
+	if id := v["a"].([]any)[0].(map[string]any)["id"].(string); len(id) != 80 {
+		t.Errorf("nested id must stay whole, got %q", id)
+	}
+	if title := v["z_title"].(string); !strings.Contains(title, "[truncated ") {
+		t.Errorf("long title not cut: %q", title)
+	}
+	if strings.Join(cut, ",") != "root.z_title" {
+		t.Errorf("cut paths = %v", cut)
+	}
+}
+
+// A long path is cut before the subagent shed, so it does not push the
+// subagent list out of a response that has room for it once the path is cut.
+func TestBudgetFieldCutBeforeSubagentShed(t *testing.T) {
+	d := testDB(t)
+	addSession(t, d, "P", "/p/"+strings.Repeat("x", 6000))
+	for i := range 50 {
+		addMsg(t, d, "P", i, "user", strings.Repeat("m", 200))
+	}
+	for i := range 3 {
+		addChild(t, d, fmt.Sprintf("agent-%d", i), "/p", "P", "general-purpose")
+	}
+	// Rows overflow too, so the shed runs: it must measure the cut path.
+	m := wantTruncated(t, call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "include_subagents": true, "max_chars": 4000}), 4000)
+	if subs, _ := m["subagents"].([]any); len(subs) != 3 {
+		t.Fatalf("all 3 subagents fit once the path is cut, got %d (next=%v)", len(subs), m["next"])
+	}
+	if msgs, _ := m["messages"].([]any); len(msgs) == 0 {
+		t.Fatal("messages must still be returned")
+	}
+}
+
+// Ids and notes stay whole at the top level too, whatever their key's case.
+func TestCapJSONKeepsTopLevelNotesAndParentIDs(t *testing.T) {
+	long := strings.Repeat("n", 200)
+	for _, key := range []string{"note", "Note", "parent_session", "next"} {
+		raw, _ := json.Marshal(long)
+		out, cut, err := capJSON(raw, 10, key)
+		if err != nil || string(out) != string(raw) || len(cut) != 0 {
+			t.Errorf("%s: top-level value must stay whole, got %.30s… cut=%v err=%v", key, out, cut, err)
+		}
+	}
+	raw := []byte(`{"parent_session":"` + long + `","Note":"` + long + `","title":"` + long + `"}`)
+	_, cut, _ := capJSON(raw, 10, "k")
+	if strings.Join(cut, ",") != "k.title" {
+		t.Errorf("only the title may be cut, got %v", cut)
+	}
+}
+
+// A field the cut leaves alone keeps its own encoding: re-encoding would turn
+// the � escape json.Marshal writes for invalid UTF-8 into a raw U+FFFD.
+func TestBudgetUncutFieldsKeepEncoding(t *testing.T) {
+	d := testDB(t)
+	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, ended_at, turn_count, title) VALUES ('P', ?, 'P.jsonl', 1, 1, ?)`,
+		"/p/"+strings.Repeat("x", 6000), "t\xffx"); err != nil {
+		t.Fatal(err)
+	}
+	addMsg(t, d, "P", 0, "user", "hello")
+	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "max_chars": 4000})
+	wantTruncated(t, r, 4000)
+	if text := r.Content[0].(mcp.TextContent).Text; !strings.Contains(text, `"title":"t\ufffdx"`) {
+		t.Fatalf("uncut title re-encoded: %.200s", text[strings.Index(text, `"title"`):])
 	}
 }

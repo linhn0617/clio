@@ -515,17 +515,17 @@ func handleReadSession(database *db.DB, beforeRead func(context.Context)) func(c
 			}
 			return out
 		}
-		shed := func(fits func(k int) bool) bool {
+		shed := func(fits func(k int) bool, zeroSize func() int) bool {
 			if len(subs) == 0 {
 				return false
 			}
 			bare := strip(subs)
-			if shownSubs = bare; measure(render(0, -1)) > maxChars/2 {
+			if shownSubs = bare; zeroSize() > maxChars/2 {
 				best, lo, hi := 0, 0, len(bare)-1
 				for lo <= hi {
 					mid := (lo + hi) / 2
 					shownSubs = bare[:mid]
-					if measure(render(0, -1)) <= maxChars/2 {
+					if zeroSize() <= maxChars/2 {
 						best, lo = mid, mid+1
 					} else {
 						hi = mid - 1
