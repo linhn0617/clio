@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Release binaries are built with Go 1.27.** MCP responses now carry an
+  invalid UTF-8 byte in a title or path as the raw U+FFFD character rather
+  than the `\ufffd` escape: the same JSON value, and fewer characters
+  against `max_chars`. CI tests on both Go 1.26 (the minimum in `go.mod`)
+  and 1.27; the release workflow now runs its tests with `-race`.
+
 ## [0.22.0] - 2026-10-20
 
 Harness text out of the index, ambiguous session ids that list their candidates,
