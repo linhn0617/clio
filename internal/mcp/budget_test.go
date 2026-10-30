@@ -1221,8 +1221,10 @@ func TestCapJSONKeepsTopLevelNotesAndParentIDs(t *testing.T) {
 	}
 }
 
-// A field the cut leaves alone keeps its own encoding: re-encoding would turn
-// the � escape json.Marshal writes for invalid UTF-8 into a raw U+FFFD.
+// A field the cut leaves alone goes out exactly as the render spelled it. Only
+// on Go 1.26 does this catch a re-encode (the render escapes invalid UTF-8 as
+// \ufffd, a re-encode writes the raw rune); TestCapJSONKeepsUncutEscapes
+// catches it on any version.
 func TestBudgetUncutFieldsKeepEncoding(t *testing.T) {
 	d := testDB(t)
 	if _, err := d.Exec(`INSERT INTO sessions(uuid, project_path, source_file, ended_at, turn_count, title) VALUES ('P', ?, 'P.jsonl', 1, 1, ?)`,
@@ -1232,8 +1234,37 @@ func TestBudgetUncutFieldsKeepEncoding(t *testing.T) {
 	addMsg(t, d, "P", 0, "user", "hello")
 	r := call(t, handleReadSession(d, nil), map[string]any{"uuid": "P", "max_chars": 4000})
 	wantTruncated(t, r, 4000)
-	if text := r.Content[0].(mcp.TextContent).Text; !strings.Contains(text, `"title":"t\ufffdx"`) {
+	// json.Marshal spells invalid UTF-8 \ufffd on Go 1.26 and as the raw rune
+	// on 1.27, so compare with this toolchain's spelling.
+	want, err := json.Marshal("t\xffx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := r.Content[0].(mcp.TextContent).Text; !strings.Contains(text, `"title":`+string(want)) {
 		t.Fatalf("uncut title re-encoded: %.200s", text[strings.Index(text, `"title"`):])
+	}
+}
+
+// Uncut strings go out as the bytes they came in, escapes included, whatever
+// spelling json.Marshal would choose for them.
+func TestCapJSONKeepsUncutEscapes(t *testing.T) {
+	note := `\u006e` + strings.Repeat("n", 80)  // kept whole however long
+	over := `a\u0062` + strings.Repeat("c", 10) // past the cap, yet its cut form is longer as sent
+	raw := []byte(`{"title":"t\u0078\ufffd\/","note":"` + note + `","over":"` + over + `","long":"` + strings.Repeat("v", 80) + `"}`)
+	out, cut, err := capJSON(raw, 10, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(out) {
+		t.Fatalf("capJSON wrote invalid JSON: %s", out)
+	}
+	for _, f := range []string{`"title":"t\u0078\ufffd\/"`, `"note":"` + note + `"`, `"over":"` + over + `"`} {
+		if !strings.Contains(string(out), f) {
+			t.Errorf("uncut field re-encoded, want %s in %s", f, out)
+		}
+	}
+	if strings.Join(cut, ",") != "s.long" {
+		t.Errorf("cut paths = %v, want s.long", cut)
 	}
 }
 
