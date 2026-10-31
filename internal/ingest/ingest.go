@@ -41,6 +41,17 @@ type Ingester struct {
 	// before any writes. Tests use it to mutate the on-disk file and exercise
 	// the re-validation guard. Always nil in production.
 	preCommitHook func()
+	// settle paces a forced ingest's retries of a file that changed while it was
+	// read. New sets the production values; tests shorten them.
+	settle settlePolicy
+}
+
+// settlePolicy: before each of up to retries re-ingests, wait until the file's
+// size and mtime have not changed for quiet (checked every poll); a file still
+// changing after maxWait is given up on.
+type settlePolicy struct {
+	retries              int
+	quiet, poll, maxWait time.Duration
 }
 
 // New returns an Ingester with the claude-code source registered. If log is nil,
@@ -52,7 +63,8 @@ func New(database *db.DB, log *slog.Logger) *Ingester {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Ingester{db: database, log: log, sources: []Source{claudeCodeSource{}}}
+	return &Ingester{db: database, log: log, sources: []Source{claudeCodeSource{}},
+		settle: settlePolicy{retries: 3, quiet: time.Second, poll: 200 * time.Millisecond, maxWait: 10 * time.Second}}
 }
 
 // NewWithBuiltinSources returns an Ingester with every built-in source registered:
@@ -78,6 +90,9 @@ type Stats struct {
 	FilesIngested int
 	FilesSkipped  int
 	MessagesAdded int
+	// StillChanging lists files a forced ingest gave up on because they kept
+	// changing while being read; they are also counted in FilesSkipped.
+	StillChanging []string
 }
 
 // IngestAll walks projectsDir and ingests every .jsonl file. force re-ingests
@@ -112,7 +127,30 @@ func (ing *Ingester) IngestAll(ctx context.Context, projectsDir string, force bo
 			return st, err
 		}
 		st.FilesScanned++
-		n, ingested, err := ing.IngestFile(ctx, f, force)
+		n, ingested, stale, err := ing.ingestOnce(ctx, f, force)
+		// A full re-ingest that lost the race with a live writer would otherwise be
+		// lost: the next incremental pass resumes from the old offset. Retry it once
+		// the file settles. An incremental pass just catches up next time.
+		for try := 0; err == nil && stale && force && try < ing.settle.retries; try++ {
+			settled, werr := ing.waitSettled(ctx, f)
+			if werr != nil {
+				if ctx.Err() != nil {
+					return st, werr
+				}
+				stale = false // removed while waiting: skipped, as one attempt would be
+				break
+			}
+			if !settled {
+				break // a re-read of a file still being written would only go stale again
+			}
+			n, ingested, stale, err = ing.ingestOnce(ctx, f, force)
+		}
+		if err == nil && stale && force {
+			// The last attempt's commit also reads a removed file as changed.
+			if _, serr := os.Stat(f); errors.Is(serr, fs.ErrNotExist) {
+				stale = false
+			}
+		}
 		if err != nil {
 			ing.log.Warn("ingest file failed", "file", f, "err", err)
 			continue
@@ -122,15 +160,62 @@ func (ing *Ingester) IngestAll(ctx context.Context, projectsDir string, force bo
 			st.MessagesAdded += n
 		} else {
 			st.FilesSkipped++
+			if stale && force {
+				st.StillChanging = append(st.StillChanging, f)
+			}
 		}
 	}
 	return st, nil
+}
+
+// waitSettled waits until path's size and mtime have stayed the same for
+// settle.quiet, and reports false if settle.maxWait passes first. It returns an
+// error only when ctx is done or path can no longer be stat'd.
+func (ing *Ingester) waitSettled(ctx context.Context, path string) (bool, error) {
+	deadline := time.Now().Add(ing.settle.maxWait)
+	var lastSize, lastMTime int64
+	var since time.Time
+	for {
+		fi, err := os.Stat(path)
+		if err != nil {
+			return false, err
+		}
+		now := time.Now()
+		if since.IsZero() || fi.Size() != lastSize || fi.ModTime().UnixNano() != lastMTime {
+			lastSize, lastMTime, since = fi.Size(), fi.ModTime().UnixNano(), now
+		} else if now.Sub(since) >= ing.settle.quiet {
+			return true, nil
+		}
+		if !now.Before(deadline) {
+			return false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(ing.settle.poll):
+		}
+	}
 }
 
 // IngestFile ingests a single .jsonl file. Returns the number of messages added
 // and whether any ingest happened (false = skipped as unchanged). The whole
 // file is committed in one transaction.
 func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (int, bool, error) {
+	n, ingested, _, err := ing.ingestOnce(ctx, path, force)
+	return n, ingested, err
+}
+
+// ingestOnce is one IngestFile attempt; stale reports that the commit was
+// aborted because the file changed on disk after it was read.
+func (ing *Ingester) ingestOnce(ctx context.Context, path string, force bool) (n int, ingested, stale bool, err error) {
+	n, ingested, err = ing.ingestFile(ctx, path, force)
+	if errors.Is(err, errStaleSnapshot) {
+		return 0, false, true, nil
+	}
+	return n, ingested, false, err
+}
+
+func (ing *Ingester) ingestFile(ctx context.Context, path string, force bool) (int, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, false, err
 	}
@@ -254,8 +339,8 @@ func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (i
 	}
 	n, err := ing.commit(kind, res.Session, res.Messages, res.ClioIDs, res.Usage, fst)
 	if err != nil {
-		if errors.Is(err, errStaleSnapshot) || errors.Is(err, errSourceConflict) {
-			return 0, false, nil // changed under us, or refused as a cross-source conflict (recorded for doctor)
+		if errors.Is(err, errSourceConflict) {
+			return 0, false, nil // refused as a cross-source conflict (recorded for doctor)
 		}
 		return 0, false, err
 	}
