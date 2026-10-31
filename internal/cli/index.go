@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 
@@ -68,8 +70,7 @@ func newIndexCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stdout, "indexed: %d files (%d ingested, %d skipped), %d messages added\n",
-				st.FilesScanned, st.FilesIngested, st.FilesSkipped, st.MessagesAdded)
+			printIndexSummary(os.Stdout, os.Stderr, st)
 			if purgeMissing {
 				deleteMissing := ing.DeleteMissing
 				if force {
@@ -93,21 +94,9 @@ func newIndexCmd() *cobra.Command {
 					fmt.Fprintln(os.Stdout, "fts optimized")
 				}
 			}
-			// A full rebuild is the restore path for `clio prune-raw`. IngestAll
-			// logs per-file failures and continues, so a pruned session whose file
-			// became unreadable/undiscoverable would stay pruned silently — surface
-			// it with a non-zero exit rather than reporting a clean success.
 			if full {
-				residual, rerr := sessions.PrunedResiduals(cmd.Context(), database)
-				if rerr != nil {
-					return fmt.Errorf("pruned-residual check failed: %w", rerr)
-				}
-				if len(residual) > 0 {
-					fmt.Fprintf(os.Stderr, "warning: %d session(s) still have pruned raw_json after a full reindex (source file unreadable/undiscoverable, or deleted — `clio index --purge-missing` drops deleted ones):\n", len(residual))
-					for _, u := range residual {
-						fmt.Fprintf(os.Stderr, "  %s\n", termsafe.Strip(u))
-					}
-					return fmt.Errorf("%d pruned session(s) could not be restored", len(residual))
+				if err := checkPrunedResiduals(cmd.Context(), database, os.Stderr, st.StillChanging); err != nil {
+					return err
 				}
 			}
 			return nil
@@ -126,6 +115,57 @@ func newIndexCmd() *cobra.Command {
 func optimizeFTS(ctx context.Context, d *db.DB) error {
 	_, err := d.ExecContext(ctx, `INSERT INTO messages_fts(messages_fts) VALUES('optimize')`)
 	return err
+}
+
+// checkPrunedResiduals: a full rebuild is the restore path for `clio
+// prune-raw`. IngestAll logs per-file failures and continues, so a pruned
+// session whose file became unreadable/undiscoverable would stay pruned
+// silently — surface it with a non-zero exit rather than reporting a clean
+// success. Sessions whose file was still changing are left out: the summary
+// already names those files, and they are restored once the file is idle.
+func checkPrunedResiduals(ctx context.Context, database *db.DB, stderr io.Writer, stillChanging []string) error {
+	all, err := sessions.PrunedResiduals(ctx, database)
+	if err != nil {
+		return fmt.Errorf("pruned-residual check failed: %w", err)
+	}
+	busy := make(map[string]bool, len(stillChanging))
+	for _, f := range stillChanging {
+		busy[f] = true
+	}
+	var residual []string
+	for _, u := range all {
+		var src string
+		err := database.QueryRowContext(ctx, `SELECT source_file FROM sessions WHERE uuid = ?`, u).Scan(&src)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("pruned-residual check failed: %w", err)
+		}
+		if !busy[src] {
+			residual = append(residual, u)
+		}
+	}
+	if len(residual) > 0 {
+		fmt.Fprintf(stderr, "warning: %d session(s) still have pruned raw_json after a full reindex (source file unreadable/undiscoverable, or deleted — `clio index --purge-missing` drops deleted ones):\n", len(residual))
+		for _, u := range residual {
+			fmt.Fprintf(stderr, "  %s\n", termsafe.Strip(u))
+		}
+		return fmt.Errorf("%d pruned session(s) could not be restored", len(residual))
+	}
+	return nil
+}
+
+// printIndexSummary reports an index pass: the counts on stdout, and on stderr
+// the files a full reindex skipped because they kept changing while being read
+// (a live session), which keep their older rows.
+func printIndexSummary(stdout, stderr io.Writer, st ingest.Stats) {
+	fmt.Fprintf(stdout, "indexed: %d files (%d ingested, %d skipped), %d messages added\n",
+		st.FilesScanned, st.FilesIngested, st.FilesSkipped, st.MessagesAdded)
+	if len(st.StillChanging) == 0 {
+		return
+	}
+	fmt.Fprintf(stderr, "warning: %d file(s) kept changing during the full reindex and were not re-indexed; run `clio index --full` again once they are idle and Claude Code is closed (a running clio mcp blocks --full):\n", len(st.StillChanging))
+	for _, p := range st.StillChanging {
+		fmt.Fprintf(stderr, "  %s\n", termsafe.Strip(p))
+	}
 }
 
 // runIndexIngest always repairs missing targets across all history, ignoring the

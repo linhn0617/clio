@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`clio index --full` retries a file that changes while it is read** (openspec
+  change `full-index-retry-changing-files`). A live session that grew during a
+  full reindex used to be skipped silently and kept its older rows. Now clio waits
+  for the file to stay unchanged for a second and re-reads it, up to three times; a
+  file that does not go quiet within ten seconds, or is still changing after that, is
+  named on stderr with a hint to rerun once it is idle and Claude Code is closed.
+  Incremental passes are unchanged.
 - **Release binaries are built with Go 1.27.** MCP responses now carry an
   invalid UTF-8 byte in a title or path as the raw U+FFFD character rather
   than the `\ufffd` escape: the same JSON value, and fewer characters
