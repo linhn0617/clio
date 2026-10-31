@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-31
+
+A full reindex no longer drops a session that is being written, and release binaries
+are built with Go 1.27 (openspec change `full-index-retry-changing-files`); mcp-go is
+updated from 1.2.1 to 1.4.0. No reindex is needed after upgrading, unless your last
+`clio index --full` reported a skipped file: a live session it skipped keeps its older
+rows until the next full reindex.
+
 ### Changed
 
 - **`clio index --full` retries a file that changes while it is read** (openspec

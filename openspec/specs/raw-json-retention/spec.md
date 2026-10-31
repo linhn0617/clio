@@ -81,7 +81,9 @@ subsequent `clio index --full` re-derives and re-stores `raw_json` from the
 source file (Claude re-parse, Codex rollout). Because
 full reindex logs per-file failures and continues, `clio index --full` SHALL,
 after a full run, report and exit non-zero if any session still has pruned
-`raw_json`, so an unrestored prune is never silent. The prune command SHALL
+`raw_json`, so an unrestored prune is never silent. A session whose source file
+the full run skipped as still changing is excepted: the run names that file
+instead, and the next full reindex restores it. The prune command SHALL
 print the restore path on completion.
 
 #### Scenario: Full reindex restores pruned raw_json for both sources
@@ -93,6 +95,12 @@ print the restore path on completion.
 - **WHEN** after `clio index --full` some pruned session was not restored (e.g.
   its file became unreadable)
 - **THEN** the command reports that session and exits non-zero
+
+#### Scenario: Pruned session whose file is still changing
+- **WHEN** after `clio index --full` a pruned session was not restored only
+  because its source file kept changing during the run
+- **THEN** the command names that file as still changing, does not report the
+  session as unrestored, and exits successfully
 
 ### Requirement: space is reclaimed on VACUUM; --vacuum is lock-checked first
 The command SHALL reclaim file space only via VACUUM (blanking `raw_json` moves
