@@ -28,3 +28,4 @@
 - [x] 6.2 prune-raw's closing restore hint turns retention off first when a window is set.
 - [x] 6.3 `config raw-retention` confirmation and `docs/USAGE.md` say the sweep runs at the next MCP leader start while `clio mcp` is running.
 - [x] 6.4 `index --full` keeps the "raw retention sweep failed" prefix when the residual check fails too.
+- [x] 6.5 Incremental `upsertSession` keeps `ended_at` when the batch has no timestamp (EndedAt 0 / NULL).

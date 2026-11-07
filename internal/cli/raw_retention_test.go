@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -446,5 +447,53 @@ func TestIndexFullJoinsResidualAndSweepFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "raw retention sweep failed:") {
 		t.Fatalf("err = %q, want the sweep failure with its prefix", err)
+	}
+}
+
+// e2e4: a live session that started outside the window receives a line with no
+// timestamp; `clio index` must neither clear its ended_at nor sweep its raw_json.
+func TestIndexSweepKeepsLiveSessionAfterUntimestampedAppend(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "xdg"))
+	projects := filepath.Join(home, ".claude", "projects", "-Users-x-proj")
+	if err := os.MkdirAll(projects, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(projects, "sess-live.jsonl")
+	old := time.Now().Add(-30 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339)
+	var lines []string
+	for i, ts := range []string{old, old, old, now} { // past the 512-byte fingerprint window
+		lines = append(lines, fmt.Sprintf(`{"type":"user","uuid":"u%d","timestamp":"%s","cwd":"/p","sessionId":"sess-live","message":{"role":"user","content":"live session line %d with some padding text"}}`, i, ts, i))
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runConfigCmd(t, "raw-retention", "14d"); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runIndexCmd(t); err != nil {
+		t.Fatalf("index: %v\n%s", err, out)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"type":"summary","summary":"live work","leafUuid":"u3"}` + "\n")
+	f.Close()
+	out, err := runIndexCmd(t)
+	if err != nil {
+		t.Fatalf("index after append: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "raw retention") {
+		t.Fatalf("sweep pruned the live session:\n%s", out)
+	}
+	d := reopen(t)
+	defer d.Close()
+	for i, raw := range rawJSONOf(t, d, "sess-live") {
+		if raw == "" {
+			t.Fatalf("row %d of the live session lost raw_json", i)
+		}
 	}
 }

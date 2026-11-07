@@ -26,7 +26,9 @@ its start. When a file's batch is committed, the rows inserted by that commit SH
 store `raw_json = ''` if the session's `COALESCE(ended_at, started_at, 0)` after the
 commit is older than the cutoff. Content, FTS, tool calls, tool targets, and usage
 SHALL be written as without retention, from the parsed events. Rows written by earlier
-commits SHALL NOT be changed by this rule.
+commits SHALL NOT be changed by this rule. An incremental commit whose new lines carry
+no timestamp SHALL leave the session's stored `ended_at` unchanged (NULL stays NULL),
+so such a batch never makes a live session look older.
 
 #### Scenario: Full reindex with retention
 - **WHEN** `clio index --full` runs with retention `14d` over an old session and a
@@ -38,6 +40,13 @@ commits SHALL NOT be changed by this rule.
 - **WHEN** an old, already-blanked session file receives a new line stamped now and is
   ingested incrementally
 - **THEN** the new row keeps raw_json and the earlier rows stay blank
+
+#### Scenario: Appending untimestamped lines to a live session
+- **WHEN** retention is `14d`, a session that started more than 14 days ago is active
+  today, and a line without a timestamp (a `summary` record or a user line) is appended
+  and `clio index` runs
+- **THEN** its `ended_at` is unchanged, the new row keeps raw_json, and the sweep does not
+  prune the session
 
 ### Requirement: clio index sweeps sessions that aged past the window
 When a window is set, `clio index` (incremental and `--full`) SHALL, after ingest,

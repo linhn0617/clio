@@ -783,8 +783,12 @@ func (ing *Ingester) upsertSession(tx *sql.Tx, s model.Session, userTurns int, k
 	// Incremental: bump ended_at, set turn_count to the authoritative total, and
 	// fill project_path/title/parent_session/agent_type if still missing (subagent
 	// metadata can arrive in a later line, e.g. attributionAgent on the assistant turn).
+	// A batch with no timestamp (EndedAt 0, bound as NULL by nullZero) keeps the
+	// stored ended_at: SQLite's multi-argument MAX returns NULL when any argument
+	// is NULL, which would make a live session look as old as its start.
+	ended := nullZero(s.EndedAt)
 	_, err := tx.Exec(`UPDATE sessions SET
-		ended_at = MAX(COALESCE(ended_at,0), ?),
+		ended_at = CASE WHEN COALESCE(?, 0) = 0 THEN ended_at ELSE MAX(COALESCE(ended_at,0), ?) END,
 		turn_count = ?,
 		project_path = COALESCE(NULLIF(project_path,''), ?),
 		title = COALESCE(NULLIF(title,''), ?),
@@ -792,7 +796,7 @@ func (ing *Ingester) upsertSession(tx *sql.Tx, s model.Session, userTurns int, k
 		agent_type = COALESCE(NULLIF(agent_type,''), ?),
 		source = COALESCE(NULLIF(source,''), ?)
 		WHERE uuid = ?`,
-		nullZero(s.EndedAt), userTurns, nullEmpty(s.ProjectPath), nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType), nullEmpty(s.Source), s.UUID)
+		ended, ended, userTurns, nullEmpty(s.ProjectPath), nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType), nullEmpty(s.Source), s.UUID)
 	if err != nil {
 		return err
 	}
