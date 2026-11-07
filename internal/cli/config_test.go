@@ -78,3 +78,25 @@ func TestConfigRawRetentionHelpStillWorks(t *testing.T) {
 		t.Fatalf("--help: err=%v out=%q", err, out)
 	}
 }
+
+// "off" is matched case-insensitively and around spaces, like the duration it
+// replaces, and a rejected value's error names "off" as the way to disable.
+func TestConfigRawRetentionOffAnyCase(t *testing.T) {
+	database, _ := pruneSandbox(t, "sess-cfg", 1)
+	database.Close()
+	for _, off := range []string{"OFF", "Off", " off "} {
+		if _, err := runConfigCmd(t, "raw-retention", "14d"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runConfigCmd(t, "raw-retention", off); err != nil {
+			t.Fatalf("raw-retention %q: %v", off, err)
+		}
+		if out, _ := runConfigCmd(t, "raw-retention"); strings.TrimSpace(out) != "off" {
+			t.Fatalf("after %q: out=%q, want \"off\"", off, out)
+		}
+	}
+	_, err := runConfigCmd(t, "raw-retention", "nope")
+	if err == nil || !strings.Contains(err.Error(), `"off"`) {
+		t.Fatalf("err=%v, want it to name \"off\"", err)
+	}
+}

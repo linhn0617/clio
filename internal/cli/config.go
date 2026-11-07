@@ -61,10 +61,10 @@ To get the raw form back: 'clio config raw-retention off', then
 			var value string
 			if len(args) == 1 {
 				value = strings.TrimSpace(args[0])
-				if value != "off" {
-					if _, err := timeutil.ParseRetention(value); err != nil {
-						return err
-					}
+				if strings.EqualFold(value, "off") {
+					value = "off"
+				} else if _, err := timeutil.ParseRetention(value); err != nil {
+					return fmt.Errorf(`%w; use "off" to turn raw retention off`, err)
 				}
 			}
 			database, err := db.Open(dbPath)
