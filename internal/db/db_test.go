@@ -261,3 +261,83 @@ func TestMigration0016ActivityBackfillWatermark(t *testing.T) {
 		t.Fatalf("migration reset watermark to %d", w)
 	}
 }
+
+// TestMigration0018BackfillsNulledEndedAt rebuilds the state the old incremental
+// upsert left behind (MAX(COALESCE(ended_at,0), NULL) stored NULL for a
+// timestamped session), re-runs migrate, and checks ended_at comes back as the
+// session's newest message timestamp for both sources while every other row is
+// left alone. A second run must change nothing.
+func TestMigration0018BackfillsNulledEndedAt(t *testing.T) {
+	d, err := Open(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer d.Close()
+	mustExec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := d.Exec(q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	session := func(uuid string, source, started, ended any) {
+		mustExec(`INSERT INTO sessions(uuid, source_file, source, started_at, ended_at, turn_count) VALUES (?,?,?,?,?,1)`, uuid, "/f/"+uuid, source, started, ended)
+	}
+	msg := func(uuid string, seq int, ts any) {
+		mustExec(`INSERT INTO messages(session_uuid, seq, ts, role, content, raw_json) VALUES (?,?,?,'user','x','{}')`, uuid, seq, ts)
+	}
+	session("cc-null", "claude-code", 100, nil)
+	msg("cc-null", 0, 100)
+	msg("cc-null", 1, 300)
+	msg("cc-null", 2, nil) // an untimestamped line
+	session("cx-null", "codex", 200, nil)
+	msg("cx-null", 0, 250)
+	session("legacy-null", nil, 400, nil) // pre-source-column row
+	msg("legacy-null", 0, 450)
+	session("real", "claude-code", 100, 900)
+	msg("real", 0, 950) // ended_at is set: left as stored even if a message is newer
+	session("undated", "claude-code", nil, nil)
+	msg("undated", 0, nil)
+	session("no-msgs", "claude-code", 100, nil)
+
+	ended := func() map[string]any {
+		t.Helper()
+		rows, err := d.Query(`SELECT uuid, ended_at FROM sessions`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		out := map[string]any{}
+		for rows.Next() {
+			var u string
+			var e any
+			if err := rows.Scan(&u, &e); err != nil {
+				t.Fatal(err)
+			}
+			out[u] = e
+		}
+		return out
+	}
+	rerun := func() {
+		t.Helper()
+		mustExec(`DELETE FROM schema_migrations WHERE name = '0018_backfill_session_ended_at.sql'`)
+		if err := d.migrate(); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+	}
+
+	rerun()
+	got := ended()
+	want := map[string]any{"cc-null": int64(300), "cx-null": int64(250), "legacy-null": int64(450), "real": int64(900), "undated": nil, "no-msgs": nil}
+	for u, w := range want {
+		if got[u] != w {
+			t.Errorf("%s: ended_at=%v, want %v", u, got[u], w)
+		}
+	}
+	rerun()
+	again := ended()
+	for u, w := range got {
+		if again[u] != w {
+			t.Errorf("second run changed %s: %v -> %v", u, w, again[u])
+		}
+	}
+}
