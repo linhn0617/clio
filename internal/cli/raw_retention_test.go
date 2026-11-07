@@ -497,3 +497,67 @@ func TestIndexSweepKeepsLiveSessionAfterUntimestampedAppend(t *testing.T) {
 		}
 	}
 }
+
+// The sweep runs on every `clio index` and MCP leader start, so it must not
+// re-stat the transcript of every session it already blanked: only sessions that
+// still hold raw_json are examined. Pruning is unchanged — a second aged session
+// with raw is still swept. Manual prune-raw keeps its candidate set (and skip
+// counts), so it still reports the blanked session whose file went missing.
+func TestSweepSkipsAlreadyBlankedSessions(t *testing.T) {
+	database, path := pruneSandbox(t, "sess-old", 30)
+	projects := filepath.Dir(path)
+	roots := []string{filepath.Dir(projects)}
+	cutoff := time.Now().Add(-14 * 24 * time.Hour).Unix()
+	var out bytes.Buffer
+	if err := sweepRawRetention(context.Background(), database, roots, cutoff, "14d", &out); err != nil {
+		t.Fatal(err)
+	}
+	if rawJSONOf(t, database, "sess-old")[0] != "" {
+		t.Fatal("setup: first sweep did not blank sess-old")
+	}
+
+	// A second aged session that still has raw_json.
+	twoPath := filepath.Join(projects, "sess-two.jsonl")
+	line := `{"type":"assistant","uuid":"b1","timestamp":"2026-01-01T10:00:00Z","sessionId":"sess-two","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"second"}]}}`
+	if err := os.WriteFile(twoPath, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ingest.New(database, nil).IngestAll(context.Background(), projects, false); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-30 * 24 * time.Hour).Unix()
+	if _, err := database.Exec(`UPDATE sessions SET ended_at=?, started_at=? WHERE uuid='sess-two'`, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	var statted []string
+	statSource = func(name string) (os.FileInfo, error) {
+		statted = append(statted, name)
+		return os.Stat(name)
+	}
+	t.Cleanup(func() { statSource = os.Stat })
+	out.Reset()
+	if err := sweepRawRetention(context.Background(), database, roots, cutoff, "14d", &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range statted {
+		if p == path {
+			t.Errorf("sweep stat'ed the already-blanked sess-old transcript (statted=%v)", statted)
+		}
+	}
+	if len(statted) != 1 || statted[0] != twoPath {
+		t.Errorf("sweep stat'ed %v, want only %s", statted, twoPath)
+	}
+	if !strings.Contains(out.String(), "pruned 1 messages across 1 sessions") || rawJSONOf(t, database, "sess-two")[0] != "" {
+		t.Fatalf("sess-two not swept (out=%q)", out.String())
+	}
+
+	statSource = os.Stat
+	database.Close()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := runPruneCmd(t, "--older-than", "14d", "--source", "all"); !strings.Contains(got, "skipped 1 of 2 candidate sessions: missing 1") {
+		t.Fatalf("prune-raw output changed; want the blanked session still a candidate:\n%s", got)
+	}
+}

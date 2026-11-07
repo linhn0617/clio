@@ -168,15 +168,20 @@ func checkPrunedResiduals(ctx context.Context, database *db.DB, stderr io.Writer
 }
 
 // sweepRawRetention prunes raw_json of sessions that aged past the retention
-// window since they were written, with prune-raw's preflight (pruneEligible)
-// and in-transaction revalidation (PruneRawJSON). cutoff 0 means retention is
-// off. Skipped sessions are left intact without a message; one summary line is
-// printed only when something was pruned.
+// window since they were written, with prune-raw's preflight checks
+// (classifyCandidates) over the sessions that still hold raw_json
+// (RetentionCandidates) and its in-transaction revalidation (PruneRawJSON).
+// cutoff 0 means retention is off. Skipped sessions are left intact without a
+// message; one summary line is printed only when something was pruned.
 func sweepRawRetention(ctx context.Context, database *db.DB, roots []string, cutoff int64, retention string, stdout io.Writer) error {
 	if cutoff == 0 {
 		return nil
 	}
-	_, eligible, _, err := pruneEligible(ctx, database, roots, cutoff, registry.All, "")
+	cands, err := sessions.RetentionCandidates(ctx, database, cutoff)
+	if err != nil {
+		return err
+	}
+	_, eligible, _, err := classifyCandidates(ctx, database, roots, cands)
 	if err != nil {
 		return err
 	}

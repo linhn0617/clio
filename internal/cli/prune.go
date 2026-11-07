@@ -166,6 +166,12 @@ func pruneEligible(ctx context.Context, database *db.DB, roots []string, cutoff 
 	if err != nil {
 		return 0, nil, nil, err
 	}
+	return classifyCandidates(ctx, database, roots, cands)
+}
+
+// classifyCandidates splits candidates into eligible pairs and per-reason skip
+// counts (classifyPrunable).
+func classifyCandidates(ctx context.Context, database *db.DB, roots []string, cands []sessions.PruneCandidate) (candidates int, eligible []sessions.PrunePair, skips map[string]int, err error) {
 	pending, err := sessions.PendingBackfillSessions(ctx, database)
 	if err != nil {
 		return 0, nil, nil, err
@@ -185,6 +191,10 @@ func pruneEligible(ctx context.Context, database *db.DB, roots []string, cutoff 
 // The DB-side facts (aborted, offset) and filesystem facts (regular/readable/
 // under-root/size+mtime match) together establish restorability; pending
 // backfill is a separate read-only exclusion.
+// statSource stats a candidate's transcript; a variable so tests can see which
+// candidates the preflight actually examined on disk.
+var statSource = os.Stat
+
 func classifyPrunable(c sessions.PruneCandidate, roots []string, pending map[string]bool) string {
 	if c.Aborted != 0 {
 		return "unverified"
@@ -195,7 +205,7 @@ func classifyPrunable(c sessions.PruneCandidate, roots []string, pending map[str
 	if pending[c.UUID] {
 		return "pending-backfill"
 	}
-	fi, err := os.Stat(c.SourceFile)
+	fi, err := statSource(c.SourceFile)
 	if err != nil {
 		return "missing"
 	}

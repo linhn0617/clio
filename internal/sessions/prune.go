@@ -28,8 +28,25 @@ type PruneCandidate struct {
 // unverified). source ("" / "all" / a name) and project (path prefix) filter as
 // elsewhere. Restorability (offset/aborted + filesystem) is judged by the caller.
 func PruneCandidates(ctx context.Context, database *db.DB, cutoff int64, source, project string) ([]PruneCandidate, error) {
+	return pruneCandidates(ctx, database, cutoff, source, project, false)
+}
+
+// RetentionCandidates is PruneCandidates for the raw retention sweep, across all
+// sources and projects, limited to sessions that still hold raw_json: the sweep
+// runs on every `clio index` and MCP leader start, and a session it already
+// blanked has nothing left to prune, so stat-ing its transcript again is waste.
+// Manual prune-raw keeps the full candidate set, so its skip counts still cover
+// every old session.
+func RetentionCandidates(ctx context.Context, database *db.DB, cutoff int64) ([]PruneCandidate, error) {
+	return pruneCandidates(ctx, database, cutoff, "", "", true)
+}
+
+func pruneCandidates(ctx context.Context, database *db.DB, cutoff int64, source, project string, withRawOnly bool) ([]PruneCandidate, error) {
 	where := " WHERE COALESCE(s.ended_at, s.started_at, 0) < ?"
 	args := []any{cutoff}
+	if withRawOnly {
+		where += " AND EXISTS (SELECT 1 FROM messages m WHERE m.session_uuid = s.uuid AND m.raw_json <> '')"
+	}
 	if project != "" {
 		where += ` AND s.project_path LIKE ? ESCAPE '\'`
 		args = append(args, db.EscapeLike(project)+"%")
