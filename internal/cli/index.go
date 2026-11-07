@@ -90,6 +90,9 @@ func newIndexCmd() *cobra.Command {
 			// command after the remaining checks have run.
 			roots := append([]string{projects}, ing.ExtraRoots()...)
 			sweepErr := sweepRawRetention(cmd.Context(), database, roots, st.RawCutoff, st.RawRetention, os.Stdout)
+			if sweepErr != nil {
+				sweepErr = fmt.Errorf("raw retention sweep failed: %w", sweepErr)
+			}
 			if full {
 				// After --purge-missing so its deletes' tombstones are merged too.
 				fmt.Fprintln(os.Stdout, "optimizing fts index…")
@@ -104,10 +107,7 @@ func newIndexCmd() *cobra.Command {
 					return errors.Join(err, sweepErr)
 				}
 			}
-			if sweepErr != nil {
-				return fmt.Errorf("raw retention sweep failed: %w", sweepErr)
-			}
-			return nil
+			return sweepErr
 		},
 	}
 	cmd.Flags().BoolVar(&full, "full", false, "Force a full re-index instead of incremental; restores pruned raw_json (with a raw retention set, run 'clio config raw-retention off' first)")

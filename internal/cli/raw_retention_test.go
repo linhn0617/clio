@@ -424,3 +424,27 @@ func TestPruneRawRestoreHintFollowsRetention(t *testing.T) {
 		t.Fatalf("retention 14d: restore hint ignores retention:\n%s", out)
 	}
 }
+
+// Under --full, a residual failure and a sweep failure are both returned, and the
+// sweep's error keeps its "raw retention sweep failed" prefix.
+func TestIndexFullJoinsResidualAndSweepFailure(t *testing.T) {
+	database, path := pruneSandbox(t, "sess-in", 5) // inside a 14d window
+	mustPrune(t, database, time.Now().Add(-24*time.Hour).Unix(), "sess-in")
+	putRetention(t, database, "14d")
+	if _, err := database.Exec(`ALTER TABLE activity_backfill_state RENAME TO activity_backfill_state_gone`); err != nil {
+		t.Fatal(err)
+	}
+	database.Close()
+	// Unreadable: --full cannot restore it, so it stays a residual.
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(path, 0o600)
+	_, err := runIndexCmd(t, "--full")
+	if err == nil || !strings.Contains(err.Error(), "could not be restored") {
+		t.Fatalf("err = %v, want the residual failure", err)
+	}
+	if !strings.Contains(err.Error(), "raw retention sweep failed:") {
+		t.Fatalf("err = %q, want the sweep failure with its prefix", err)
+	}
+}
