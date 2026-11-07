@@ -91,7 +91,8 @@ after a full run, report and exit non-zero if any session still has pruned
 the full run skipped as still changing is excepted: the run names that file
 instead, and the next full reindex restores it. A session older than the run's
 retention cutoff is also excepted, because the window keeps it blank on purpose.
-The prune command SHALL print the restore path on completion.
+The prune command SHALL print the restore path on completion, and with a window set
+that path SHALL be `clio config raw-retention off` followed by `clio index --full`.
 
 #### Scenario: Full reindex restores pruned raw_json for both sources
 - **WHEN** Claude and Codex sessions are each pruned and then `clio
@@ -118,6 +119,11 @@ The prune command SHALL print the restore path on completion.
 #### Scenario: Retention off restores
 - **WHEN** the user runs `clio config raw-retention off` and then `clio index --full`
 - **THEN** raw_json is restored for every session whose source file exists
+
+#### Scenario: prune-raw restore hint with retention set
+- **WHEN** retention is `14d` and `clio prune-raw --older-than 14d` prunes a session
+- **THEN** its closing hint names `clio config raw-retention off`, then
+  `clio index --full`, and with retention off the hint stays `clio index --full`
 
 ### Requirement: space is reclaimed on VACUUM; --vacuum is lock-checked first
 The command SHALL reclaim file space only via VACUUM (blanking `raw_json` moves

@@ -125,7 +125,12 @@ func runPruneRaw(ctx context.Context, o pruneOpts) error {
 	if err != nil {
 		return err
 	}
-	printPruneSummary(o, candidates, pr.PrunedSessions, pr.Messages, pr.RemovedBytes, skips)
+	// An unreadable setting only drops the retention wording from the restore hint.
+	_, retention, rerr := database.RawRetention(ctx)
+	if rerr != nil {
+		retention = ""
+	}
+	printPruneSummary(o, candidates, pr.PrunedSessions, pr.Messages, pr.RemovedBytes, skips, retention)
 	// RacedOut = preflight-eligible sessions the in-transaction revalidation
 	// rejected (a concurrent change moved/aged/rescoped them) — distinct from an
 	// idempotent rerun (validated but already empty). Reported in real AND dry runs.
@@ -226,7 +231,7 @@ func underAnyRoot(path string, roots []string) bool {
 	return false
 }
 
-func printPruneSummary(o pruneOpts, candidates, eligible int, msgs, removed int64, skips map[string]int) {
+func printPruneSummary(o pruneOpts, candidates, eligible int, msgs, removed int64, skips map[string]int, retention string) {
 	verb := "pruned"
 	if o.dryRun {
 		verb = "would prune"
@@ -255,9 +260,15 @@ func printPruneSummary(o pruneOpts, candidates, eligible int, msgs, removed int6
 	if !o.doVacuum && msgs > 0 {
 		fmt.Fprintln(os.Stdout, "space is freed in the DB but the file shrinks only on VACUUM — re-run with --vacuum, or run VACUUM manually.")
 	}
-	if msgs > 0 {
-		fmt.Fprintln(os.Stdout, "restore the raw form anytime with `clio index --full`.")
+	if msgs == 0 {
+		return
 	}
+	if retention == "" {
+		fmt.Fprintln(os.Stdout, "restore the raw form anytime with `clio index --full`.")
+		return
+	}
+	// --full alone keeps sessions older than the window blank.
+	fmt.Fprintf(os.Stdout, "raw retention is %s — to restore the raw form, run `clio config raw-retention off`, then `clio index --full`.\n", retention)
 }
 
 // humanBytes renders a byte count compactly (MB/kB).

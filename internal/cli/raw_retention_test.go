@@ -400,3 +400,27 @@ func TestPruneRawVacuumRunsWhenNothingPruned(t *testing.T) {
 		t.Fatalf("freelist_count=%d after --vacuum, want 0", free)
 	}
 }
+
+// prune-raw's closing restore hint must not send the user to `clio index --full`
+// alone while a retention window would keep the session blank.
+func TestPruneRawRestoreHintFollowsRetention(t *testing.T) {
+	database, _ := pruneSandbox(t, "sess-old", 30)
+	database.Close()
+	out := runPruneCmd(t, "--older-than", "14d", "--source", "all")
+	if !strings.Contains(out, "restore the raw form anytime with `clio index --full`") {
+		t.Fatalf("retention off: missing the plain restore hint:\n%s", out)
+	}
+
+	database, _ = pruneSandbox(t, "sess-old", 30)
+	putRetention(t, database, "14d")
+	database.Close()
+	out = runPruneCmd(t, "--older-than", "14d", "--source", "all")
+	if !strings.Contains(out, "pruned 1 messages") {
+		t.Fatalf("retention 14d: setup did not prune:\n%s", out)
+	}
+	if strings.Contains(out, "restore the raw form anytime with `clio index --full`") ||
+		!strings.Contains(out, "raw retention is 14d") ||
+		!strings.Contains(out, "`clio config raw-retention off`, then `clio index --full`") {
+		t.Fatalf("retention 14d: restore hint ignores retention:\n%s", out)
+	}
+}
