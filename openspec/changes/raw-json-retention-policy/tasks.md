@@ -4,8 +4,8 @@
 
 ## 2. Setting
 
-- [ ] 2.1 Migration 0017 `settings` table; `ParseRetention`; `DB.Setting/PutSetting/DeleteSetting/RawRetention`.
-- [ ] 2.2 `clio config raw-retention [VALUE|off]`, registered on the root command.
+- [x] 2.1 Migration 0017 `settings` table; `ParseRetention`; `DB.Setting/PutSetting/DeleteSetting/RawRetention`.
+- [x] 2.2 `clio config raw-retention [VALUE|off]`, registered on the root command.
 
 ## 3. Ingest
 
