@@ -21,7 +21,8 @@ jobs:
       - name: Vet and test before publishing
         run: |
           go vet ./...
-          go test -race ./...
+          # -timeout 20m: same reason as ci.yml (the -race ingest package nears Go's 10m default).
+          go test -race -timeout 20m ./...
 
       - name: Build cross-platform binaries
         env:
