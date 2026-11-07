@@ -9,8 +9,8 @@
 
 ## 3. Ingest
 
-- [ ] 3.1 Write-time drop for rows each file commit inserts; activity facts from parsed events (pinned by a test with `RepairActivity`).
-- [ ] 3.2 Invalid or unreadable setting: raw kept, warning naming the value.
+- [x] 3.1 Write-time drop for rows each file commit inserts; activity facts from parsed events (pinned by a test with `RepairActivity`).
+- [x] 3.2 Invalid or unreadable setting: raw kept, warning naming the value.
 
 ## 4. clio index
 
