@@ -21,3 +21,7 @@
 
 - [x] 5.1 `clio doctor` `raw retention` line; `show --format raw` note names the window.
 - [x] 5.2 READMEs (en, zh-TW) and `docs/USAGE.md`.
+
+## 6. Final verification fixes
+
+- [x] 6.1 `prune-raw --vacuum` VACUUMs even when nothing was left to prune.

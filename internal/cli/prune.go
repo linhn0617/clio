@@ -133,7 +133,9 @@ func runPruneRaw(ctx context.Context, o pruneOpts) error {
 		fmt.Fprintf(os.Stdout, "note: %d eligible session(s) were re-validated out by a concurrent change and left intact.\n", pr.RacedOut)
 	}
 
-	if o.dryRun || !o.doVacuum || pr.Messages == 0 {
+	// VACUUM even when nothing was pruned now: with a raw retention window set,
+	// `clio index` has already blanked old sessions and this is the way to shrink.
+	if o.dryRun || !o.doVacuum {
 		return nil
 	}
 	// Merge FTS tombstones first so VACUUM can actually return their pages.

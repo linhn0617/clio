@@ -367,3 +367,36 @@ func TestShowRawNoteNamesRetention(t *testing.T) {
 		t.Fatalf("raw show note does not mention the retention setting:\n%s", eb.String())
 	}
 }
+
+// With retention on, the sweep has already blanked old sessions, so prune-raw
+// finds nothing to prune; --vacuum is still the documented way to shrink the
+// file and must VACUUM anyway.
+func TestPruneRawVacuumRunsWhenNothingPruned(t *testing.T) {
+	database, _ := pruneSandbox(t, "sess-old", 30)
+	mustPrune(t, database, time.Now().Add(-14*24*time.Hour).Unix(), "sess-old")
+	putRetention(t, database, "14d")
+	// Leave free pages behind, as a pruned and FTS-optimized index does.
+	if _, err := database.Exec(`CREATE TABLE junk AS SELECT randomblob(4096) AS b FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 256) SELECT x FROM c)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`DELETE FROM junk`); err != nil {
+		t.Fatal(err)
+	}
+	var free int64
+	database.QueryRow(`PRAGMA freelist_count`).Scan(&free)
+	if free == 0 {
+		t.Fatal("setup: no free pages to reclaim")
+	}
+	database.Close()
+
+	out := runPruneCmd(t, "--older-than", "14d", "--vacuum", "--source", "all")
+	if !strings.Contains(out, "pruned 0 messages") || !strings.Contains(out, "VACUUM done") {
+		t.Fatalf("prune-raw --vacuum with nothing to prune did not VACUUM:\n%s", out)
+	}
+	d := reopen(t)
+	defer d.Close()
+	d.QueryRow(`PRAGMA freelist_count`).Scan(&free)
+	if free != 0 {
+		t.Fatalf("freelist_count=%d after --vacuum, want 0", free)
+	}
+}
