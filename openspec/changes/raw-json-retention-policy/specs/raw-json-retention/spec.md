@@ -23,8 +23,9 @@ and `clio index` SHALL behave exactly as without this feature.
 ### Requirement: Retention drops raw_json at write time
 When a window is set, each ingest run SHALL compute `cutoff = now - window` once at
 its start. When a file's batch is committed, the rows inserted by that commit SHALL
-store `raw_json = ''` if the session's `COALESCE(ended_at, started_at, 0)` after the
-commit is older than the cutoff. Content, FTS, tool calls, tool targets, and usage
+store `raw_json = ''` if the session's `COALESCE(ended_at, started_at)` after the
+commit is older than the cutoff. A session with neither timestamp has no known age and
+SHALL keep raw_json. Content, FTS, tool calls, tool targets, and usage
 SHALL be written as without retention, from the parsed events. Rows written by earlier
 commits SHALL NOT be changed by this rule. An incremental commit whose new lines carry
 no timestamp SHALL leave the session's stored `ended_at` unchanged (NULL stays NULL),
@@ -35,6 +36,11 @@ so such a batch never makes a live session look older.
   session active today
 - **THEN** every row of the old session has `raw_json = ''` while its content, FTS hits,
   tool calls and tool targets are present, and the recent session keeps raw_json
+
+#### Scenario: Undated session keeps raw_json
+- **WHEN** retention is `14d` and a session whose lines carry no timestamp (both
+  `started_at` and `ended_at` NULL) is ingested, incrementally or with `--full`
+- **THEN** its rows keep raw_json
 
 #### Scenario: Appending to an old session
 - **WHEN** an old, already-blanked session file receives a new line stamped now and is
@@ -52,7 +58,11 @@ so such a batch never makes a live session look older.
 When a window is set, `clio index` (incremental and `--full`) SHALL, after ingest,
 blank raw_json of sessions older than the run's cutoff using prune-raw's preflight
 (candidate selection, restorability checks, pending-backfill exclusion) and its
-in-transaction revalidation. Skipped sessions SHALL be left intact without a warning.
+in-transaction revalidation, with two differences: only sessions that still hold some
+raw_json SHALL be candidates, and a session with neither `ended_at` nor `started_at`
+SHALL NOT be treated as older than the cutoff by the candidate selection or the
+revalidation. Manual `clio prune-raw` SHALL keep its candidate set and its age rule
+(an undated session ages as 0). Skipped sessions SHALL be left intact without a warning.
 It SHALL print one summary line only when it pruned something. A sweep failure SHALL
 NOT roll back the committed ingest; the command SHALL report it and exit non-zero.
 The MCP leader SHALL run the same sweep once, at the end of its startup catch-up; a
@@ -71,6 +81,16 @@ failure there SHALL only be logged and SHALL NOT stop the server from starting.
 #### Scenario: MCP startup sweep failure
 - **WHEN** the sweep fails during the MCP leader's startup catch-up
 - **THEN** the failure is logged and the leader still starts serving as leader
+
+#### Scenario: Undated session is not swept
+- **WHEN** retention is set and a session with raw_json has neither `ended_at` nor
+  `started_at`, and `clio index` runs
+- **THEN** its raw_json is kept
+
+#### Scenario: Already-blanked sessions are not re-examined
+- **WHEN** retention is set and an aged session's raw_json was already blanked
+- **THEN** the sweep does not stat its transcript, while `clio prune-raw` still counts
+  it among its candidates
 
 #### Scenario: A session whose transcript is missing
 - **WHEN** the aged session's source file no longer exists and `clio index` runs
@@ -99,7 +119,8 @@ after a full run, report and exit non-zero if any session still has pruned
 `raw_json`, so an unrestored prune is never silent. A session whose source file
 the full run skipped as still changing is excepted: the run names that file
 instead, and the next full reindex restores it. A session older than the run's
-retention cutoff is also excepted, because the window keeps it blank on purpose.
+retention cutoff is also excepted, because the window keeps it blank on purpose; a
+session with neither `ended_at` nor `started_at` is never excepted this way.
 The prune command SHALL print the restore path on completion, and with a window set
 that path SHALL be `clio config raw-retention off` followed by `clio index --full`.
 
@@ -124,6 +145,11 @@ that path SHALL be `clio config raw-retention off` followed by `clio index --ful
   days ends with blank raw_json
 - **THEN** the command does not report it and exits successfully, while a pruned
   session inside the window is still reported
+
+#### Scenario: Blank undated session is still a residual
+- **WHEN** `clio index --full` runs with retention set and a session with neither
+  `ended_at` nor `started_at` still has blank raw_json
+- **THEN** the command reports it and exits non-zero
 
 #### Scenario: Retention off restores
 - **WHEN** the user runs `clio config raw-retention off` and then `clio index --full`

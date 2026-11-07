@@ -18,6 +18,7 @@ import (
 
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
+	"github.com/linhn0617/clio/internal/sessions"
 )
 
 func putRetention(t *testing.T, d *db.DB, v string) {
@@ -559,5 +560,42 @@ func TestSweepSkipsAlreadyBlankedSessions(t *testing.T) {
 	}
 	if got := runPruneCmd(t, "--older-than", "14d", "--source", "all"); !strings.Contains(got, "skipped 1 of 2 candidate sessions: missing 1") {
 		t.Fatalf("prune-raw output changed; want the blanked session still a candidate:\n%s", got)
+	}
+}
+
+// An undated session (ended_at and started_at both NULL) is never outside the
+// retention window (decision 2026-11-07): the sweep leaves its raw_json, and if
+// it is blank for another reason the --full residual check still reports it.
+// Manual prune-raw keeps treating it as age 0, so it still prunes it.
+func TestRetentionKeepsUndatedSession(t *testing.T) {
+	database, path := pruneSandbox(t, "sess-u", 30)
+	if _, err := database.Exec(`UPDATE sessions SET ended_at=NULL, started_at=NULL WHERE uuid='sess-u'`); err != nil {
+		t.Fatal(err)
+	}
+	roots := []string{filepath.Dir(filepath.Dir(path))}
+	cutoff := time.Now().Add(-14 * 24 * time.Hour).Unix()
+	var out bytes.Buffer
+	if err := sweepRawRetention(context.Background(), database, roots, cutoff, "14d", &out); err != nil {
+		t.Fatal(err)
+	}
+	if rawJSONOf(t, database, "sess-u")[0] == "" {
+		t.Fatalf("sweep blanked an undated session (out=%q)", out.String())
+	}
+	// Even handed over as a pair, the sweep's in-transaction revalidation refuses it.
+	pr, err := sessions.PruneRetainedRawJSON(context.Background(), database, cutoff, prunePairs(t, database, "sess-u"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.ValidatedSessions != 0 || rawJSONOf(t, database, "sess-u")[0] == "" {
+		t.Fatalf("sweep revalidation accepted an undated session: %+v", pr)
+	}
+
+	mustPrune(t, database, cutoff, "sess-u") // manual prune-raw: unchanged, prunes it
+	if rawJSONOf(t, database, "sess-u")[0] != "" {
+		t.Fatal("prune-raw no longer prunes an undated session")
+	}
+	var errOut bytes.Buffer
+	if err := checkPrunedResiduals(context.Background(), database, &errOut, nil, cutoff); err == nil || !strings.Contains(errOut.String(), "sess-u") {
+		t.Fatalf("err=%v stderr=%q; want the blank undated session reported as a residual", err, errOut.String())
 	}
 }

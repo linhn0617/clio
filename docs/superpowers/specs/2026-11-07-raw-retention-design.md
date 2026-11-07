@@ -36,7 +36,8 @@
 
 ### 3.2 Drop at write time (every ingest path: `clio index`, `--full`, MCP, watch, install-mcp)
 
-- When a file's batch is committed, compute the session's last activity time, using the same expression `prune-raw` uses: `COALESCE(ended_at, started_at, 0)` after this commit (a session with no timestamps counts as oldest, as in prune-raw). If it is older than the cutoff, the rows inserted in this commit store `raw_json = ''`. Everything else (content, FTS, tool calls/targets, usage) is written as today.
+- When a file's batch is committed, compute the session's last activity time as `COALESCE(ended_at, started_at)` after this commit. If it is older than the cutoff, the rows inserted in this commit store `raw_json = ''`. Everything else (content, FTS, tool calls/targets, usage) is written as today.
+- A session with no timestamps at all (both columns NULL) has no known age and is never treated as outside the window: its raw_json is kept (decided 2026-11-07, replacing the earlier choice of `prune-raw`'s `COALESCE(ended_at, started_at, 0)`, which made such a session the oldest and blanked it at write time). The same rule holds in the sweep (§3.3) and the residual check (§3.4). Manual `clio prune-raw --older-than` keeps its existing behaviour and still ages an undated session as 0.
 - Applies to every source (claude-code, codex), the same as `prune-raw`.
 - The source file was just read successfully, so the raw form is restorable at that moment, which is the same precondition `prune-raw` checks.
 - A resumed old session: its last activity becomes recent, so the new rows keep raw_json. Rows blanked earlier stay blank until a `--full` run with retention off (or a longer window).
@@ -44,7 +45,7 @@
 
 ### 3.3 Sweep at the end of `clio index` and at MCP startup
 
-- When retention is set, `clio index` (incremental and `--full`) runs one prune pass before it exits. It reuses the `prune-raw` machinery: `PruneCandidates`, `classifyPrunable` restorability checks, and the in-transaction revalidation in `PruneRawJSON`. It covers sessions that aged past the window since they were written.
+- When retention is set, `clio index` (incremental and `--full`) runs one prune pass before it exits. It reuses the `prune-raw` machinery: candidate selection, `classifyPrunable` restorability checks, and the in-transaction revalidation. It covers sessions that aged past the window since they were written. Two differences from `prune-raw`: candidates are only sessions that still hold some raw_json (one already blanked has nothing left, and re-stat-ing every old transcript on each run is waste), and an undated session is neither a candidate nor accepted by the revalidation (§3.2, decided 2026-11-07).
 - Sessions skipped by those checks (missing, changed, lagged, unverified, pending backfill) are left intact, as today.
 - The sweep also runs once in the MCP leader's startup catch-up (decided 2026-11-07). Without it, a user who only uses MCP never prunes sessions that aged after being written; once Claude Code deletes the transcript (default 30 days), they are "missing" and stay unprunable forever. A sweep failure there is logged and does not stop the server. The catch-up that runs before each MCP tool call does not sweep, and neither do watch and install-mcp. Those paths get only §3.2.
 - It prints one summary line when it pruned something. Skips are not warnings.
@@ -52,7 +53,7 @@
 ### 3.4 Restore path and the residual check
 
 - Restore: `clio config raw-retention off` and then `clio index --full`. The help text of `prune-raw`, `index --full`, and both READMEs states this.
-- `checkPrunedResiduals` (after `--full`) excludes sessions that the active retention says must be blank, so they are not reported as "could not be restored".
+- `checkPrunedResiduals` (after `--full`) excludes sessions that the active retention says must be blank, so they are not reported as "could not be restored". An undated session is never one of them (§3.2, decided 2026-11-07): if it is blank, it is reported.
 
 ### 3.5 Visibility
 

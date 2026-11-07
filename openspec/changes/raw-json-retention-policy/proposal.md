@@ -15,8 +15,9 @@ user has to prune by hand after every full reindex. Design:
   zero, a negative value or garbage is rejected. Unset means today's behaviour.
 - Every ingest path (`clio index`, `--full`, MCP catch-up, watcher, `install-mcp`)
   stores raw_json as `''` for the rows a file commit inserts when the session's
-  `COALESCE(ended_at, started_at, 0)` after that commit is older than `now - window`
-  (cutoff computed once per run). Content, FTS, tool calls/targets and usage are
+  `COALESCE(ended_at, started_at)` after that commit is older than `now - window`
+  (cutoff computed once per run). A session with no timestamp at all keeps raw_json
+  (decided 2026-11-07; manual prune-raw still ages it as 0). Content, FTS, tool calls/targets and usage are
   written as today.
 - `clio index` (incremental and `--full`) ends with one prune pass that reuses
   prune-raw's preflight and in-transaction revalidation, for sessions that aged past

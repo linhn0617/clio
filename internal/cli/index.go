@@ -15,7 +15,6 @@ import (
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
 	"github.com/linhn0617/clio/internal/lock"
-	"github.com/linhn0617/clio/internal/registry"
 	"github.com/linhn0617/clio/internal/sessions"
 	"github.com/linhn0617/clio/internal/termsafe"
 )
@@ -132,7 +131,7 @@ func optimizeFTS(ctx context.Context, d *db.DB) error {
 // success. Sessions whose file was still changing are left out: the summary
 // already names those files, and they are restored once the file is idle. So are
 // sessions older than rawCutoff (0 = retention off), which the active raw
-// retention keeps blank on purpose.
+// retention keeps blank on purpose; an undated session is never one of them.
 func checkPrunedResiduals(ctx context.Context, database *db.DB, stderr io.Writer, stillChanging []string, rawCutoff int64) error {
 	all, err := sessions.PrunedResiduals(ctx, database)
 	if err != nil {
@@ -145,12 +144,12 @@ func checkPrunedResiduals(ctx context.Context, database *db.DB, stderr io.Writer
 	var residual []string
 	for _, u := range all {
 		var src string
-		var last int64
-		err := database.QueryRowContext(ctx, `SELECT source_file, COALESCE(ended_at, started_at, 0) FROM sessions WHERE uuid = ?`, u).Scan(&src, &last)
+		var last sql.NullInt64 // NULL: undated, never outside the retention window
+		err := database.QueryRowContext(ctx, `SELECT source_file, COALESCE(ended_at, started_at) FROM sessions WHERE uuid = ?`, u).Scan(&src, &last)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("pruned-residual check failed: %w", err)
 		}
-		if err == nil && rawCutoff > 0 && last < rawCutoff {
+		if err == nil && rawCutoff > 0 && last.Valid && last.Int64 < rawCutoff {
 			continue // blank by retention, not a failed restore
 		}
 		if !busy[src] {
@@ -170,7 +169,8 @@ func checkPrunedResiduals(ctx context.Context, database *db.DB, stderr io.Writer
 // sweepRawRetention prunes raw_json of sessions that aged past the retention
 // window since they were written, with prune-raw's preflight checks
 // (classifyCandidates) over the sessions that still hold raw_json
-// (RetentionCandidates) and its in-transaction revalidation (PruneRawJSON).
+// (RetentionCandidates) and its in-transaction revalidation
+// (PruneRetainedRawJSON). Neither treats an undated session as aged out.
 // cutoff 0 means retention is off. Skipped sessions are left intact without a
 // message; one summary line is printed only when something was pruned.
 func sweepRawRetention(ctx context.Context, database *db.DB, roots []string, cutoff int64, retention string, stdout io.Writer) error {
@@ -185,7 +185,7 @@ func sweepRawRetention(ctx context.Context, database *db.DB, roots []string, cut
 	if err != nil {
 		return err
 	}
-	pr, err := sessions.PruneRawJSON(ctx, database, cutoff, registry.All, "", eligible, false)
+	pr, err := sessions.PruneRetainedRawJSON(ctx, database, cutoff, eligible)
 	if err != nil {
 		return err
 	}

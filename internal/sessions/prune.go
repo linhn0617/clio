@@ -37,14 +37,28 @@ func PruneCandidates(ctx context.Context, database *db.DB, cutoff int64, source,
 // blanked has nothing left to prune, so stat-ing its transcript again is waste.
 // Manual prune-raw keeps the full candidate set, so its skip counts still cover
 // every old session.
+// An undated session is not a candidate (see olderThan).
 func RetentionCandidates(ctx context.Context, database *db.DB, cutoff int64) ([]PruneCandidate, error) {
 	return pruneCandidates(ctx, database, cutoff, "", "", true)
 }
 
-func pruneCandidates(ctx context.Context, database *db.DB, cutoff int64, source, project string, withRawOnly bool) ([]PruneCandidate, error) {
-	where := " WHERE COALESCE(s.ended_at, s.started_at, 0) < ?"
+// olderThan is the "last activity strictly before cutoff" predicate on sessions
+// s. Manual prune-raw ages a session with no timestamp at all as 0, so any
+// --older-than covers it. The retention policy instead never treats an undated
+// session as outside its window (decision 2026-11-07): its age is unknown, and
+// raw_json is the only lossless copy. COALESCE without the 0 leaves it NULL, and
+// NULL < cutoff is not true.
+func olderThan(retention bool) string {
+	if retention {
+		return "COALESCE(s.ended_at, s.started_at) < ?"
+	}
+	return "COALESCE(s.ended_at, s.started_at, 0) < ?"
+}
+
+func pruneCandidates(ctx context.Context, database *db.DB, cutoff int64, source, project string, retention bool) ([]PruneCandidate, error) {
+	where := " WHERE " + olderThan(retention)
 	args := []any{cutoff}
-	if withRawOnly {
+	if retention {
 		where += " AND EXISTS (SELECT 1 FROM messages m WHERE m.session_uuid = s.uuid AND m.raw_json <> '')"
 	}
 	if project != "" {
@@ -128,6 +142,17 @@ type PruneResult struct {
 // ingest and does not blow SQLite's host-parameter limit on large histories.
 // With dryRun it computes the counts and writes nothing.
 func PruneRawJSON(ctx context.Context, database *db.DB, cutoff int64, source, project string, pairs []PrunePair, dryRun bool) (PruneResult, error) {
+	return pruneRawJSON(ctx, database, cutoff, source, project, pairs, dryRun, false)
+}
+
+// PruneRetainedRawJSON is PruneRawJSON for the raw retention sweep: all sources
+// and projects, never a dry run, and the retention age rule (olderThan), so the
+// revalidation rejects an undated session just as RetentionCandidates leaves it out.
+func PruneRetainedRawJSON(ctx context.Context, database *db.DB, cutoff int64, pairs []PrunePair) (PruneResult, error) {
+	return pruneRawJSON(ctx, database, cutoff, "", "", pairs, false, true)
+}
+
+func pruneRawJSON(ctx context.Context, database *db.DB, cutoff int64, source, project string, pairs []PrunePair, dryRun, retention bool) (PruneResult, error) {
 	var res PruneResult
 	if len(pairs) == 0 {
 		return res, nil
@@ -168,7 +193,7 @@ func PruneRawJSON(ctx context.Context, database *db.DB, cutoff int64, source, pr
 	elig := `SELECT c.uuid FROM _prune_cand c
 		JOIN sessions s ON s.uuid = c.uuid AND s.source_file = c.source_file
 		JOIN ingest_state i ON i.source_file = s.source_file
-		WHERE COALESCE(s.ended_at, s.started_at, 0) < ?
+		WHERE ` + olderThan(retention) + `
 		  AND i.aborted = 0 AND i.last_byte_offset = i.last_size
 		  AND s.uuid NOT IN (SELECT m.session_uuid FROM messages m NOT INDEXED WHERE ` + db.PendingActivitySQL + `)`
 	eligArgs := []any{cutoff, w, model.RoleToolUse}

@@ -700,14 +700,16 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 // blankExpiredRaw applies the raw retention window to the rows this commit
 // inserted: ids from firstID up (AUTOINCREMENT ids only grow, and this
 // transaction holds the write lock). The age is read back after upsertSession,
-// so it is exactly the COALESCE(ended_at, started_at, 0) that prune-raw
-// compares. A raw_json-only UPDATE leaves FTS alone (migration 0012).
+// so it is exactly the COALESCE(ended_at, started_at) the retention sweep
+// compares. A session with neither timestamp has no known age and keeps its
+// raw_json (decision 2026-11-07; manual prune-raw still ages it as 0). A
+// raw_json-only UPDATE leaves FTS alone (migration 0012).
 func blankExpiredRaw(tx *sql.Tx, uuid string, firstID, cutoff int64) error {
-	var last int64
-	if err := tx.QueryRow(`SELECT COALESCE(ended_at, started_at, 0) FROM sessions WHERE uuid = ?`, uuid).Scan(&last); err != nil {
+	var last sql.NullInt64
+	if err := tx.QueryRow(`SELECT COALESCE(ended_at, started_at) FROM sessions WHERE uuid = ?`, uuid).Scan(&last); err != nil {
 		return fmt.Errorf("raw retention: read session age: %w", err)
 	}
-	if last >= cutoff {
+	if !last.Valid || last.Int64 >= cutoff {
 		return nil
 	}
 	if _, err := tx.Exec(`UPDATE messages SET raw_json = '' WHERE id >= ? AND session_uuid = ?`, firstID, uuid); err != nil {

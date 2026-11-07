@@ -302,3 +302,31 @@ func TestUpsertSessionIncrementalNoTimestampKeepsEndedAt(t *testing.T) {
 		t.Fatalf("first timestamp on a NULL ended_at: got %v, want 700", got)
 	}
 }
+
+// A session with no timestamp at all (ended_at and started_at both NULL) has no
+// known age, so the retention policy never treats it as outside the window
+// (decision 2026-11-07): its raw_json is kept at write time, on a first ingest
+// and on a full re-ingest alike.
+func TestRawRetentionKeepsUndatedSession(t *testing.T) {
+	projects := t.TempDir()
+	writeSession(t, projects, "-Users-x-undated", "sess-u",
+		`{"type":"user","cwd":"/p","sessionId":"sess-u","message":{"role":"user","content":"no timestamp one"}}`,
+		`{"type":"user","cwd":"/p","sessionId":"sess-u","message":{"role":"user","content":"no timestamp two"}}`)
+	database := openTestDB(t)
+	setRetention(t, database, "14d")
+	for _, full := range []bool{false, true} {
+		if _, err := New(database, nil).IngestAll(context.Background(), projects, full); err != nil {
+			t.Fatal(err)
+		}
+		var started, ended sql.NullInt64
+		if err := database.QueryRow(`SELECT started_at, ended_at FROM sessions WHERE uuid='sess-u'`).Scan(&started, &ended); err != nil {
+			t.Fatal(err)
+		}
+		if started.Valid || ended.Valid {
+			t.Fatalf("setup: session is dated (started=%v ended=%v)", started, ended)
+		}
+		if blank, kept := blankRaw(t, database, "sess-u"); blank != 0 || kept != 2 {
+			t.Fatalf("full=%v: undated session %d blank, %d kept; want raw kept", full, blank, kept)
+		}
+	}
+}
