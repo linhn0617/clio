@@ -336,3 +336,34 @@ func TestCheckPrunedResidualsExcludesRetentionBlanked(t *testing.T) {
 		t.Fatalf("retention off: err=%v stderr=%q; want the residual reported", err, errOut.String())
 	}
 }
+
+func TestPrunedNoteMentionsRetention(t *testing.T) {
+	var b bytes.Buffer
+	prunedNote(&b, "abcd1234", "")
+	if got, want := b.String(), "note: raw form of session abcd1234 was pruned to save space — restore it with `clio index --full`\n"; got != want {
+		t.Fatalf("retention off: %q, want the unchanged note %q", got, want)
+	}
+	b.Reset()
+	prunedNote(&b, "abcd1234", "14d")
+	if !strings.Contains(b.String(), "raw retention is 14d") || !strings.Contains(b.String(), "clio config raw-retention off") {
+		t.Fatalf("retention 14d: %q lacks the retention restore hint", b.String())
+	}
+}
+
+func TestShowRawNoteNamesRetention(t *testing.T) {
+	database, _ := pruneSandbox(t, "sess-old", 30)
+	mustPrune(t, database, time.Now().Add(-14*24*time.Hour).Unix(), "sess-old")
+	putRetention(t, database, "14d")
+	database.Close()
+	oldErr := os.Stderr
+	rerr, werr, _ := os.Pipe()
+	os.Stderr = werr
+	runShowCmd(t, "sess-old", "--format", "raw", "--source", "all")
+	werr.Close()
+	os.Stderr = oldErr
+	var eb bytes.Buffer
+	eb.ReadFrom(rerr)
+	if !strings.Contains(eb.String(), "raw retention is 14d") {
+		t.Fatalf("raw show note does not mention the retention setting:\n%s", eb.String())
+	}
+}

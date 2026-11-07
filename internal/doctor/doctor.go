@@ -5,6 +5,7 @@ package doctor
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -301,6 +302,21 @@ func RunWith(database *db.DB, projectsDir, dbPath string, opts Options) []Result
 		database.QueryRow(`PRAGMA freelist_count`).Scan(&freelist)
 		add("pruned raw_json", true, fmt.Sprintf("%d messages pruned; ~%.1f MB reclaimable on VACUUM (whole-DB freelist, not raw-only)",
 			prunedMsgs, float64(freelist*pageSize)/1e6))
+	}
+
+	// Raw retention setting (clio config raw-retention). A database migrated by
+	// an older clio has no settings table; doctor does not migrate, so that is off.
+	switch _, stored, rerr := database.RawRetention(context.Background()); {
+	case rerr != nil && strings.Contains(rerr.Error(), "no such table"):
+		add("raw retention", true, "off")
+	case rerr != nil && stored != "":
+		add("raw retention", false, fmt.Sprintf("stored value %q is invalid (%v); ingest keeps raw_json — fix with `clio config raw-retention off` or a window such as 14d", stored, rerr))
+	case rerr != nil:
+		add("raw retention", false, rerr.Error())
+	case stored == "":
+		add("raw retention", true, "off")
+	default:
+		add("raw retention", true, stored)
 	}
 
 	if opts.Quick {

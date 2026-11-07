@@ -49,6 +49,11 @@ func newShowCmd() *cobra.Command {
 				return resolveError(err)
 			}
 			format = resolveShowFormat(format, jsonFlag)
+			// An unreadable setting only drops the retention hint from the note.
+			_, retention, rerr := database.RawRetention(cmd.Context())
+			if rerr != nil {
+				retention = ""
+			}
 			if limit <= 0 {
 				limit = defaultShowMessages
 			}
@@ -97,7 +102,7 @@ func newShowCmd() *cobra.Command {
 					return err
 				}
 				if sawPruned {
-					prunedNote(shortID(sess.UUID))
+					prunedNote(os.Stderr, shortID(sess.UUID), retention)
 				}
 				if includeSubagents {
 					for _, c := range children {
@@ -110,7 +115,7 @@ func newShowCmd() *cobra.Command {
 							return err
 						}
 						if sp {
-							prunedNote(shortID(c.UUID)) // per-session, not one aggregate note
+							prunedNote(os.Stderr, shortID(c.UUID), retention) // per-session, not one aggregate note
 						}
 					}
 				}
@@ -185,10 +190,15 @@ func writeRaw(w io.Writer, msgs []sessions.Message) (sawPruned bool, err error) 
 	return sawPruned, nil
 }
 
-// prunedNote prints a per-session note (to stderr) that a session's raw form
-// was pruned and how to restore it.
-func prunedNote(sessionID string) {
-	fmt.Fprintf(os.Stderr, "note: raw form of session %s was pruned to save space — restore it with `clio index --full`\n", sessionID)
+// prunedNote prints a per-session note that a session's raw form was pruned and
+// how to restore it. With a raw retention window set, --full alone keeps old
+// sessions blank, so the hint turns retention off first.
+func prunedNote(w io.Writer, sessionID, retention string) {
+	if retention == "" {
+		fmt.Fprintf(w, "note: raw form of session %s was pruned to save space — restore it with `clio index --full`\n", sessionID)
+		return
+	}
+	fmt.Fprintf(w, "note: raw form of session %s was pruned to save space (raw retention is %s) — restore it with `clio config raw-retention off`, then `clio index --full`\n", sessionID, retention)
 }
 
 // anyPruned reports whether any message has a blanked (pruned) raw_json.

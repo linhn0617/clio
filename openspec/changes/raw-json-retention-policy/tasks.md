@@ -19,5 +19,5 @@
 
 ## 5. Visibility and docs
 
-- [ ] 5.1 `clio doctor` `raw retention` line; `show --format raw` note names the window.
+- [x] 5.1 `clio doctor` `raw retention` line; `show --format raw` note names the window.
 - [ ] 5.2 READMEs (en, zh-TW) and `docs/USAGE.md`.
