@@ -1,0 +1,120 @@
+## ADDED Requirements
+
+### Requirement: Rolling raw_json retention setting
+The index SHALL store an optional raw_json retention window in a `settings`
+key/value table (key `raw_retention`). `clio config raw-retention` with no value SHALL
+print the stored window, or `off` when unset. `clio config raw-retention off` SHALL
+delete the key. Any other value SHALL be a positive relative duration in prune-raw's
+grammar (`14d`, `12h`, `30m`); an absolute date, zero, a negative value, or garbage
+SHALL be rejected with a non-zero exit and nothing stored. With the key unset, ingest
+and `clio index` SHALL behave exactly as without this feature.
+
+#### Scenario: Set, read, and turn off
+- **WHEN** the user runs `clio config raw-retention 14d`, then `clio config
+  raw-retention`, then `clio config raw-retention off`, then `clio config raw-retention`
+- **THEN** the second command prints `14d` and the last prints `off`
+
+#### Scenario: Invalid values are rejected
+- **WHEN** the user runs `clio config raw-retention` with `0d`, `-5d`, `2026-10-01`, or
+  `abc`
+- **THEN** each exits non-zero with an error saying the value must be a positive
+  duration, and the stored setting is unchanged
+
+### Requirement: Retention drops raw_json at write time
+When a window is set, each ingest run SHALL compute `cutoff = now - window` once at
+its start. When a file's batch is committed, the rows inserted by that commit SHALL
+store `raw_json = ''` if the session's `COALESCE(ended_at, started_at, 0)` after the
+commit is older than the cutoff. Content, FTS, tool calls, tool targets, and usage
+SHALL be written as without retention, from the parsed events. Rows written by earlier
+commits SHALL NOT be changed by this rule.
+
+#### Scenario: Full reindex with retention
+- **WHEN** `clio index --full` runs with retention `14d` over an old session and a
+  session active today
+- **THEN** every row of the old session has `raw_json = ''` while its content, FTS hits,
+  tool calls and tool targets are present, and the recent session keeps raw_json
+
+#### Scenario: Appending to an old session
+- **WHEN** an old, already-blanked session file receives a new line stamped now and is
+  ingested incrementally
+- **THEN** the new row keeps raw_json and the earlier rows stay blank
+
+### Requirement: clio index sweeps sessions that aged past the window
+When a window is set, `clio index` (incremental and `--full`) SHALL, after ingest,
+blank raw_json of sessions older than the run's cutoff using prune-raw's preflight
+(candidate selection, restorability checks, pending-backfill exclusion) and its
+in-transaction revalidation. Skipped sessions SHALL be left intact without a warning.
+It SHALL print one summary line only when it pruned something. A sweep failure SHALL
+NOT roll back the committed ingest; the command SHALL report it and exit non-zero.
+The MCP leader SHALL run the same sweep once, at the end of its startup catch-up; a
+failure there SHALL only be logged and SHALL NOT stop the server from starting.
+
+#### Scenario: A session ages past the window
+- **WHEN** a session written with raw_json is older than the window and `clio index`
+  runs
+- **THEN** its raw_json is blanked and a `raw retention` summary line is printed
+
+#### Scenario: MCP leader startup sweeps once
+- **WHEN** retention is set, an aged session written with raw_json is unchanged on disk,
+  and `clio mcp` starts as leader
+- **THEN** its startup catch-up blanks that session's raw_json
+
+#### Scenario: MCP startup sweep failure
+- **WHEN** the sweep fails during the MCP leader's startup catch-up
+- **THEN** the failure is logged and the leader still starts serving as leader
+
+#### Scenario: A session whose transcript is missing
+- **WHEN** the aged session's source file no longer exists and `clio index` runs
+- **THEN** its raw_json is kept and no retention line is printed
+
+### Requirement: Retention fails open on an unreadable or invalid setting
+Ingest SHALL treat retention as off (raw_json kept) when the settings table cannot be
+read or the stored value no longer parses, and SHALL log a warning naming the stored
+value; `clio index` SHALL therefore print that warning, and SHALL NOT sweep.
+
+#### Scenario: Stored value is a date
+- **WHEN** the stored value is `2026-10-01` and an ingest runs
+- **THEN** raw_json is kept and a warning naming `2026-10-01` is logged
+
+## MODIFIED Requirements
+
+### Requirement: pruned raw_json is restorable and restore failure is visible
+Pruning SHALL be reversible for every eligible (restorable) session: a
+subsequent `clio index --full` re-derives and re-stores `raw_json` from the
+source file (Claude re-parse, Codex rollout). With a raw retention window set,
+`--full` keeps sessions older than the window blank; the restore path is
+`clio config raw-retention off` followed by `clio index --full`, and the help text
+of `prune-raw` and `index --full` SHALL say so. Because
+full reindex logs per-file failures and continues, `clio index --full` SHALL,
+after a full run, report and exit non-zero if any session still has pruned
+`raw_json`, so an unrestored prune is never silent. A session whose source file
+the full run skipped as still changing is excepted: the run names that file
+instead, and the next full reindex restores it. A session older than the run's
+retention cutoff is also excepted, because the window keeps it blank on purpose.
+The prune command SHALL print the restore path on completion.
+
+#### Scenario: Full reindex restores pruned raw_json for both sources
+- **WHEN** Claude and Codex sessions are each pruned and then `clio
+  index --full` runs with their source files present
+- **THEN** each session's `raw_json` is repopulated
+
+#### Scenario: Unrestored prune is surfaced
+- **WHEN** after `clio index --full` some pruned session was not restored (e.g.
+  its file became unreadable)
+- **THEN** the command reports that session and exits non-zero
+
+#### Scenario: Pruned session whose file is still changing
+- **WHEN** after `clio index --full` a pruned session was not restored only
+  because its source file kept changing during the run
+- **THEN** the command names that file as still changing, does not report the
+  session as unrestored, and exits successfully
+
+#### Scenario: Session blank by retention is not a residual
+- **WHEN** `clio index --full` runs with retention `14d` and a session older than 14
+  days ends with blank raw_json
+- **THEN** the command does not report it and exits successfully, while a pruned
+  session inside the window is still reported
+
+#### Scenario: Retention off restores
+- **WHEN** the user runs `clio config raw-retention off` and then `clio index --full`
+- **THEN** raw_json is restored for every session whose source file exists
