@@ -363,6 +363,29 @@ instead of blank lines; `--format markdown` is unaffected.
 一律 fail-closed）。prune 過的 session 跑 `clio show --format raw|json` 會印提示與
 還原指令而非空行；`--format markdown` 不受影響。
 
+### `clio config raw-retention` — keep raw_json for a rolling window / 滾動保留 raw_json
+
+Set once, and clio keeps `raw_json` only for sessions whose last activity is
+inside the window: every ingest (index, `--full`, MCP, watcher) stores older
+sessions without it, and `clio index` blanks sessions that aged past it, with
+the same restorability checks as `clio prune-raw`. Search, content, usage and
+activity data are untouched. The window rolls, so a date is rejected. The file
+shrinks on disk only with `clio prune-raw --vacuum`. A stored value that no
+longer parses is treated as off (raw kept); `clio index` and `clio doctor` warn.
+
+設定一次後，clio 只為「最後活動在視窗內」的 session 保留 `raw_json`：每次 ingest
+（index、`--full`、MCP、watcher）寫入較舊的 session 時就不存，`clio index` 結尾也會把
+之後才變舊的 session 清空（可還原檢查與 `clio prune-raw` 相同）。搜尋、內容、用量、
+活動資料都不動。視窗會滾動，所以不接受日期。檔案要 `clio prune-raw --vacuum` 才會縮小。
+存的值若無法解析就當作關閉（保留 raw），`clio index` 與 `clio doctor` 會警告。
+
+```bash
+clio config raw-retention          # print the window, or off / 印出目前設定或 off
+clio config raw-retention 14d      # keep 14 days / 保留 14 天
+clio config raw-retention off      # turn off / 關閉
+clio index --full                  # after off: restore raw_json / 關閉後還原 raw_json
+```
+
 ### `clio index` — (re)build the index / 建立索引
 
 | Flag | English | 中文 |
@@ -528,6 +551,7 @@ clio list [--since 7d] [--project X] [--min-turns N] [--touched P] [--tool T] [-
 clio show <uuid-or-prefix> [--format markdown|json|raw] [--no-tool-output]
 clio activity --by file|command|tool|pattern|url [--since 7d] [--project X]
 clio index [--full]                              # (re)index manually
+clio config raw-retention [14d|off]              # rolling raw_json retention (restore: clio config raw-retention off, then clio index --full)
 clio recall [--tail-runes N]                     # recent-activity digest (current project), headed by the last session's closing message
 clio file-history <path> [--since 7d] [--limit N] # sessions that touched a file, newest first
 clio doctor                                      # health check
