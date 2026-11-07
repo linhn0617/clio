@@ -15,6 +15,7 @@ import (
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
 	"github.com/linhn0617/clio/internal/lock"
+	"github.com/linhn0617/clio/internal/registry"
 	"github.com/linhn0617/clio/internal/sessions"
 	"github.com/linhn0617/clio/internal/termsafe"
 )
@@ -85,6 +86,10 @@ func newIndexCmd() *cobra.Command {
 				}
 				fmt.Fprintf(os.Stdout, "purged: %d session source(s) whose transcript no longer exists\n", n)
 			}
+			// A sweep failure does not undo the committed ingest; it fails the
+			// command after the remaining checks have run.
+			roots := append([]string{projects}, ing.ExtraRoots()...)
+			sweepErr := sweepRawRetention(cmd.Context(), database, roots, st.RawCutoff, st.RawRetention, os.Stdout)
 			if full {
 				// After --purge-missing so its deletes' tombstones are merged too.
 				fmt.Fprintln(os.Stdout, "optimizing fts index…")
@@ -96,8 +101,11 @@ func newIndexCmd() *cobra.Command {
 			}
 			if full {
 				if err := checkPrunedResiduals(cmd.Context(), database, os.Stderr, st.StillChanging); err != nil {
-					return err
+					return errors.Join(err, sweepErr)
 				}
+			}
+			if sweepErr != nil {
+				return fmt.Errorf("raw retention sweep failed: %w", sweepErr)
 			}
 			return nil
 		},
@@ -149,6 +157,30 @@ func checkPrunedResiduals(ctx context.Context, database *db.DB, stderr io.Writer
 			fmt.Fprintf(stderr, "  %s\n", termsafe.Strip(u))
 		}
 		return fmt.Errorf("%d pruned session(s) could not be restored", len(residual))
+	}
+	return nil
+}
+
+// sweepRawRetention prunes raw_json of sessions that aged past the retention
+// window since they were written, with prune-raw's preflight (pruneEligible)
+// and in-transaction revalidation (PruneRawJSON). cutoff 0 means retention is
+// off. Skipped sessions are left intact without a message; one summary line is
+// printed only when something was pruned.
+func sweepRawRetention(ctx context.Context, database *db.DB, roots []string, cutoff int64, retention string, stdout io.Writer) error {
+	if cutoff == 0 {
+		return nil
+	}
+	_, eligible, _, err := pruneEligible(ctx, database, roots, cutoff, registry.All, "")
+	if err != nil {
+		return err
+	}
+	pr, err := sessions.PruneRawJSON(ctx, database, cutoff, registry.All, "", eligible, false)
+	if err != nil {
+		return err
+	}
+	if pr.Messages > 0 {
+		fmt.Fprintf(stdout, "raw retention %s: pruned %d messages across %d sessions (%s of raw_json)\n",
+			retention, pr.Messages, pr.PrunedSessions, humanBytes(pr.RemovedBytes))
 	}
 	return nil
 }

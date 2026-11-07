@@ -97,6 +97,11 @@ type Stats struct {
 	// StillChanging lists files a forced ingest gave up on because they kept
 	// changing while being read; they are also counted in FilesSkipped.
 	StillChanging []string
+	// RawCutoff is the unix-seconds cutoff this run dropped raw_json against
+	// (0 = retention off), and RawRetention the stored window it came from.
+	// `clio index` reuses both for its sweep and its residual check.
+	RawCutoff    int64
+	RawRetention string
 }
 
 // IngestAll walks projectsDir and ingests every .jsonl file. force re-ingests
@@ -120,8 +125,8 @@ func (ing *Ingester) IngestAll(ctx context.Context, projectsDir string, force bo
 		}
 		files = append(files, more...)
 	}
-	cutoff, _ := ing.rawCutoff(ctx)
-	var st Stats
+	cutoff, retention := ing.rawCutoff(ctx)
+	st := Stats{RawCutoff: cutoff, RawRetention: retention}
 	seen := make(map[string]bool, len(files))
 	for _, f := range files {
 		if seen[f] { // de-dup overlapping roots

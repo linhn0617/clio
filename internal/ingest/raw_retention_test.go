@@ -189,3 +189,19 @@ func TestRawRetentionBlanksOldCodexRollout(t *testing.T) {
 		t.Fatalf("codex rollout raw_json: %d blank, %d kept; want all blank", blank, kept)
 	}
 }
+
+func TestIngestAllReportsRawCutoff(t *testing.T) {
+	projects := t.TempDir()
+	writeSession(t, projects, "-Users-x-old", "sess-1", evUser1)
+	database := openTestDB(t)
+	st, err := New(database, nil).IngestAll(context.Background(), projects, false)
+	if err != nil || st.RawCutoff != 0 || st.RawRetention != "" {
+		t.Fatalf("unset: cutoff=%d retention=%q err=%v, want 0 \"\"", st.RawCutoff, st.RawRetention, err)
+	}
+	setRetention(t, database, "14d")
+	want := time.Now().Add(-14 * 24 * time.Hour).Unix()
+	st, err = New(database, nil).IngestAll(context.Background(), projects, false)
+	if err != nil || st.RawRetention != "14d" || st.RawCutoff < want-5 || st.RawCutoff > want+5 {
+		t.Fatalf("14d: cutoff=%d (want ~%d) retention=%q err=%v", st.RawCutoff, want, st.RawRetention, err)
+	}
+}

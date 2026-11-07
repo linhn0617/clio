@@ -110,23 +110,9 @@ func runPruneRaw(ctx context.Context, o pruneOpts) error {
 	}
 	roots = append(roots, ingest.NewWithBuiltinSources(database, discardLogger()).ExtraRoots()...)
 
-	candidates, err := sessions.PruneCandidates(ctx, database, o.cutoff, o.source, o.project)
+	candidates, eligible, skips, err := pruneEligible(ctx, database, roots, o.cutoff, o.source, o.project)
 	if err != nil {
 		return err
-	}
-	pending, err := sessions.PendingBackfillSessions(ctx, database)
-	if err != nil {
-		return err
-	}
-
-	var eligible []sessions.PrunePair
-	skips := map[string]int{} // reason -> count
-	for _, c := range candidates {
-		if reason := classifyPrunable(c, roots, pending); reason != "" {
-			skips[reason]++
-			continue
-		}
-		eligible = append(eligible, sessions.PrunePair{UUID: c.UUID, SourceFile: c.SourceFile})
 	}
 
 	// PruneRawJSON re-validates eligibility inside the write transaction and
@@ -135,7 +121,7 @@ func runPruneRaw(ctx context.Context, o pruneOpts) error {
 	if err != nil {
 		return err
 	}
-	printPruneSummary(o, len(candidates), pr.PrunedSessions, pr.Messages, pr.RemovedBytes, skips)
+	printPruneSummary(o, candidates, pr.PrunedSessions, pr.Messages, pr.RemovedBytes, skips)
 	// RacedOut = preflight-eligible sessions the in-transaction revalidation
 	// rejected (a concurrent change moved/aged/rescoped them) — distinct from an
 	// idempotent rerun (validated but already empty). Reported in real AND dry runs.
@@ -159,6 +145,29 @@ func runPruneRaw(ctx context.Context, o pruneOpts) error {
 	}
 	fmt.Fprintln(os.Stdout, "VACUUM done — file shrunk on disk.")
 	return nil
+}
+
+// pruneEligible is prune-raw's preflight, shared with the retention sweep in
+// `clio index`: sessions older than cutoff, minus those classifyPrunable rules
+// out, with the skip count per reason. PruneRawJSON re-validates the result.
+func pruneEligible(ctx context.Context, database *db.DB, roots []string, cutoff int64, source, project string) (candidates int, eligible []sessions.PrunePair, skips map[string]int, err error) {
+	cands, err := sessions.PruneCandidates(ctx, database, cutoff, source, project)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	pending, err := sessions.PendingBackfillSessions(ctx, database)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	skips = map[string]int{} // reason -> count
+	for _, c := range cands {
+		if reason := classifyPrunable(c, roots, pending); reason != "" {
+			skips[reason]++
+			continue
+		}
+		eligible = append(eligible, sessions.PrunePair{UUID: c.UUID, SourceFile: c.SourceFile})
+	}
+	return len(cands), eligible, skips, nil
 }
 
 // classifyPrunable returns "" when the candidate is prunable, else a skip reason.
