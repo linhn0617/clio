@@ -75,7 +75,7 @@ clio recall                               # 目前專案的近況摘要（開頭
 clio file-history internal/search/rank.go  # 哪些過去的 session 讀過／改過這個檔，最新在前
 clio doctor                     # 健康檢查，另含 hook／MCP／lease／索引新鮮度檢查
 clio doctor --quick             # 略過全庫掃描（db integrity、FTS 內容檢查、FTS bloat）；FTS 筆數比對照常執行
-clio prune-raw --older-than 30d --vacuum   # 回收空間：清空可還原的舊 raw_json（用 index --full 可復原）
+clio prune-raw --older-than 30d --vacuum   # 回收空間：清空可還原的舊 raw_json（用 index --full 可復原；若設了 raw-retention，先 clio config raw-retention off）
 clio config raw-retention 14d   # 之後只保留最近 14 天內有活動的 session 的 raw_json（還原：clio config raw-retention off，再 clio index --full）
 ```
 

@@ -76,7 +76,7 @@ clio recall                                # recent-activity digest for the curr
 clio file-history internal/search/rank.go  # which past sessions read/edited this file, newest first
 clio doctor                     # health check, plus hook / MCP / lease / index-freshness checks
 clio doctor --quick             # skips the whole-database scans (db integrity, FTS content check, FTS bloat); FTS row counts still compared
-clio prune-raw --older-than 30d --vacuum   # reclaim space: blank restorable old raw_json (reversible via index --full)
+clio prune-raw --older-than 30d --vacuum   # reclaim space: blank restorable old raw_json (reversible via index --full; with raw-retention set, run clio config raw-retention off first)
 clio config raw-retention 14d   # keep raw_json only for sessions active in the last 14 days, from now on (restore: clio config raw-retention off, then clio index --full)
 ```
 
