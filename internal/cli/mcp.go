@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -73,7 +74,7 @@ func newMCPCmd() *cobra.Command {
 			// already being renewed).
 			env := &leaderEnv{ingestMu: &sync.Mutex{}, renewEvery: leaderRenewInterval}
 			rt := newMCPRuntime(rw, projects, log, env.tryWalk)
-			env.ing, env.startWatcher = rt.ing, rt.watch
+			env.ing, env.startWatcher, env.sweep = rt.ing, rt.watch, rt.sweep
 			beforeRead := newBeforeRead(ctx, env, &isLeaderNow, projects, log)
 
 			waitRole := startLeaseRole(ctx, lease, isLeader, &isLeaderNow, env, projects, log)
@@ -98,6 +99,9 @@ var serveMCP = mcp.Serve
 type mcpRuntime struct {
 	ing   leaderIngester
 	watch func(ctx context.Context)
+	// sweep is the raw retention sweep the leader runs once after its startup
+	// catch-up; nil skips it.
+	sweep func(ctx context.Context, st ingest.Stats) error
 }
 
 // runWatcher is a seam so tests can capture the watcher newMCPRuntime builds.
@@ -112,6 +116,10 @@ var newMCPRuntime = func(rw *db.DB, projects string, log *slog.Logger, guard fun
 		if err := runWatcher(ctx, w); err != nil {
 			log.Warn("watcher stopped", "err", err)
 		}
+	}, sweep: func(ctx context.Context, st ingest.Stats) error {
+		// stdout carries the MCP protocol, so the summary line is dropped.
+		roots := append([]string{projects}, ing.ExtraRoots()...)
+		return sweepRawRetention(ctx, rw, roots, st.RawCutoff, st.RawRetention, io.Discard)
 	}}
 }
 
@@ -134,6 +142,8 @@ type leaderEnv struct {
 	renewEvery time.Duration
 	// startWatcher blocks until ctx is done.
 	startWatcher func(ctx context.Context)
+	// sweep runs once at the end of the startup catch-up (never before reads).
+	sweep func(ctx context.Context, st ingest.Stats) error
 }
 
 // tryWalk takes ingestMu without blocking. It returns the release func, or nil if
@@ -348,8 +358,9 @@ func startupCatchup(wctx context.Context, leaderFlag *atomic.Bool, env *leaderEn
 		}
 		return true
 	}
-	if _, err := env.ing.IngestAll(wctx, projects, false); err != nil && wctx.Err() == nil {
-		log.Warn("startup catch-up failed", "err", err)
+	st, ingestErr := env.ing.IngestAll(wctx, projects, false)
+	if ingestErr != nil && wctx.Err() == nil {
+		log.Warn("startup catch-up failed", "err", ingestErr)
 	}
 	if cancelled() {
 		return false
@@ -368,6 +379,16 @@ func startupCatchup(wctx context.Context, leaderFlag *atomic.Bool, env *leaderEn
 	}
 	if cancelled() {
 		return false
+	}
+	// Raw retention sweep, once per leader start: a failure is logged and the
+	// leader still starts (write-time drop keeps working either way).
+	if env.sweep != nil && ingestErr == nil {
+		if err := env.sweep(wctx, st); err != nil && wctx.Err() == nil {
+			log.Warn("raw retention sweep failed", "err", err)
+		}
+		if cancelled() {
+			return false
+		}
 	}
 	// Catch-up done: safe to serve reads without follower catch-up.
 	leaderFlag.Store(true)

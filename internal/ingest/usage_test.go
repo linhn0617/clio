@@ -181,7 +181,7 @@ func TestUsageScanFailedIsAtomicNoopFlaggedStale(t *testing.T) {
 		SourceFile: path, LastSize: fi.Size(), LastMTime: fi.ModTime().UnixNano(),
 		LastByteOffset: res.Consumed, UsageStale: 1, UsagePolicy: usageCountersPreserve,
 	}
-	if _, err := ing.commit(changeFull, res.Session, res.Messages, res.ClioIDs, failed, fst); err != nil {
+	if _, err := ing.commit(changeFull, res.Session, res.Messages, res.ClioIDs, failed, fst, 0); err != nil {
 		t.Fatal(err)
 	}
 	after := readUsageRows(t, database, "sess-u")
@@ -498,7 +498,7 @@ func benchTailCommitLong(b *testing.B, withUsage bool) {
 		fst := FileState{SourceFile: path, LastSize: fi.Size(), LastMTime: fi.ModTime().UnixNano(),
 			LastByteOffset: offset + res.Consumed, UsagePolicy: usageCountersReplace}
 		b.StartTimer()
-		if _, err := ing.commit(changeIncremental, res.Session, res.Messages, res.ClioIDs, usage, fst); err != nil {
+		if _, err := ing.commit(changeIncremental, res.Session, res.Messages, res.ClioIDs, usage, fst, 0); err != nil {
 			b.Fatal(err)
 		}
 		b.StopTimer()

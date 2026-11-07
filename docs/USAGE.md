@@ -327,7 +327,8 @@ last usage scan failed and values are last-known, not current.
 
 Blank stored `raw_json` (used only by `clio show --format raw|json`) for OLD
 sessions whose raw form is **restorable** from the source file. This is a
-reversible cache eviction — `clio index --full` re-derives the raw form — so
+reversible cache eviction — `clio index --full` re-derives the raw form (with a
+raw-retention window set, run `clio config raw-retention off` first) — so
 search, content, token usage, and activity data are untouched. Only sessions
 whose indexed snapshot still matches the on-disk file (size+mtime+offset, and a
 verified — not aborted — ingest) are pruned; anything unverifiable is skipped
@@ -335,7 +336,7 @@ and counted by reason. Space is freed inside the DB immediately but the file
 shrinks on disk only with `--vacuum` (or a later VACUUM).
 
 清空舊 session 的 `raw_json`（只有 `clio show --format raw|json` 用到），前提是
-其原始檔還在、可還原——這是**可還原的快取驅逐**（`clio index --full` 會重建），
+其原始檔還在、可還原——這是**可還原的快取驅逐**（`clio index --full` 會重建；若設了 raw-retention，先 `clio config raw-retention off`），
 搜尋、內容、token 用量、活動資料都不動。只 prune「索引快照仍與磁碟檔一致
 （size+mtime+offset 且非中止的 ingest）」的 session；無法確認的一律跳過並依原因
 計數。空間在 DB 內立即釋放，但檔案要 `--vacuum`（或之後 VACUUM）才會縮小。
@@ -351,7 +352,7 @@ shrinks on disk only with `--vacuum` (or a later VACUUM).
 ```bash
 clio prune-raw --older-than 30d --dry-run     # preview / 預覽
 clio prune-raw --older-than 30d --vacuum      # prune + shrink on disk / 回收
-clio index --full                             # restore raw form anytime / 隨時還原
+clio index --full                             # restore raw form (if raw-retention is set: clio config raw-retention off first) / 還原（若設了 raw-retention，先 off）
 ```
 
 After upgrading, a session becomes prunable only once a `clio index --full` has
@@ -362,6 +363,32 @@ instead of blank lines; `--format markdown` is unaffected.
 升級後，session 要先經一次 `clio index --full` 重新驗證才可 prune（既有列在此前
 一律 fail-closed）。prune 過的 session 跑 `clio show --format raw|json` 會印提示與
 還原指令而非空行；`--format markdown` 不受影響。
+
+### `clio config raw-retention` — keep raw_json for a rolling window / 滾動保留 raw_json
+
+Set once, and clio keeps `raw_json` only for sessions whose last activity is
+inside the window: every ingest (index, `--full`, MCP, watcher) stores older
+sessions without it, and `clio index` blanks sessions that aged past it, with the
+same restorability checks as `clio prune-raw`. While `clio mcp` is running,
+`clio index` does nothing; the MCP leader runs the same sweep once when it starts,
+so MCP-only use is covered. Search, content, usage and
+activity data are untouched. The window rolls, so a date is rejected. The file
+shrinks on disk only with `clio prune-raw --vacuum`. A stored value that no
+longer parses is treated as off (raw kept); `clio index` and `clio doctor` warn.
+
+設定一次後，clio 只為「最後活動在視窗內」的 session 保留 `raw_json`：每次 ingest
+（index、`--full`、MCP、watcher）寫入較舊的 session 時就不存，`clio index` 結尾也會把
+之後才變舊的 session 清空（可還原檢查與 `clio prune-raw` 相同）。`clio mcp` 執行中時
+`clio index` 不做任何事；改由 MCP leader 每次啟動時清一次，只用 MCP 的人同樣涵蓋。搜尋、內容、用量、
+活動資料都不動。視窗會滾動，所以不接受日期。檔案要 `clio prune-raw --vacuum` 才會縮小。
+存的值若無法解析就當作關閉（保留 raw），`clio index` 與 `clio doctor` 會警告。
+
+```bash
+clio config raw-retention          # print the window, or off / 印出目前設定或 off
+clio config raw-retention 14d      # keep 14 days / 保留 14 天
+clio config raw-retention off      # turn off / 關閉
+clio index --full                  # after off: restore raw_json / 關閉後還原 raw_json
+```
 
 ### `clio index` — (re)build the index / 建立索引
 
@@ -418,6 +445,7 @@ clio mcp              # run the stdio MCP server (Claude Code launches this) / �
 [ok  ] claude projects dir    /Users/lin/.claude/projects
 [ok  ] db integrity           ok
 [ok  ] fts index              32057 messages / 32057 fts rows
+[ok  ] raw retention          off
 [ok  ] ingest coverage        301 files on disk, 301 tracked
 [ok  ] db size                db 342.0 MB, ~2.5x source
 ```
@@ -528,6 +556,7 @@ clio list [--since 7d] [--project X] [--min-turns N] [--touched P] [--tool T] [-
 clio show <uuid-or-prefix> [--format markdown|json|raw] [--no-tool-output]
 clio activity --by file|command|tool|pattern|url [--since 7d] [--project X]
 clio index [--full]                              # (re)index manually
+clio config raw-retention [14d|off]              # rolling raw_json retention (restore: clio config raw-retention off, then clio index --full)
 clio recall [--tail-runes N]                     # recent-activity digest (current project), headed by the last session's closing message
 clio file-history <path> [--since 7d] [--limit N] # sessions that touched a file, newest first
 clio doctor                                      # health check

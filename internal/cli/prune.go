@@ -35,7 +35,11 @@ func newPruneRawCmd() *cobra.Command {
 sessions older than --older-than whose raw form is restorable from the source
 file. This is a reversible cache eviction: 'clio index --full' re-derives the
 raw form. Search, content, usage, and activity data are untouched. Space is
-reclaimed on disk only with --vacuum (or a later VACUUM).`,
+reclaimed on disk only with --vacuum (or a later VACUUM).
+
+With a raw retention window set ('clio config raw-retention'), 'clio index'
+prunes the same way on its own, and --full keeps old sessions blank: run
+'clio config raw-retention off' before 'clio index --full' to restore them.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validateSource(source); err != nil {
 				return err
@@ -110,23 +114,9 @@ func runPruneRaw(ctx context.Context, o pruneOpts) error {
 	}
 	roots = append(roots, ingest.NewWithBuiltinSources(database, discardLogger()).ExtraRoots()...)
 
-	candidates, err := sessions.PruneCandidates(ctx, database, o.cutoff, o.source, o.project)
+	candidates, eligible, skips, err := pruneEligible(ctx, database, roots, o.cutoff, o.source, o.project)
 	if err != nil {
 		return err
-	}
-	pending, err := sessions.PendingBackfillSessions(ctx, database)
-	if err != nil {
-		return err
-	}
-
-	var eligible []sessions.PrunePair
-	skips := map[string]int{} // reason -> count
-	for _, c := range candidates {
-		if reason := classifyPrunable(c, roots, pending); reason != "" {
-			skips[reason]++
-			continue
-		}
-		eligible = append(eligible, sessions.PrunePair{UUID: c.UUID, SourceFile: c.SourceFile})
 	}
 
 	// PruneRawJSON re-validates eligibility inside the write transaction and
@@ -135,7 +125,12 @@ func runPruneRaw(ctx context.Context, o pruneOpts) error {
 	if err != nil {
 		return err
 	}
-	printPruneSummary(o, len(candidates), pr.PrunedSessions, pr.Messages, pr.RemovedBytes, skips)
+	// An unreadable setting only drops the retention wording from the restore hint.
+	_, retention, rerr := database.RawRetention(ctx)
+	if rerr != nil {
+		retention = ""
+	}
+	printPruneSummary(o, candidates, pr.PrunedSessions, pr.Messages, pr.RemovedBytes, skips, retention)
 	// RacedOut = preflight-eligible sessions the in-transaction revalidation
 	// rejected (a concurrent change moved/aged/rescoped them) — distinct from an
 	// idempotent rerun (validated but already empty). Reported in real AND dry runs.
@@ -143,7 +138,9 @@ func runPruneRaw(ctx context.Context, o pruneOpts) error {
 		fmt.Fprintf(os.Stdout, "note: %d eligible session(s) were re-validated out by a concurrent change and left intact.\n", pr.RacedOut)
 	}
 
-	if o.dryRun || !o.doVacuum || pr.Messages == 0 {
+	// VACUUM even when nothing was pruned now: with a raw retention window set,
+	// `clio index` has already blanked old sessions and this is the way to shrink.
+	if o.dryRun || !o.doVacuum {
 		return nil
 	}
 	// Merge FTS tombstones first so VACUUM can actually return their pages.
@@ -161,10 +158,43 @@ func runPruneRaw(ctx context.Context, o pruneOpts) error {
 	return nil
 }
 
+// pruneEligible is prune-raw's preflight, shared with the retention sweep in
+// `clio index`: sessions older than cutoff, minus those classifyPrunable rules
+// out, with the skip count per reason. PruneRawJSON re-validates the result.
+func pruneEligible(ctx context.Context, database *db.DB, roots []string, cutoff int64, source, project string) (candidates int, eligible []sessions.PrunePair, skips map[string]int, err error) {
+	cands, err := sessions.PruneCandidates(ctx, database, cutoff, source, project)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	return classifyCandidates(ctx, database, roots, cands)
+}
+
+// classifyCandidates splits candidates into eligible pairs and per-reason skip
+// counts (classifyPrunable).
+func classifyCandidates(ctx context.Context, database *db.DB, roots []string, cands []sessions.PruneCandidate) (candidates int, eligible []sessions.PrunePair, skips map[string]int, err error) {
+	pending, err := sessions.PendingBackfillSessions(ctx, database)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	skips = map[string]int{} // reason -> count
+	for _, c := range cands {
+		if reason := classifyPrunable(c, roots, pending); reason != "" {
+			skips[reason]++
+			continue
+		}
+		eligible = append(eligible, sessions.PrunePair{UUID: c.UUID, SourceFile: c.SourceFile})
+	}
+	return len(cands), eligible, skips, nil
+}
+
 // classifyPrunable returns "" when the candidate is prunable, else a skip reason.
 // The DB-side facts (aborted, offset) and filesystem facts (regular/readable/
 // under-root/size+mtime match) together establish restorability; pending
 // backfill is a separate read-only exclusion.
+// statSource stats a candidate's transcript; a variable so tests can see which
+// candidates the preflight actually examined on disk.
+var statSource = os.Stat
+
 func classifyPrunable(c sessions.PruneCandidate, roots []string, pending map[string]bool) string {
 	if c.Aborted != 0 {
 		return "unverified"
@@ -175,7 +205,7 @@ func classifyPrunable(c sessions.PruneCandidate, roots []string, pending map[str
 	if pending[c.UUID] {
 		return "pending-backfill"
 	}
-	fi, err := os.Stat(c.SourceFile)
+	fi, err := statSource(c.SourceFile)
 	if err != nil {
 		return "missing"
 	}
@@ -211,7 +241,7 @@ func underAnyRoot(path string, roots []string) bool {
 	return false
 }
 
-func printPruneSummary(o pruneOpts, candidates, eligible int, msgs, removed int64, skips map[string]int) {
+func printPruneSummary(o pruneOpts, candidates, eligible int, msgs, removed int64, skips map[string]int, retention string) {
 	verb := "pruned"
 	if o.dryRun {
 		verb = "would prune"
@@ -240,9 +270,15 @@ func printPruneSummary(o pruneOpts, candidates, eligible int, msgs, removed int6
 	if !o.doVacuum && msgs > 0 {
 		fmt.Fprintln(os.Stdout, "space is freed in the DB but the file shrinks only on VACUUM — re-run with --vacuum, or run VACUUM manually.")
 	}
-	if msgs > 0 {
-		fmt.Fprintln(os.Stdout, "restore the raw form anytime with `clio index --full`.")
+	if msgs == 0 {
+		return
 	}
+	if retention == "" {
+		fmt.Fprintln(os.Stdout, "restore the raw form anytime with `clio index --full`.")
+		return
+	}
+	// --full alone keeps sessions older than the window blank.
+	fmt.Fprintf(os.Stdout, "raw retention is %s — to restore the raw form, run `clio config raw-retention off`, then `clio index --full`.\n", retention)
 }
 
 // humanBytes renders a byte count compactly (MB/kB).

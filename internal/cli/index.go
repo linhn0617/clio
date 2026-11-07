@@ -85,6 +85,13 @@ func newIndexCmd() *cobra.Command {
 				}
 				fmt.Fprintf(os.Stdout, "purged: %d session source(s) whose transcript no longer exists\n", n)
 			}
+			// A sweep failure does not undo the committed ingest; it fails the
+			// command after the remaining checks have run.
+			roots := append([]string{projects}, ing.ExtraRoots()...)
+			sweepErr := sweepRawRetention(cmd.Context(), database, roots, st.RawCutoff, st.RawRetention, os.Stdout)
+			if sweepErr != nil {
+				sweepErr = fmt.Errorf("raw retention sweep failed: %w", sweepErr)
+			}
 			if full {
 				// After --purge-missing so its deletes' tombstones are merged too.
 				fmt.Fprintln(os.Stdout, "optimizing fts index…")
@@ -95,14 +102,14 @@ func newIndexCmd() *cobra.Command {
 				}
 			}
 			if full {
-				if err := checkPrunedResiduals(cmd.Context(), database, os.Stderr, st.StillChanging); err != nil {
-					return err
+				if err := checkPrunedResiduals(cmd.Context(), database, os.Stderr, st.StillChanging, st.RawCutoff); err != nil {
+					return errors.Join(err, sweepErr)
 				}
 			}
-			return nil
+			return sweepErr
 		},
 	}
-	cmd.Flags().BoolVar(&full, "full", false, "Force a full re-index instead of incremental")
+	cmd.Flags().BoolVar(&full, "full", false, "Force a full re-index instead of incremental; restores pruned raw_json (with a raw retention set, run 'clio config raw-retention off' first)")
 	cmd.Flags().BoolVar(&purgeMissing, "purge-missing", false, "Delete indexed sessions whose source transcript no longer exists (kept by default)")
 	cmd.Flags().BoolVar(&force, "force", false, "With --purge-missing: delete even when many transcripts went missing together (normally refused as a likely unmounted directory)")
 	return cmd
@@ -122,8 +129,10 @@ func optimizeFTS(ctx context.Context, d *db.DB) error {
 // session whose file became unreadable/undiscoverable would stay pruned
 // silently — surface it with a non-zero exit rather than reporting a clean
 // success. Sessions whose file was still changing are left out: the summary
-// already names those files, and they are restored once the file is idle.
-func checkPrunedResiduals(ctx context.Context, database *db.DB, stderr io.Writer, stillChanging []string) error {
+// already names those files, and they are restored once the file is idle. So are
+// sessions older than rawCutoff (0 = retention off), which the active raw
+// retention keeps blank on purpose; an undated session is never one of them.
+func checkPrunedResiduals(ctx context.Context, database *db.DB, stderr io.Writer, stillChanging []string, rawCutoff int64) error {
 	all, err := sessions.PrunedResiduals(ctx, database)
 	if err != nil {
 		return fmt.Errorf("pruned-residual check failed: %w", err)
@@ -135,9 +144,13 @@ func checkPrunedResiduals(ctx context.Context, database *db.DB, stderr io.Writer
 	var residual []string
 	for _, u := range all {
 		var src string
-		err := database.QueryRowContext(ctx, `SELECT source_file FROM sessions WHERE uuid = ?`, u).Scan(&src)
+		var last sql.NullInt64 // NULL: undated, never outside the retention window
+		err := database.QueryRowContext(ctx, `SELECT source_file, COALESCE(ended_at, started_at) FROM sessions WHERE uuid = ?`, u).Scan(&src, &last)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("pruned-residual check failed: %w", err)
+		}
+		if err == nil && rawCutoff > 0 && last.Valid && last.Int64 < rawCutoff {
+			continue // blank by retention, not a failed restore
 		}
 		if !busy[src] {
 			residual = append(residual, u)
@@ -149,6 +162,36 @@ func checkPrunedResiduals(ctx context.Context, database *db.DB, stderr io.Writer
 			fmt.Fprintf(stderr, "  %s\n", termsafe.Strip(u))
 		}
 		return fmt.Errorf("%d pruned session(s) could not be restored", len(residual))
+	}
+	return nil
+}
+
+// sweepRawRetention prunes raw_json of sessions that aged past the retention
+// window since they were written, with prune-raw's preflight checks
+// (classifyCandidates) over the sessions that still hold raw_json
+// (RetentionCandidates) and its in-transaction revalidation
+// (PruneRetainedRawJSON). Neither treats an undated session as aged out.
+// cutoff 0 means retention is off. Skipped sessions are left intact without a
+// message; one summary line is printed only when something was pruned.
+func sweepRawRetention(ctx context.Context, database *db.DB, roots []string, cutoff int64, retention string, stdout io.Writer) error {
+	if cutoff == 0 {
+		return nil
+	}
+	cands, err := sessions.RetentionCandidates(ctx, database, cutoff)
+	if err != nil {
+		return err
+	}
+	_, eligible, _, err := classifyCandidates(ctx, database, roots, cands)
+	if err != nil {
+		return err
+	}
+	pr, err := sessions.PruneRetainedRawJSON(ctx, database, cutoff, eligible)
+	if err != nil {
+		return err
+	}
+	if pr.Messages > 0 {
+		fmt.Fprintf(stdout, "raw retention %s: pruned %d messages across %d sessions (%s of raw_json)\n",
+			retention, pr.Messages, pr.PrunedSessions, humanBytes(pr.RemovedBytes))
 	}
 	return nil
 }

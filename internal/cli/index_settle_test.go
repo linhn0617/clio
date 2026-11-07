@@ -58,7 +58,7 @@ func TestCheckPrunedResidualsSkipsStillChangingFiles(t *testing.T) {
 	mustPrune(t, database, time.Now().Add(-14*24*time.Hour).Unix(), "sess-old")
 
 	var errOut bytes.Buffer
-	if err := checkPrunedResiduals(context.Background(), database, &errOut, []string{path}); err != nil {
+	if err := checkPrunedResiduals(context.Background(), database, &errOut, []string{path}, 0); err != nil {
 		t.Errorf("err = %v for a session whose file is still changing\n%s", err, errOut.String())
 	}
 	if strings.Contains(errOut.String(), "sess-old") {
@@ -66,7 +66,7 @@ func TestCheckPrunedResidualsSkipsStillChangingFiles(t *testing.T) {
 	}
 
 	errOut.Reset()
-	err := checkPrunedResiduals(context.Background(), database, &errOut, []string{"/elsewhere/other.jsonl"})
+	err := checkPrunedResiduals(context.Background(), database, &errOut, []string{"/elsewhere/other.jsonl"}, 0)
 	if err == nil || !strings.Contains(err.Error(), "could not be restored") || !strings.Contains(errOut.String(), "sess-old") {
 		t.Errorf("err = %v, stderr = %q; want the residual reported", err, errOut.String())
 	}

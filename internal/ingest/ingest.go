@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/linhn0617/clio/internal/db"
@@ -44,6 +45,9 @@ type Ingester struct {
 	// settle paces a forced ingest's retries of a file that changed while it was
 	// read. New sets the production values; tests shorten them.
 	settle settlePolicy
+	// retentionWarn logs an unreadable or invalid raw retention setting once per
+	// Ingester: the MCP server ingests on every read and watcher event.
+	retentionWarn sync.Once
 }
 
 // settlePolicy: before each of up to retries re-ingests, wait until the file's
@@ -93,6 +97,11 @@ type Stats struct {
 	// StillChanging lists files a forced ingest gave up on because they kept
 	// changing while being read; they are also counted in FilesSkipped.
 	StillChanging []string
+	// RawCutoff is the unix-seconds cutoff this run dropped raw_json against
+	// (0 = retention off), and RawRetention the stored window it came from.
+	// `clio index` reuses both for its sweep and its residual check.
+	RawCutoff    int64
+	RawRetention string
 }
 
 // IngestAll walks projectsDir and ingests every .jsonl file. force re-ingests
@@ -116,7 +125,8 @@ func (ing *Ingester) IngestAll(ctx context.Context, projectsDir string, force bo
 		}
 		files = append(files, more...)
 	}
-	var st Stats
+	cutoff, retention := ing.rawCutoff(ctx)
+	st := Stats{RawCutoff: cutoff, RawRetention: retention}
 	seen := make(map[string]bool, len(files))
 	for _, f := range files {
 		if seen[f] { // de-dup overlapping roots
@@ -127,7 +137,7 @@ func (ing *Ingester) IngestAll(ctx context.Context, projectsDir string, force bo
 			return st, err
 		}
 		st.FilesScanned++
-		n, ingested, stale, err := ing.ingestOnce(ctx, f, force)
+		n, ingested, stale, err := ing.ingestOnce(ctx, f, force, cutoff)
 		// A full re-ingest that lost the race with a live writer would otherwise be
 		// lost: the next incremental pass resumes from the old offset. Retry it once
 		// the file settles. An incremental pass just catches up next time.
@@ -143,7 +153,7 @@ func (ing *Ingester) IngestAll(ctx context.Context, projectsDir string, force bo
 			if !settled {
 				break // a re-read of a file still being written would only go stale again
 			}
-			n, ingested, stale, err = ing.ingestOnce(ctx, f, force)
+			n, ingested, stale, err = ing.ingestOnce(ctx, f, force, cutoff)
 		}
 		if err == nil && stale && force {
 			// The last attempt's commit also reads a removed file as changed.
@@ -201,21 +211,40 @@ func (ing *Ingester) waitSettled(ctx context.Context, path string) (bool, error)
 // and whether any ingest happened (false = skipped as unchanged). The whole
 // file is committed in one transaction.
 func (ing *Ingester) IngestFile(ctx context.Context, path string, force bool) (int, bool, error) {
-	n, ingested, _, err := ing.ingestOnce(ctx, path, force)
+	cutoff, _ := ing.rawCutoff(ctx)
+	n, ingested, _, err := ing.ingestOnce(ctx, path, force, cutoff)
 	return n, ingested, err
+}
+
+// rawCutoff turns the raw retention setting into this run's cutoff in unix
+// seconds (0 = keep raw_json) and returns the stored window it came from. It
+// fails open: a setting that cannot be read or no longer parses keeps raw_json,
+// and is logged once.
+func (ing *Ingester) rawCutoff(ctx context.Context) (cutoff int64, retention string) {
+	win, stored, err := ing.db.RawRetention(ctx)
+	if err != nil {
+		ing.retentionWarn.Do(func() {
+			ing.log.Warn("raw retention setting ignored; keeping raw_json", "value", stored, "err", err)
+		})
+		return 0, ""
+	}
+	if win == 0 {
+		return 0, ""
+	}
+	return time.Now().Add(-win).Unix(), stored
 }
 
 // ingestOnce is one IngestFile attempt; stale reports that the commit was
 // aborted because the file changed on disk after it was read.
-func (ing *Ingester) ingestOnce(ctx context.Context, path string, force bool) (n int, ingested, stale bool, err error) {
-	n, ingested, err = ing.ingestFile(ctx, path, force)
+func (ing *Ingester) ingestOnce(ctx context.Context, path string, force bool, rawCutoff int64) (n int, ingested, stale bool, err error) {
+	n, ingested, err = ing.ingestFile(ctx, path, force, rawCutoff)
 	if errors.Is(err, errStaleSnapshot) {
 		return 0, false, true, nil
 	}
 	return n, ingested, false, err
 }
 
-func (ing *Ingester) ingestFile(ctx context.Context, path string, force bool) (int, bool, error) {
+func (ing *Ingester) ingestFile(ctx context.Context, path string, force bool, rawCutoff int64) (int, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, false, err
 	}
@@ -337,7 +366,7 @@ func (ing *Ingester) ingestFile(ctx context.Context, path string, force bool) (i
 			fst.UsagePolicy = usageCountersReplace
 		}
 	}
-	n, err := ing.commit(kind, res.Session, res.Messages, res.ClioIDs, res.Usage, fst)
+	n, err := ing.commit(kind, res.Session, res.Messages, res.ClioIDs, res.Usage, fst, rawCutoff)
 	if err != nil {
 		if errors.Is(err, errSourceConflict) {
 			return 0, false, nil // refused as a cross-source conflict (recorded for doctor)
@@ -509,7 +538,7 @@ func (ing *Ingester) checkSourceConflict(tx *sql.Tx, uuid, source, sourceFile st
 // debt: row-at-a-time inserts inside one transaction per file, no prepared-statement reuse or
 // multi-row batching; revisit if a re-measurement after the redaction prefilter shows commit() dominating.
 
-func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Message, excludedToolUses []string, usage *usageResult, fs FileState) (int, error) {
+func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Message, excludedToolUses []string, usage *usageResult, fs FileState, rawCutoff int64) (int, error) {
 	tx, err := ing.db.Begin()
 	if err != nil {
 		return 0, err
@@ -564,6 +593,7 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 	}
 
 	inserted := 0
+	var firstID int64 // id of this commit's first inserted row, for the retention pass
 	for _, m := range msgs {
 		res, err := tx.Exec(`INSERT OR IGNORE INTO messages(session_uuid, seq, ts, role, content, raw_json) VALUES (?,?,?,?,?,?)`,
 			m.SessionUUID, m.Seq, nullZero(m.TS), m.Role, m.Content, m.RawJSON)
@@ -581,6 +611,11 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 			continue
 		}
 		inserted++
+		if firstID == 0 {
+			if firstID, err = res.LastInsertId(); err != nil {
+				return 0, err
+			}
+		}
 		if len(m.ToolCalls) > 0 || len(m.Targets) > 0 {
 			id, err := res.LastInsertId()
 			if err != nil {
@@ -645,6 +680,11 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 	if err := ing.upsertSession(tx, sess, totalUserTurns, kind); err != nil {
 		return 0, err
 	}
+	if rawCutoff > 0 && firstID > 0 {
+		if err := blankExpiredRaw(tx, sess.UUID, firstID, rawCutoff); err != nil {
+			return 0, err
+		}
+	}
 
 	monotonic := kind != changeFull
 	if err := ing.upsertIngestState(tx, fs, monotonic); err != nil {
@@ -655,6 +695,27 @@ func (ing *Ingester) commit(kind changeKind, sess model.Session, msgs []model.Me
 		return 0, err
 	}
 	return inserted, nil
+}
+
+// blankExpiredRaw applies the raw retention window to the rows this commit
+// inserted: ids from firstID up (AUTOINCREMENT ids only grow, and this
+// transaction holds the write lock). The age is read back after upsertSession,
+// so it is exactly the COALESCE(ended_at, started_at) the retention sweep
+// compares. A session with neither timestamp has no known age and keeps its
+// raw_json (decision 2026-11-07; manual prune-raw still ages it as 0). A
+// raw_json-only UPDATE leaves FTS alone (migration 0012).
+func blankExpiredRaw(tx *sql.Tx, uuid string, firstID, cutoff int64) error {
+	var last sql.NullInt64
+	if err := tx.QueryRow(`SELECT COALESCE(ended_at, started_at) FROM sessions WHERE uuid = ?`, uuid).Scan(&last); err != nil {
+		return fmt.Errorf("raw retention: read session age: %w", err)
+	}
+	if !last.Valid || last.Int64 >= cutoff {
+		return nil
+	}
+	if _, err := tx.Exec(`UPDATE messages SET raw_json = '' WHERE id >= ? AND session_uuid = ?`, firstID, uuid); err != nil {
+		return fmt.Errorf("raw retention: blank raw_json: %w", err)
+	}
+	return nil
 }
 
 // upsertIngestState writes the file watermark into ingest_state. When monotonic
@@ -724,8 +785,12 @@ func (ing *Ingester) upsertSession(tx *sql.Tx, s model.Session, userTurns int, k
 	// Incremental: bump ended_at, set turn_count to the authoritative total, and
 	// fill project_path/title/parent_session/agent_type if still missing (subagent
 	// metadata can arrive in a later line, e.g. attributionAgent on the assistant turn).
+	// A batch with no timestamp (EndedAt 0, bound as NULL by nullZero) keeps the
+	// stored ended_at: SQLite's multi-argument MAX returns NULL when any argument
+	// is NULL, which would make a live session look as old as its start.
+	ended := nullZero(s.EndedAt)
 	_, err := tx.Exec(`UPDATE sessions SET
-		ended_at = MAX(COALESCE(ended_at,0), ?),
+		ended_at = CASE WHEN COALESCE(?, 0) = 0 THEN ended_at ELSE MAX(COALESCE(ended_at,0), ?) END,
 		turn_count = ?,
 		project_path = COALESCE(NULLIF(project_path,''), ?),
 		title = COALESCE(NULLIF(title,''), ?),
@@ -733,7 +798,7 @@ func (ing *Ingester) upsertSession(tx *sql.Tx, s model.Session, userTurns int, k
 		agent_type = COALESCE(NULLIF(agent_type,''), ?),
 		source = COALESCE(NULLIF(source,''), ?)
 		WHERE uuid = ?`,
-		nullZero(s.EndedAt), userTurns, nullEmpty(s.ProjectPath), nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType), nullEmpty(s.Source), s.UUID)
+		ended, ended, userTurns, nullEmpty(s.ProjectPath), nullEmpty(s.Title), nullEmpty(s.ParentSession), nullEmpty(s.AgentType), nullEmpty(s.Source), s.UUID)
 	if err != nil {
 		return err
 	}
