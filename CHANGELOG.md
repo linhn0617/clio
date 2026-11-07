@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-07
+
+A raw_json retention window that a full reindex respects (openspec change
+`raw-json-retention-policy`). No reindex is needed after upgrading. The new migration
+0018 repairs `ended_at` of sessions an older clio had cleared. If you set a retention
+window, older sessions lose their raw form, and `clio show --format raw|json` is the
+only command that reads it.
+
+### Added
+
+- **`clio config raw-retention [14d|12h|30m|off]`** sets a rolling retention window.
+  It is stored in the index and is unset by default. Sessions whose last activity is
+  older than the window keep their content, search, usage and activity data but not
+  their raw form:
+  - New rows of such sessions are written without raw_json on every ingest path, so
+    `clio index --full` no longer writes old raw back.
+  - Sessions that age past the window are pruned at the end of `clio index` and once
+    when an MCP leader starts. While `clio mcp` runs, `clio index` does nothing, so
+    the next leader start does it.
+  - Sessions with no timestamp are never aged out.
+  - To restore, run `clio config raw-retention off`, then `clio index --full`.
+- `clio doctor` shows the retention setting.
+
+### Fixed
+
+- **`clio prune-raw --vacuum` now shrinks the file even when nothing is left to
+  prune.** Before, it skipped VACUUM in that case, so with retention on the
+  documented way to reclaim space did nothing.
+- **An append without timestamps no longer clears a session's `ended_at`.** The
+  session then aged by its start time and could be treated as old. Migration 0018
+  restores the cleared values from the newest message timestamp.
+- The restore hints of `prune-raw`, `show` and `index --full` name the retention
+  setting when one is set.
+
 ## [0.23.0] - 2026-10-31
 
 A full reindex no longer drops a session that is being written, and release binaries

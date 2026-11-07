@@ -45,8 +45,15 @@ Traditional Chinese READMEs SHALL stay in sync.
 
 - **WHEN** a user reads `docs/USAGE.md`
 - **THEN** every user-facing command — including `ask`, `activity`, `recall`,
-  `install-hook`, and `uninstall-hook` — SHALL have a reference entry or a
-  cheat-sheet line
+  `install-hook`, `uninstall-hook`, and `config raw-retention` — SHALL have a
+  reference entry or a cheat-sheet line
+
+#### Scenario: Raw retention restore path is documented
+
+- **WHEN** a user reads either README or `docs/USAGE.md`
+- **THEN** it SHALL show `clio config raw-retention` and state that restoring raw_json
+  under a retention window takes `clio config raw-retention off` and then
+  `clio index --full`
 
 ### Requirement: README documents transcript retention
 
