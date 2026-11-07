@@ -37,8 +37,10 @@ user has to prune by hand after every full reindex. Design:
 
 ## Impact
 
-- New: `internal/db/migrations/0017_settings.sql`, `internal/db/settings.go`,
-  `internal/cli/config.go`.
+- New: `internal/db/migrations/0017_settings.sql`,
+  `internal/db/migrations/0018_backfill_session_ended_at.sql` (backfills `ended_at`
+  the old incremental upsert cleared; rewrites existing rows once),
+  `internal/db/settings.go`, `internal/cli/config.go`.
 - Changed: `internal/timeutil/timeutil.go`, `internal/ingest/ingest.go`,
   `internal/cli/{index,prune,show,root,mcp}.go`, `internal/doctor/doctor.go`, both READMEs,
   `docs/USAGE.md`.
