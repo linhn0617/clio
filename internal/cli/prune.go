@@ -35,7 +35,11 @@ func newPruneRawCmd() *cobra.Command {
 sessions older than --older-than whose raw form is restorable from the source
 file. This is a reversible cache eviction: 'clio index --full' re-derives the
 raw form. Search, content, usage, and activity data are untouched. Space is
-reclaimed on disk only with --vacuum (or a later VACUUM).`,
+reclaimed on disk only with --vacuum (or a later VACUUM).
+
+With a raw retention window set ('clio config raw-retention'), 'clio index'
+prunes the same way on its own, and --full keeps old sessions blank: run
+'clio config raw-retention off' before 'clio index --full' to restore them.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validateSource(source); err != nil {
 				return err

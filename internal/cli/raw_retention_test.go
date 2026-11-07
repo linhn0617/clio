@@ -277,3 +277,62 @@ func TestMCPStartupSkipsSweepWhenIngestFails(t *testing.T) {
 		t.Fatalf("sweep ran %d time(s) after a failed startup ingest, want 0", n)
 	}
 }
+
+// §3.4 restore path: with retention set, --full blanks the old session and exits
+// 0; after `config raw-retention off`, --full restores it.
+func TestRetentionOffThenFullRestores(t *testing.T) {
+	database, _ := pruneSandbox(t, "sess-old", 30)
+	putRetention(t, database, "14d")
+	database.Close()
+	if out, err := runIndexCmd(t, "--full"); err != nil {
+		t.Fatalf("index --full with retention: %v\n%s", err, out)
+	}
+	d := reopen(t)
+	if rawJSONOf(t, d, "sess-old")[0] != "" {
+		t.Fatal("--full kept raw_json of a session outside the window")
+	}
+	d.Close()
+	if _, err := runConfigCmd(t, "raw-retention", "off"); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runIndexCmd(t, "--full"); err != nil {
+		t.Fatalf("index --full after off: %v\n%s", err, out)
+	}
+	d = reopen(t)
+	defer d.Close()
+	if rawJSONOf(t, d, "sess-old")[0] == "" {
+		t.Fatal("retention off + --full did not restore raw_json")
+	}
+}
+
+func TestHelpTextNamesRetentionRestorePath(t *testing.T) {
+	const hint = "clio config raw-retention off"
+	if !strings.Contains(newPruneRawCmd().Long, hint) {
+		t.Errorf("prune-raw help lacks %q", hint)
+	}
+	if f := newIndexCmd().Flags().Lookup("full"); f == nil || !strings.Contains(f.Usage, hint) {
+		t.Errorf("index --full help lacks %q", hint)
+	}
+}
+
+// §3.4: sessions the active retention says must be blank are not residuals; a
+// pruned session inside the window still is, and so is any pruned session when
+// retention is off.
+func TestCheckPrunedResidualsExcludesRetentionBlanked(t *testing.T) {
+	database, _ := pruneSandbox(t, "sess-old", 30) // last activity 30 days ago
+	mustPrune(t, database, time.Now().Add(-14*24*time.Hour).Unix(), "sess-old")
+	var errOut bytes.Buffer
+	cutoff14 := time.Now().Add(-14 * 24 * time.Hour).Unix()
+	if err := checkPrunedResiduals(context.Background(), database, &errOut, nil, cutoff14); err != nil {
+		t.Fatalf("retention 14d: err=%v for a session it must blank\n%s", err, errOut.String())
+	}
+	errOut.Reset()
+	cutoff60 := time.Now().Add(-60 * 24 * time.Hour).Unix()
+	if err := checkPrunedResiduals(context.Background(), database, &errOut, nil, cutoff60); err == nil || !strings.Contains(errOut.String(), "sess-old") {
+		t.Fatalf("retention 60d: err=%v stderr=%q; want the in-window session reported", err, errOut.String())
+	}
+	errOut.Reset()
+	if err := checkPrunedResiduals(context.Background(), database, &errOut, nil, 0); err == nil || !strings.Contains(errOut.String(), "sess-old") {
+		t.Fatalf("retention off: err=%v stderr=%q; want the residual reported", err, errOut.String())
+	}
+}

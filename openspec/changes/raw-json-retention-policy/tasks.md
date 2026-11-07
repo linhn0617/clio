@@ -15,7 +15,7 @@
 ## 4. clio index
 
 - [x] 4.1 Retention sweep through prune-raw's shared preflight in `clio index` and once at MCP leader startup; per-read catch-ups do not sweep.
-- [ ] 4.2 Residual check excludes retention-blanked sessions; help text states the restore path.
+- [x] 4.2 Residual check excludes retention-blanked sessions; help text states the restore path.
 
 ## 5. Visibility and docs
 

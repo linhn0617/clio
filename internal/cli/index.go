@@ -100,7 +100,7 @@ func newIndexCmd() *cobra.Command {
 				}
 			}
 			if full {
-				if err := checkPrunedResiduals(cmd.Context(), database, os.Stderr, st.StillChanging); err != nil {
+				if err := checkPrunedResiduals(cmd.Context(), database, os.Stderr, st.StillChanging, st.RawCutoff); err != nil {
 					return errors.Join(err, sweepErr)
 				}
 			}
@@ -110,7 +110,7 @@ func newIndexCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&full, "full", false, "Force a full re-index instead of incremental")
+	cmd.Flags().BoolVar(&full, "full", false, "Force a full re-index instead of incremental; restores pruned raw_json (with a raw retention set, run 'clio config raw-retention off' first)")
 	cmd.Flags().BoolVar(&purgeMissing, "purge-missing", false, "Delete indexed sessions whose source transcript no longer exists (kept by default)")
 	cmd.Flags().BoolVar(&force, "force", false, "With --purge-missing: delete even when many transcripts went missing together (normally refused as a likely unmounted directory)")
 	return cmd
@@ -130,8 +130,10 @@ func optimizeFTS(ctx context.Context, d *db.DB) error {
 // session whose file became unreadable/undiscoverable would stay pruned
 // silently — surface it with a non-zero exit rather than reporting a clean
 // success. Sessions whose file was still changing are left out: the summary
-// already names those files, and they are restored once the file is idle.
-func checkPrunedResiduals(ctx context.Context, database *db.DB, stderr io.Writer, stillChanging []string) error {
+// already names those files, and they are restored once the file is idle. So are
+// sessions older than rawCutoff (0 = retention off), which the active raw
+// retention keeps blank on purpose.
+func checkPrunedResiduals(ctx context.Context, database *db.DB, stderr io.Writer, stillChanging []string, rawCutoff int64) error {
 	all, err := sessions.PrunedResiduals(ctx, database)
 	if err != nil {
 		return fmt.Errorf("pruned-residual check failed: %w", err)
@@ -143,9 +145,13 @@ func checkPrunedResiduals(ctx context.Context, database *db.DB, stderr io.Writer
 	var residual []string
 	for _, u := range all {
 		var src string
-		err := database.QueryRowContext(ctx, `SELECT source_file FROM sessions WHERE uuid = ?`, u).Scan(&src)
+		var last int64
+		err := database.QueryRowContext(ctx, `SELECT source_file, COALESCE(ended_at, started_at, 0) FROM sessions WHERE uuid = ?`, u).Scan(&src, &last)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("pruned-residual check failed: %w", err)
+		}
+		if err == nil && rawCutoff > 0 && last < rawCutoff {
+			continue // blank by retention, not a failed restore
 		}
 		if !busy[src] {
 			residual = append(residual, u)
