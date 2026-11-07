@@ -19,7 +19,9 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: go test -race ./...
+        # -timeout 20m: under -race the ingest package took 389s (Go 1.27) and 278s (Go 1.26)
+        # in CI run 42358286981 (2026-11-07); Go's per-binary default of 10m left little room.
+        run: go test -race -timeout 20m ./...
 
   # The minimum Go in go.mod, kept apart so the required "test" check keeps its name.
   test-go1_26:
@@ -33,7 +35,9 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: go test -race ./...
+        # -timeout 20m: under -race the ingest package took 389s (Go 1.27) and 278s (Go 1.26)
+        # in CI run 42358286981 (2026-11-07); Go's per-binary default of 10m left little room.
+        run: go test -race -timeout 20m ./...
 
   build:
     runs-on: ubuntu-latest
