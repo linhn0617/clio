@@ -28,8 +28,11 @@ func TestConfigRawRetentionRoundTrip(t *testing.T) {
 	if out, err := runConfigCmd(t, "raw-retention"); err != nil || strings.TrimSpace(out) != "off" {
 		t.Fatalf("unset: out=%q err=%v, want \"off\"", out, err)
 	}
-	if _, err := runConfigCmd(t, "raw-retention", "14d"); err != nil {
-		t.Fatal(err)
+	// While clio mcp runs, `clio index` refuses to run, so the confirmation must
+	// also name the MCP leader start that sweeps in that case.
+	const setMsg = "raw retention: 14d — raw_json of sessions idle longer than this is not kept; existing sessions are blanked by the next `clio index`, or, while clio mcp is running, when its leader next starts\n"
+	if out, err := runConfigCmd(t, "raw-retention", "14d"); err != nil || out != setMsg {
+		t.Fatalf("set: out=%q err=%v, want %q", out, err, setMsg)
 	}
 	if out, err := runConfigCmd(t, "raw-retention"); err != nil || strings.TrimSpace(out) != "14d" {
 		t.Fatalf("after set: out=%q err=%v, want \"14d\"", out, err)

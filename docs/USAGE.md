@@ -368,15 +368,18 @@ instead of blank lines; `--format markdown` is unaffected.
 
 Set once, and clio keeps `raw_json` only for sessions whose last activity is
 inside the window: every ingest (index, `--full`, MCP, watcher) stores older
-sessions without it, and `clio index` blanks sessions that aged past it (also once when an MCP leader starts, so MCP-only use
-is covered), with the same restorability checks as `clio prune-raw`. Search, content, usage and
+sessions without it, and `clio index` blanks sessions that aged past it, with the
+same restorability checks as `clio prune-raw`. While `clio mcp` is running,
+`clio index` does nothing; the MCP leader runs the same sweep once when it starts,
+so MCP-only use is covered. Search, content, usage and
 activity data are untouched. The window rolls, so a date is rejected. The file
 shrinks on disk only with `clio prune-raw --vacuum`. A stored value that no
 longer parses is treated as off (raw kept); `clio index` and `clio doctor` warn.
 
 設定一次後，clio 只為「最後活動在視窗內」的 session 保留 `raw_json`：每次 ingest
 （index、`--full`、MCP、watcher）寫入較舊的 session 時就不存，`clio index` 結尾也會把
-之後才變舊的 session 清空（MCP leader 啟動時也會清一次，只用 MCP 的人同樣涵蓋；可還原檢查與 `clio prune-raw` 相同）。搜尋、內容、用量、
+之後才變舊的 session 清空（可還原檢查與 `clio prune-raw` 相同）。`clio mcp` 執行中時
+`clio index` 不做任何事；改由 MCP leader 每次啟動時清一次，只用 MCP 的人同樣涵蓋。搜尋、內容、用量、
 活動資料都不動。視窗會滾動，所以不接受日期。檔案要 `clio prune-raw --vacuum` 才會縮小。
 存的值若無法解析就當作關閉（保留 raw），`clio index` 與 `clio doctor` 會警告。
 

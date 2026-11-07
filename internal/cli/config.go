@@ -31,8 +31,10 @@ func newConfigRawRetentionCmd() *cobra.Command {
 A VALUE such as 14d or 12h keeps raw_json (used only by 'clio show --format
 raw|json') only for sessions whose last activity is within that window: every
 ingest stores older sessions without it, and 'clio index' blanks sessions that
-aged past it, with the same restorability checks as 'clio prune-raw'. The
-window rolls, so a date is rejected. "off" removes the setting.
+aged past it, with the same restorability checks as 'clio prune-raw'. While
+'clio mcp' is running, 'clio index' does nothing; the MCP leader runs the same
+sweep once when it starts. The window rolls, so a date is rejected. "off"
+removes the setting.
 
 To get the raw form back: 'clio config raw-retention off', then
 'clio index --full'. The file shrinks on disk only with
@@ -95,7 +97,7 @@ To get the raw form back: 'clio config raw-retention off', then
 				if err := database.PutSetting(ctx, db.RawRetentionKey, value); err != nil {
 					return err
 				}
-				fmt.Fprintf(out, "raw retention: %s — raw_json of sessions idle longer than this is not kept; `clio index` removes it from existing ones\n", value)
+				fmt.Fprintf(out, "raw retention: %s — raw_json of sessions idle longer than this is not kept; existing sessions are blanked by the next `clio index`, or, while clio mcp is running, when its leader next starts\n", value)
 				return nil
 			}
 		},
