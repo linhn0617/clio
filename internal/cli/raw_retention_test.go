@@ -8,9 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/linhn0617/clio/internal/db"
 	"github.com/linhn0617/clio/internal/ingest"
@@ -204,5 +207,73 @@ func TestMCPStartupSweepFailureOnlyLogs(t *testing.T) {
 	}
 	if !strings.Contains(logBuf.String(), "raw retention sweep failed") || !strings.Contains(logBuf.String(), "boom") {
 		t.Fatalf("sweep failure not logged:\n%s", logBuf.String())
+	}
+}
+
+// The whole `clio mcp` command, with the runtime newMCPRuntime really builds
+// (its ingester and its sweep), sweeps an aged session at leader startup: this
+// pins the wiring in newMCPCmd (env.sweep = rt.sweep) and the sweep
+// newMCPRuntime returns. Only the watcher is replaced, to signal that the
+// startup catch-up has finished (the leader starts it right after).
+func TestMCPCommandStartupSweepsAgedSession(t *testing.T) {
+	database, _ := pruneSandbox(t, "sess-old", 30)
+	putRetention(t, database, "14d")
+	database.Close()
+	origRT, origServe := newMCPRuntime, serveMCP
+	t.Cleanup(func() { newMCPRuntime, serveMCP = origRT, origServe })
+	caughtUp := make(chan struct{})
+	var once sync.Once
+	newMCPRuntime = func(rw *db.DB, projects string, log *slog.Logger, guard func() func()) mcpRuntime {
+		rt := origRT(rw, projects, log, guard)
+		rt.watch = func(ctx context.Context) {
+			once.Do(func() { close(caughtUp) })
+			<-ctx.Done()
+		}
+		return rt
+	}
+	serveMCP = func(*server.MCPServer) error {
+		select {
+		case <-caughtUp:
+		case <-time.After(30 * time.Second):
+			t.Error("leader startup catch-up did not finish")
+		}
+		return nil
+	}
+	cmd := newMCPCmd()
+	cmd.SetContext(context.Background())
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	d := reopen(t)
+	defer d.Close()
+	if raw := rawJSONOf(t, d, "sess-old"); raw[0] != "" {
+		t.Fatal("clio mcp leader startup did not sweep the aged session")
+	}
+}
+
+// failingIngester is a fakeIngester whose IngestAll fails outright.
+type failingIngester struct{ *fakeIngester }
+
+func (f failingIngester) IngestAll(context.Context, string, bool) (ingest.Stats, error) {
+	f.ingestAll.Add(1)
+	return ingest.Stats{RawCutoff: 1, RawRetention: "14d"}, errors.New("walk failed")
+}
+
+// When the startup IngestAll fails the sweep is skipped (its Stats are not
+// trusted), and the leader flag is still published.
+func TestMCPStartupSkipsSweepWhenIngestFails(t *testing.T) {
+	fake := failingIngester{&fakeIngester{}}
+	env := testEnv(fake, time.Hour)
+	var sweeps atomic.Int32
+	env.sweep = func(context.Context, ingest.Stats) error { sweeps.Add(1); return nil }
+	var flag atomic.Bool
+	if !startupCatchup(context.Background(), &flag, env, t.TempDir(), discardLogger(), false) || !flag.Load() {
+		t.Fatal("a failed startup ingest stopped the leader's startup")
+	}
+	if fake.ingestAll.Load() != 1 {
+		t.Fatalf("IngestAll calls = %d, want 1", fake.ingestAll.Load())
+	}
+	if n := sweeps.Load(); n != 0 {
+		t.Fatalf("sweep ran %d time(s) after a failed startup ingest, want 0", n)
 	}
 }
